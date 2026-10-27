@@ -1865,7 +1865,7 @@ impl ProjectIndex<'_> {
                     if let Some(found) = configured(*extensions).or_else(walked) {
                         // `node10` looked in `node_modules` in its TypeScript
                         // pass, before this one reads `paths` and `baseUrl`
-                        // again (`p3*`).
+                        // again.
                         if lookup == PathLookup::Node10 && *extensions == Extensions::JavaScript {
                             let typescript = Extensions::TypeScript;
                             match self.node_modules_finds(
@@ -1925,16 +1925,15 @@ impl ProjectIndex<'_> {
 
     /// What a `typeRoots` directory gives a non-relative specifier outside
     /// `classic`, which TypeScript looks in after `node_modules` in a pass
-    /// whose extensions hold declarations, as tsc 5.9.3, 6.0.3 and 7.0.2
-    /// trace it (`tr_*`, `tq_*`): `None` where no type root holds a
-    /// declaration for it (`type_root_declaration`). Where one does, a
-    /// `node_modules` package or `@types` declaration the pass finds comes
-    /// first (`node_modules_finds`), which pack does not read but for a
-    /// workspace's package; where none does, the declaration is the one; and
-    /// where pack cannot tell, which an `exports` or `typesVersions` it does
-    /// not follow decides, it is disclosed. One a root outside the project
-    /// may hold is disclosed only where the rest of the lookup names a file
-    /// in it (`TypeRooted::Outside`).
+    /// whose extensions hold declarations, as tsc 5.9.3, 6.0.3 and 7.0.2 trace
+    /// it: `None` where no type root holds a declaration for it
+    /// (`type_root_declaration`). Where one does, a `node_modules` package or
+    /// `@types` declaration the pass finds comes first (`node_modules_finds`),
+    /// which pack does not read but for a workspace's package; where none does,
+    /// the declaration is the one; and where pack cannot tell, which an
+    /// `exports` or `typesVersions` it does not follow decides, it is
+    /// disclosed. One a root outside the project may hold is disclosed only
+    /// where the rest of the lookup names a file in it (`TypeRooted::Outside`).
     fn type_root_specifier(
         &self,
         specifier: &str,
@@ -2348,42 +2347,39 @@ impl ProjectIndex<'_> {
                 .is_some_and(|path| self.script_target(&path, language).is_some())
     }
 
-    /// What a workspace package's name, or a subpath below it, stands for,
-    /// or the name of the package whose `package.json` is the importer's
-    /// nearest, which no workspace need list; `None` where the specifier
-    /// names neither. A package with `exports` exports only what it maps:
-    /// the name stands for the file `.` maps to, a subpath for the one
-    /// `./<subpath>` or the pattern key matching it maps to
-    /// (`export_subpath`), read through its conditions (`export_target`).
-    /// TypeScript reads the targets as tsc 5.9.3, 6.0.3 and 7.0.2 trace it
-    /// (`e_targets_*`): each with a pass's extensions (`field_file`), the
-    /// whole walk with TypeScript's before the whole walk with JavaScript's
+    /// What a workspace package's name, or a subpath below it, stands for, or
+    /// the name of the package whose `package.json` is the importer's nearest,
+    /// which no workspace need list; `None` where the specifier names neither.
+    /// A package with `exports` exports only what it maps: the name stands for
+    /// the file `.` maps to, a subpath for the one `./<subpath>` or the pattern
+    /// key matching it maps to (`export_subpath`), read through its conditions
+    /// (`export_target`). TypeScript reads the targets as tsc 5.9.3, 6.0.3 and
+    /// 7.0.2 trace it: each with a pass's extensions (`field_file`), the whole
+    /// walk with TypeScript's before the whole walk with JavaScript's
     /// (`workspace_passes`), the package's own name read from inside it
     /// (`loadModuleFromSelfNameReference`) without the `node_modules` look
-    /// between them, under the options of the project compiling the
-    /// importer (`SelfName`): in one walk where it reads JavaScript, and
-    /// with a target in an output directory read as its input
-    /// (`output_input`); and where neither pass finds one, the file of any
-    /// kind a target spells exactly. Without `exports`, or under `node10`, which does not
-    /// read it, the name or a subpath stands for the file TypeScript's
-    /// `node_modules` lookup takes below the package's directory
-    /// (`manifests::package_module`), as tsc 5.9.3, 6.0.3 and 7.0.2 trace
-    /// it: the name by the first of `typings`, `types` and `main` it sets,
-    /// else its `index`, a subpath as the file it names, then as a
-    /// directory, an ES import adding no extension, and a `typesVersions`
-    /// leaving either open. It looks with TypeScript's extensions, then
-    /// with JavaScript's (`workspace_passes`); else a subpath stands for a
-    /// file of any kind it spells exactly. Where the module resolution is
-    /// left open, a subpath stands for the file below the package it
-    /// spells, as for Node and the bundlers, for which the name stands for
-    /// its `main`, else its `index`, where no `module` or `browser` field
-    /// names another (`bundler_entry_differs`), and where no `node_modules`
-    /// before the package takes the name (`installed_before`), with or
-    /// without `exports`. Under `classic`, which reads
-    /// no `package.json`, no name is a package's. A package whose file pack
-    /// cannot determine is disclosed: a condition the importer's
-    /// configuration leaves open, an entry naming no file, or a name two
-    /// packages of the workspace give.
+    /// between them, under the options of the project compiling the importer
+    /// (`SelfName`): in one walk where it reads JavaScript, and with a target
+    /// in an output directory read as its input (`output_input`); and where
+    /// neither pass finds one, the file of any kind a target spells exactly.
+    /// Without `exports`, or under `node10`, which does not read it, the name
+    /// or a subpath stands for the file TypeScript's `node_modules` lookup
+    /// takes below the package's directory (`manifests::package_module`), as
+    /// tsc 5.9.3, 6.0.3 and 7.0.2 trace it: the name by the first of `typings`,
+    /// `types` and `main` it sets, else its `index`, a subpath as the file it
+    /// names, then as a directory, an ES import adding no extension, and a
+    /// `typesVersions` leaving either open. It looks with TypeScript's
+    /// extensions, then with JavaScript's (`workspace_passes`); else a subpath
+    /// stands for a file of any kind it spells exactly. Where the module
+    /// resolution is left open, a subpath stands for the file below the package
+    /// it spells, as for Node and the bundlers, for which the name stands for
+    /// its `main`, else its `index`, where no `module` or `browser` field names
+    /// another (`bundler_entry_differs`), and where no `node_modules` before
+    /// the package takes the name (`installed_before`), with or without
+    /// `exports`. Under `classic`, which reads no `package.json`, no name is a
+    /// package's. A package whose file pack cannot determine is disclosed: a
+    /// condition the importer's configuration leaves open, an entry naming no
+    /// file, or a name two packages of the workspace give.
     fn workspace_package(
         &self,
         specifier: &str,
@@ -2399,10 +2395,9 @@ impl ProjectIndex<'_> {
             ImportMode::Exports(conditions) => Some(conditions),
         };
         let (name, subpath) = split_package_name(specifier);
-        // A package's own name read from inside it goes through the
-        // `exports` of the importer's package scope, whether or not a
-        // workspace lists the package (`loadModuleFromSelfNameReference`;
-        // `zr_*`, `s_*`).
+        // A package's own name read from inside it goes through the `exports`
+        // of the importer's package scope, whether or not a workspace lists the
+        // package (`loadModuleFromSelfNameReference`).
         let scope = nearest(&self.manifests.package_scopes, &from.directory);
         if let Some((directory, scope)) = scope
             && scope.name.as_deref() == Some(name)
@@ -2554,8 +2549,8 @@ impl ProjectIndex<'_> {
         }
         // tsc reads a package's own name from inside it before it looks in
         // `node_modules`, under the options of the project compiling the
-        // importer (`s_*`, `m_*`): in one walk with every extension where it
-        // reads JavaScript, else in both with nothing between them.
+        // importer: in one walk with every extension where it reads JavaScript,
+        // else in both with nothing between them.
         let read = |options: Option<&SelfName>| {
             let pass = |extensions| pass(extensions, options);
             let walks =
@@ -2597,22 +2592,21 @@ impl ProjectIndex<'_> {
     }
 
     /// What a `#` specifier names through the `imports` of the importer's
-    /// package scope, its nearest `package.json` of any package, as tsc
-    /// 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler`, `node16` and
-    /// `nodenext` (`zi_*`, `i*_*`), which read it after `paths`; `None` where
-    /// the specifier is no `#` one, the scope has no `imports`, or the
-    /// module resolution, `node10` or `classic`, reads none. Its exact key,
-    /// else the pattern key matching it (`mapped_key`), maps it through the
-    /// conditions TypeScript matches, as `exports` does, in one walk with
-    /// every extension (`#p`) under the options of the project compiling the
-    /// importer, so a target in an output directory is read as its input
-    /// (`zi_imports_outdir_*`; `output_input`), and a target naming a package
-    /// as that package (`package_target`); where it finds none, the file of
-    /// any kind a target spells exactly is the one. Node and the bundlers
-    /// read a target as the script module it spells. `#` names nothing, nor
-    /// does `#/…` under 5; 6 and 7 read it under `bundler` and `nodenext` but
-    /// not `node16`, which pack does not tell apart, nor which Node reads it,
-    /// so it is disclosed there, as is a specifier no key maps.
+    /// package scope, its nearest `package.json` of any package, as tsc 5.9.3,
+    /// 6.0.3 and 7.0.2 trace it under `bundler`, `node16` and `nodenext`, which
+    /// read it after `paths`; `None` where the specifier is no `#` one, the
+    /// scope has no `imports`, or the module resolution, `node10` or `classic`,
+    /// reads none. Its exact key, else the pattern key matching it
+    /// (`mapped_key`), maps it through the conditions TypeScript matches, as
+    /// `exports` does, in one walk with every extension (`#p`) under the
+    /// options of the project compiling the importer, so a target in an output
+    /// directory is read as its input (`output_input`), and a target naming a
+    /// package as that package (`package_target`); where it finds none, the
+    /// file of any kind a target spells exactly is the one. Node and the
+    /// bundlers read a target as the script module it spells. `#` names
+    /// nothing, nor does `#/…` under 5; 6 and 7 read it under `bundler` and
+    /// `nodenext` but not `node16`, which pack does not tell apart, nor which
+    /// Node reads it, so it is disclosed there, as is a specifier no key maps.
     fn package_import(
         &self,
         specifier: &str,
@@ -2730,26 +2724,23 @@ impl ProjectIndex<'_> {
         }
     }
 
-    /// The input tsc reads in place of an `exports` target a package's own
-    /// name reaches from inside it, as tsc 5.9.3, 6.0.3 and 7.0.2 map a
-    /// target in an output directory back to the input it is built from
-    /// (`tryLoadInputFileForPath`; `s_rootdir_*`, `s_decldir_*`, `m_*`):
-    /// where the configuration lies in the package's directory and sets
-    /// `declarationDir` or `outDir`, a target in either, in that order,
-    /// written as `.mjs`, `.cjs`, `.js`, `.json`, `.d.mts`, `.d.cts` or
-    /// `.d.ts`, names the file at its path below the root with an input
-    /// extension the pass holds in place of that one — `.mts`, `.mjs` for
-    /// the first kind, `.cts`, `.cjs` for the second, else `.tsx`, `.ts`,
-    /// `.jsx`, `.js` — the first that exists, read as the pass reads a
+    /// The input tsc reads in place of an `exports` target a package's own name
+    /// reaches from inside it, as tsc 5.9.3, 6.0.3 and 7.0.2 map a target in an
+    /// output directory back to the input it is built from
+    /// (`tryLoadInputFileForPath`): where the configuration lies in the
+    /// package's directory and sets `declarationDir` or `outDir`, a target in
+    /// either, in that order, written as `.mjs`, `.cjs`, `.js`, `.json`,
+    /// `.d.mts`, `.d.cts` or `.d.ts`, names the file at its path below the root
+    /// with an input extension the pass holds in place of that one — `.mts`,
+    /// `.mjs` for the first kind, `.cts`, `.cjs` for the second, else `.tsx`,
+    /// `.ts`, `.jsx`, `.js` — the first that exists, read as the pass reads a
     /// target; 7 takes any of them in either pass and reads it with every
-    /// extension, so a `.js` input names a declaration beside it
-    /// (`m_ts7_*`). The root is `rootDir`, else, under 6 and 7, the
-    /// configuration's directory, and under 5 that of a `composite` one,
-    /// else each directory from the filesystem's root down to the package's
-    /// in turn, where 5 reports TS2209 (`m_guess_*`, `m_guessorder_*`,
-    /// `m_srccfg*`, `m_srccomp_*`). `None` where it maps none; undetermined
-    /// where a configuration the chain could not read may set an option the
-    /// mapping reads.
+    /// extension, so a `.js` input names a declaration beside it. The root is
+    /// `rootDir`, else, under 6 and 7, the configuration's directory, and under
+    /// 5 that of a `composite` one, else each directory from the filesystem's
+    /// root down to the package's in turn, where 5 reports TS2209. `None` where
+    /// it maps none; undetermined where a configuration the chain could not
+    /// read may set an option the mapping reads.
     fn output_input(
         &self,
         path: &[String],
@@ -2793,8 +2784,8 @@ impl ProjectIndex<'_> {
             ".cjs" | ".d.cts" => &[".cts", ".cjs"],
             _ => &[".tsx", ".ts", ".jsx", ".js"],
         };
-        // 7 maps to an input of any extension in either walk and reads it
-        // with every extension (`m_ts7_*`); 5 and 6 keep to the walk's.
+        // 7 maps to an input of any extension in either walk and reads it with
+        // every extension; 5 and 6 keep to the walk's.
         let extensions = match own.major {
             7.. => Extensions::All,
             _ => extensions,
@@ -2829,19 +2820,18 @@ impl ProjectIndex<'_> {
         None
     }
 
-    /// What TypeScript's lookup of a workspace package takes, `pass`
-    /// reading the package with a pass's extensions, `None` where it reads
-    /// no file. tsc looks in every `node_modules` from the importer's
-    /// directory up, `@types` included, with TypeScript's extensions, then
-    /// with JavaScript's (`node_modules_finds`), and reads the package where
-    /// that walk reaches a link to it, or, where none is installed, as a
-    /// package manager links it, after every `node_modules` on disk: in each
-    /// pass, no edge where a `node_modules` before the link holds a file for
-    /// the specifier and a disclosure where one may (a registry copy of the
-    /// package, `@types/<name>`; `n_*`, `zn_near_*`), else what the pass
-    /// finds in the package; and between the passes the same past the link.
-    /// `between` is whether tsc looks there, which it does not for a
-    /// package's own name read from inside it
+    /// What TypeScript's lookup of a workspace package takes, `pass` reading
+    /// the package with a pass's extensions, `None` where it reads no file. tsc
+    /// looks in every `node_modules` from the importer's directory up, `@types`
+    /// included, with TypeScript's extensions, then with JavaScript's
+    /// (`node_modules_finds`), and reads the package where that walk reaches a
+    /// link to it, or, where none is installed, as a package manager links it,
+    /// after every `node_modules` on disk: in each pass, no edge where a
+    /// `node_modules` before the link holds a file for the specifier and a
+    /// disclosure where one may (a registry copy of the package,
+    /// `@types/<name>`), else what the pass finds in the package; and between
+    /// the passes the same past the link. `between` is whether tsc looks there,
+    /// which it does not for a package's own name read from inside it
     /// (`loadModuleFromSelfNameReference`), nor pack where the module
     /// resolution is left open.
     fn workspace_passes(
@@ -4929,12 +4919,11 @@ mod tests {
     }
 
     /// pytest 9 reads, in each directory, the first of `pytest.toml`,
-    /// `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `pyproject.toml`,
-    /// `tox.ini` and `setup.cfg` that configures it — the first four
-    /// whatever they hold, `pyproject.toml` through its native `[tool.pytest]`
-    /// or its `[tool.pytest.ini_options]` but not both — and a native table's
-    /// `pythonpath` only as an array (`py9_native`, `py9_pytesttoml`, and each
-    /// case run under pytest 9.1.1).
+    /// `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `pyproject.toml`, `tox.ini`
+    /// and `setup.cfg` that configures it — the first four whatever they hold,
+    /// `pyproject.toml` through its native `[tool.pytest]` or its
+    /// `[tool.pytest.ini_options]` but not both — and a native table's
+    /// `pythonpath` only as an array (each case run under pytest 9.1.1).
     #[test]
     fn pytest_reads_the_first_configuration_file_pytest_9_reads() {
         let cases = [
@@ -5468,16 +5457,16 @@ mod tests {
     }
 
     /// TypeScript 7 reads no `baseUrl`: tsc 7.0.2 reports TS5102, resolves
-    /// nothing below it and `paths` against the configuration's own
-    /// directory, where 5.9.3 and 6.0.3 resolve both against `baseUrl`
-    /// (`baseurl7`). So where no TypeScript major is installed or declared —
-    /// none, or a range fixing none (`latest`) — a configuration setting
-    /// `baseUrl` is read under 5 and 6 alone, as it is where the version
-    /// installed is no number (`nonumber`). Under a major above 7, installed
-    /// (`inst8`) or declared (`caret8`), and a range admitting only 7 and
-    /// above (`>=7`, `7.x || 8.x`), it keeps 7, and a specifier `baseUrl`
-    /// decides is disclosed, with the range where one is declared. A set of
-    /// comparators within one major fixes it (`ts_range`).
+    /// nothing below it and `paths` against the configuration's own directory,
+    /// where 5.9.3 and 6.0.3 resolve both against `baseUrl` (`baseurl7`). So
+    /// where no TypeScript major is installed or declared — none, or a range
+    /// fixing none (`latest`) — a configuration setting `baseUrl` is read under
+    /// 5 and 6 alone, as it is where the version installed is no number
+    /// (`nonumber`). Under a major above 7, installed (`inst8`) or declared
+    /// (`caret8`), and a range admitting only 7 and above (`>=7`, `7.x ||
+    /// 8.x`), it keeps 7, and a specifier `baseUrl` decides is disclosed, with
+    /// the range where one is declared. A set of comparators within one major
+    /// fixes it.
     #[test]
     fn typescript_7_reads_no_base_url() {
         let source = "import a from \"lib/x\";\nimport b from \"@/lib/x\";\n";
@@ -5985,11 +5974,10 @@ mod tests {
 
     /// `classic` takes a declaration the project holds in a
     /// `node_modules/@types` or a `typeRoots` directory over the walk's
-    /// JavaScript file, as tsc 5.9.3 and 6.0.3 trace it (`tq2_classic`): the
-    /// edge to it where pack reads it, a scope mangled (`@acme/d` as
-    /// `acme__d`) and a `types` naming a TypeScript file naming it (`pj`,
-    /// `tt2`); a subpath through `typesVersions`, which pack does not
-    /// follow, is disclosed (`tv/sub`).
+    /// JavaScript file, as tsc 5.9.3 and 6.0.3 trace it: the edge to it where
+    /// pack reads it, a scope mangled (`@acme/d` as `acme__d`) and a `types`
+    /// naming a TypeScript file naming it (`pj`, `tt2`); a subpath through
+    /// `typesVersions`, which pack does not follow, is disclosed (`tv/sub`).
     #[test]
     fn classic_takes_a_declaration_the_project_holds() {
         let source = "import \"@acme/d\";\nimport \"pj\";\nimport \"tv/sub\";\nimport \"tt2\";\n";
@@ -6049,34 +6037,33 @@ mod tests {
 
     /// Outside `classic`, TypeScript looks in the `typeRoots` after
     /// `node_modules` in a pass whose extensions hold declarations, as tsc
-    /// 5.9.3, 6.0.3 and 7.0.2 trace it (`tr_*`): a declaration a root in the
-    /// project holds is the edge where no package or `@types` declaration
-    /// there takes the specifier first (`jq`, `lib2/util`, `@sc/x`, `pk`
-    /// through its `package.json`, and `nm`, a package holding nothing).
-    /// `node10` makes that pass before the JavaScript one, so a package of
-    /// JavaScript alone gives way to it (`ul`, `ex`, whose `exports` it does
-    /// not read), where `bundler` and `node16` take the package's file in
-    /// their one pass (`ul`), an `exports` pack does not follow leaving it
-    /// open (`ex`), as does a `typesVersions` (`tv`, which 5.9.3 and 6.0.3
-    /// pass over and 7.0.2 does not). A package that is a JavaScript file
-    /// (`tf`) gives way under `node10` alike (`tf_*`). A package with its own
-    /// declaration (`tl`, `tt` through its `types`) or one in `@types`
-    /// (`at`) comes first in every mode. A `types` naming a TypeScript file
-    /// names it (`tn`). A package whose `types` names no file is read by its
-    /// `main` in JavaScript's pass, which `bundler` and `node16` make before
-    /// the type root and `node10` after it (`tm`, `q3c_*`). `node16` for
-    /// an ES import adds no extension and reads no `index` there, nor in
-    /// `node_modules` but for a package's name whose `package.json` exists,
-    /// which tsc's `index.js` fallback reads (`ei`, `p1c_*`), not for one
-    /// without (`en`, `q1b_*`) or for a subpath (`es/sub`, `q1e_*`), so
-    /// only `pk`, `tn`, `en`, `es/sub` and `@sc/q` name one. A declaration
-    /// a root holds where pack does not read it, beside a package whose
-    /// `exports` pack does not follow, forms no edge and is not disclosed,
-    /// as neither is a file pack reads (`ox` in `./node_modules/@org/types`);
-    /// a root that is no `node_modules/@types` keeps a scope as written
-    /// (`@sc/q` in `./src/@types`). A subpath below a type root is not
-    /// read through the `typesVersions` of the `package.json` above it,
-    /// which only a `node_modules` package's subpath goes through (`vs/sub`).
+    /// 5.9.3, 6.0.3 and 7.0.2 trace it: a declaration a root in the project
+    /// holds is the edge where no package or `@types` declaration there takes
+    /// the specifier first (`jq`, `lib2/util`, `@sc/x`, `pk` through its
+    /// `package.json`, and `nm`, a package holding nothing). `node10` makes
+    /// that pass before the JavaScript one, so a package of JavaScript alone
+    /// gives way to it (`ul`, `ex`, whose `exports` it does not read), where
+    /// `bundler` and `node16` take the package's file in their one pass (`ul`),
+    /// an `exports` pack does not follow leaving it open (`ex`), as does a
+    /// `typesVersions` (`tv`, which 5.9.3 and 6.0.3 pass over and 7.0.2 does
+    /// not). A package that is a JavaScript file (`tf`) gives way under
+    /// `node10` alike. A package with its own declaration (`tl`, `tt` through
+    /// its `types`) or one in `@types` (`at`) comes first in every mode. A
+    /// `types` naming a TypeScript file names it (`tn`). A package whose
+    /// `types` names no file is read by its `main` in JavaScript's pass, which
+    /// `bundler` and `node16` make before the type root and `node10` after it
+    /// (`tm`). `node16` for an ES import adds no extension and reads no `index`
+    /// there, nor in `node_modules` but for a package's name whose
+    /// `package.json` exists, which tsc's `index.js` fallback reads (`ei`), not
+    /// for one without (`en`) or for a subpath (`es/sub`), so only `pk`, `tn`,
+    /// `en`, `es/sub` and `@sc/q` name one. A declaration a root holds where
+    /// pack does not read it, beside a package whose `exports` pack does not
+    /// follow, forms no edge and is not disclosed, as neither is a file pack
+    /// reads (`ox` in `./node_modules/@org/types`); a root that is no
+    /// `node_modules/@types` keeps a scope as written (`@sc/q` in
+    /// `./src/@types`). A subpath below a type root is not read through the
+    /// `typesVersions` of the `package.json` above it, which only a
+    /// `node_modules` package's subpath goes through (`vs/sub`).
     #[test]
     fn a_type_root_declaration_outside_classic_comes_after_node_modules() {
         let specifiers = [
@@ -6287,14 +6274,13 @@ mod tests {
         assert_eq!(read[3], (set(&esm), set(&[])));
     }
 
-    /// The `node_modules` lookup before a type root is kept apart per
-    /// directory and per module resolution, as tsc 5.9.3, 6.0.3 and 7.0.2
-    /// trace it (`q6b_node16_per_directory`): under `node16` an ES import of
-    /// `en`, whose package holds no `package.json`, reads no `index` and
-    /// takes the type root's declaration, where a CommonJS one from the same
-    /// directory takes the package's `index.js`; `nested`, which a
-    /// `node_modules` in `src/app` declares, is that one's there and the
-    /// type root's from `src`.
+    /// The `node_modules` lookup before a type root is kept apart per directory
+    /// and per module resolution, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it: under
+    /// `node16` an ES import of `en`, whose package holds no `package.json`,
+    /// reads no `index` and takes the type root's declaration, where a CommonJS
+    /// one from the same directory takes the package's `index.js`; `nested`,
+    /// which a `node_modules` in `src/app` declares, is that one's there and
+    /// the type root's from `src`.
     #[test]
     fn node_modules_lookups_are_kept_apart_per_directory_and_resolution() {
         let source = |specifier| format!("import \"{specifier}\";\n");
@@ -6340,11 +6326,10 @@ mod tests {
         assert_eq!(edges(3), vec!["typings/nested/index.d.ts"]);
     }
 
-    /// The `node_modules` lookup goes on past the project's root, as tsc
-    /// 5.9.3, 6.0.3 and 7.0.2 trace it (`q7_nm_above_root_*`): a package of
-    /// JavaScript alone installed above the root takes `ul` before the type
-    /// root's declaration under `bundler`, and gives way to it under
-    /// `node10`.
+    /// The `node_modules` lookup goes on past the project's root, as tsc 5.9.3,
+    /// 6.0.3 and 7.0.2 trace it: a package of JavaScript alone installed above
+    /// the root takes `ul` before the type root's declaration under `bundler`,
+    /// and gives way to it under `node10`.
     #[test]
     fn a_node_modules_above_the_projects_root_comes_before_a_type_root() {
         let modes = [("bundler", "esnext", false), ("node10", "commonjs", true)];
@@ -6419,10 +6404,9 @@ mod tests {
     }
 
     /// A `package.json` field a declaration lookup reads names a TypeScript
-    /// file too, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it (`tm_bundler`): a
-    /// type root's `types` of `lib/t` names `lib/t.ts`. One writing `.ts`
-    /// is looked up as its declaration first (`f_field_decl_*`): `tw`'s
-    /// `./index.ts` names `index.d.ts` beside it.
+    /// file too, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it: a type root's `types`
+    /// of `lib/t` names `lib/t.ts`. One writing `.ts` is looked up as its
+    /// declaration first: `tw`'s `./index.ts` names `index.d.ts` beside it.
     #[test]
     fn a_declaration_lookup_takes_a_typescript_file_a_field_names() {
         let nodes = vec![
@@ -6753,21 +6737,21 @@ mod tests {
         assert!(graph.version_undetermined_imports.is_empty());
     }
 
-    /// Outside `classic`, TypeScript looks the path a relative specifier or
-    /// a `paths` substitution spells up as each module resolution does, as
-    /// tsc 5.9.3, 6.0.3 and 7.0.2 trace it (`rel_*`, `dir_*`): a file before
-    /// a directory, `.ts`, `.tsx`, `.d.ts`, then `.js`, `.jsx`, a written
-    /// extension giving way to those (`./w2.js` as `w2.ts`), and in a
-    /// directory the `types` or `main` of its `package.json`, with those
-    /// extensions in place of the one it writes, else its `index`. `node10`
-    /// under 5 makes the TypeScript pass over the file and the directory
-    /// before the JavaScript one, so it takes `dirfile/index.ts` over
-    /// `dirfile.js` and `pn/index.ts` over the `main`'s `pn/lib/n.js`, which
-    /// `bundler` and `node16` take. `node16` for an ES import adds no
-    /// extension and reads no directory: only `./both.js`, `./w2.js` and
-    /// `@/both.js` name a file. A `package.json` holding `typesVersions`
-    /// leaves the directory open, disclosed as such (`./pv`). A path ending in `/` names a
-    /// directory alone: `./x/` is `x/index.ts`, not `x.ts`.
+    /// Outside `classic`, TypeScript looks the path a relative specifier or a
+    /// `paths` substitution spells up as each module resolution does, as tsc
+    /// 5.9.3, 6.0.3 and 7.0.2 trace it: a file before a directory, `.ts`,
+    /// `.tsx`, `.d.ts`, then `.js`, `.jsx`, a written extension giving way to
+    /// those (`./w2.js` as `w2.ts`), and in a directory the `types` or `main`
+    /// of its `package.json`, with those extensions in place of the one it
+    /// writes, else its `index`. `node10` under 5 makes the TypeScript pass
+    /// over the file and the directory before the JavaScript one, so it takes
+    /// `dirfile/index.ts` over `dirfile.js` and `pn/index.ts` over the `main`'s
+    /// `pn/lib/n.js`, which `bundler` and `node16` take. `node16` for an ES
+    /// import adds no extension and reads no directory: only `./both.js`,
+    /// `./w2.js` and `@/both.js` name a file. A `package.json` holding
+    /// `typesVersions` leaves the directory open, disclosed as such (`./pv`). A
+    /// path ending in `/` names a directory alone: `./x/` is `x/index.ts`, not
+    /// `x.ts`.
     #[test]
     fn typescript_reads_a_relative_path_by_each_resolutions_order() {
         let specifiers = [
@@ -6942,14 +6926,13 @@ mod tests {
 
     /// `.` and `..` are relative specifiers, as TypeScript's `pathIsRelative`
     /// reads them, their segments folded where a path writes them, and each
-    /// module resolution reads them as tsc 5.9.3, 6.0.3 and 7.0.2 trace it
-    /// (`rel_*`): `classic` as the file the folded path names (`.` in
-    /// `src/app` as `src/app.ts`, `../..` as a file beside the project's
-    /// directory) and a path ending in `/` as none; `node10`, `bundler` and
-    /// `node16` for a CommonJS import as the directory alone, its `index`;
-    /// `node16` for an ES import as nothing, since it reads no directory.
-    /// Where no TypeScript reads the import, Node and the bundlers read a
-    /// directory too.
+    /// module resolution reads them as tsc 5.9.3, 6.0.3 and 7.0.2 trace it:
+    /// `classic` as the file the folded path names (`.` in `src/app` as
+    /// `src/app.ts`, `../..` as a file beside the project's directory) and a
+    /// path ending in `/` as none; `node10`, `bundler` and `node16` for a
+    /// CommonJS import as the directory alone, its `index`; `node16` for an ES
+    /// import as nothing, since it reads no directory. Where no TypeScript
+    /// reads the import, Node and the bundlers read a directory too.
     #[test]
     fn dot_segments_are_relative_paths_each_resolution_reads() {
         let specifiers = [
@@ -7139,9 +7122,9 @@ mod tests {
 
     /// A `paths` substitution writing an extension names the file it spells
     /// before the lookup replaces that extension, under every module
-    /// resolution, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it (`px_*`): `@x` and
-    /// `@z/x` take `x.js` beside `x.ts`, which `@y`, writing none, takes; a
-    /// substitution naming no file takes the lookup's (`@z/both`).
+    /// resolution, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it: `@x` and `@z/x` take
+    /// `x.js` beside `x.ts`, which `@y`, writing none, takes; a substitution
+    /// naming no file takes the lookup's (`@z/both`).
     #[test]
     fn a_paths_substitution_writing_an_extension_names_its_file_first() {
         let modes = [
@@ -7190,14 +7173,14 @@ mod tests {
     }
 
     /// A directory is read by the first of its `package.json`'s `typings`,
-    /// `types` and `main` that is set, as tsc 5.9.3, 6.0.3 and 7.0.2 trace
-    /// it (`req_fields_*`): a `types` naming no file gives way to the
-    /// directory's `index`, never to `main` (`./d1`); an empty `typings`
-    /// counts as unset (`./d2`); and a `main` naming a directory names its
-    /// `index` (`./d3`). A field naming a JavaScript file is read with the
-    /// pass's extensions, so `node10`'s first pass, which holds TypeScript's
-    /// alone, takes the directory's `index.ts` over it (`./d4`); one naming
-    /// a declaration takes it over its TypeScript twin (`./d5`, `./d6`).
+    /// `types` and `main` that is set, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it:
+    /// a `types` naming no file gives way to the directory's `index`, never to
+    /// `main` (`./d1`); an empty `typings` counts as unset (`./d2`); and a
+    /// `main` naming a directory names its `index` (`./d3`). A field naming a
+    /// JavaScript file is read with the pass's extensions, so `node10`'s first
+    /// pass, which holds TypeScript's alone, takes the directory's `index.ts`
+    /// over it (`./d4`); one naming a declaration takes it over its TypeScript
+    /// twin (`./d5`, `./d6`).
     #[test]
     fn a_directory_is_read_by_the_first_package_json_field_it_sets() {
         let modes = [
@@ -7272,10 +7255,10 @@ mod tests {
 
     /// `node10` looks every path `paths` and `baseUrl` name up with
     /// TypeScript's extensions before any with JavaScript's, as tsc 5.9.3 and
-    /// 6.0.3 trace it (`tq_node10`): `@/x` takes the second substitution's
-    /// `b/x.ts` over the first's `a/x.js`, which `bundler` and `node16` for a
-    /// CommonJS import take in their one pass, and `node16` for an ES import
-    /// only where the specifier writes an extension.
+    /// 6.0.3 trace it: `@/x` takes the second substitution's `b/x.ts` over the
+    /// first's `a/x.js`, which `bundler` and `node16` for a CommonJS import
+    /// take in their one pass, and `node16` for an ES import only where the
+    /// specifier writes an extension.
     #[test]
     fn paths_substitutions_are_looked_up_in_each_pass_before_the_next() {
         let modes = [
@@ -7333,14 +7316,12 @@ mod tests {
     }
 
     /// `node10` looks a non-relative specifier up in `node_modules` with
-    /// TypeScript's extensions between its passes, as tsc 5.9.3 and 6.0.3
-    /// trace it, so a declaration or TypeScript file there comes before the
-    /// JavaScript file `baseUrl` names: none for `config` and `lib/x`
-    /// (`p3_*`, `p3c_*`), the workspace package's for `w` (`q2a_*`), and a
-    /// `typesVersions` pack does not follow leaves `tv/x` open (`q2b_*`). A
-    /// package of JavaScript alone leaves `plain` the project's file
-    /// (`q2c_*`). `bundler` reads `baseUrl` first in its one pass
-    /// (`p3d_*`).
+    /// TypeScript's extensions between its passes, as tsc 5.9.3 and 6.0.3 trace
+    /// it, so a declaration or TypeScript file there comes before the
+    /// JavaScript file `baseUrl` names: none for `config` and `lib/x`, the
+    /// workspace package's for `w`, and a `typesVersions` pack does not follow
+    /// leaves `tv/x` open. A package of JavaScript alone leaves `plain` the
+    /// project's file. `bundler` reads `baseUrl` first in its one pass.
     #[test]
     fn node10_looks_in_node_modules_before_a_base_url_javascript_file() {
         let modes = [
@@ -7673,9 +7654,9 @@ mod tests {
     /// A relative specifier the TypeScript majors read apart in a
     /// `jsconfig.json`'s JavaScript project is disclosed as one they read its
     /// configuration apart, not as a `paths` alias naming no file, as tsc
-    /// 5.9.3, 6.0.3 and 7.0.2 trace it (`js_apart`): `module` `esnext` reads
-    /// `classic` under 5, which finds no file for `../components`, and
-    /// `bundler` under 6 and 7, which take `components/index.js`.
+    /// 5.9.3, 6.0.3 and 7.0.2 trace it: `module` `esnext` reads `classic` under
+    /// 5, which finds no file for `../components`, and `bundler` under 6 and 7,
+    /// which take `components/index.js`.
     #[test]
     fn a_relative_specifier_a_jsconfigs_majors_read_apart_names_its_cause() {
         let nodes = vec![
@@ -7994,20 +7975,19 @@ mod tests {
         assert_eq!(graph.ts_owner_undetermined.len(), 3);
     }
 
-    /// A specifier that each TypeScript major reads alike but the majors
-    /// read differently is disclosed as one the unknown version decides;
-    /// one that projects compiling the file read differently under one
-    /// major is disclosed as one they read apart whatever the version. Where no
+    /// A specifier that each TypeScript major reads alike but the majors read
+    /// differently is disclosed as one the unknown version decides; one that
+    /// projects compiling the file read differently under one major is
+    /// disclosed as one they read apart whatever the version. Where no
     /// TypeScript is installed or declared, a configuration setting a module
     /// option tsc 7.0.2 removed (TS5108) is read under 5 and 6 alone: with
     /// `moduleResolution: "node"` or `"node10"` tsc 5.9.3 and 6.0.3 take the
     /// package's `types` (`node10_absent`, `node10_spelled`), and with
-    /// `moduleResolution: "classic"` or
-    /// `module` `amd`, `umd`, `system` or `none` (TS6046) they resolve no
-    /// file for it, where 7.0.2 takes its `import` file in each. A declared
-    /// range admitting only 7 and above keeps 7, and what it reads apart from
-    /// 5 and 6 is disclosed, as no major the range admits builds such a
-    /// configuration (`ge7_node`).
+    /// `moduleResolution: "classic"` or `module` `amd`, `umd`, `system` or
+    /// `none` (TS6046) they resolve no file for it, where 7.0.2 takes its
+    /// `import` file in each. A declared range admitting only 7 and above keeps
+    /// 7, and what it reads apart from 5 and 6 is disclosed, as no major the
+    /// range admits builds such a configuration.
     #[test]
     fn a_specifier_only_the_typescript_version_decides_is_disclosed_as_such() {
         let ts = |id, rel: &str, source: &str| node_in(id, rel, source, Language::TypeScript);
@@ -8327,12 +8307,11 @@ mod tests {
     }
 
     /// TypeScript reads a workspace package without `exports` as its
-    /// `node_modules` lookup reads the package's directory, as tsc 5.9.3,
-    /// 6.0.3 and 7.0.2 trace it: with TypeScript's extensions by the first of
-    /// `typings` and `types` it sets, else `main`, then its `index`, and
-    /// only then with JavaScript's by `main`. A `types` naming no file falls
-    /// to the `index`, never to `main` (`p4_*`), and a `typesVersions` leaves
-    /// the name open.
+    /// `node_modules` lookup reads the package's directory, as tsc 5.9.3, 6.0.3
+    /// and 7.0.2 trace it: with TypeScript's extensions by the first of
+    /// `typings` and `types` it sets, else `main`, then its `index`, and only
+    /// then with JavaScript's by `main`. A `types` naming no file falls to the
+    /// `index`, never to `main`, and a `typesVersions` leaves the name open.
     #[test]
     fn a_workspace_package_without_exports_is_read_by_the_first_field_it_sets() {
         let ts = |id, rel| node_in(id, rel, "", Language::TypeScript);
@@ -8621,16 +8600,16 @@ mod tests {
 
     /// TypeScript reads a workspace package where its walk up the
     /// `node_modules` directories from the importer reaches a link to it, as
-    /// tsc 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler` and `node16`
-    /// (`n_*`, `zn_near_*`): a nearer `node_modules` holding the name takes
-    /// it first — a registry copy whose `exports` pack does not follow
-    /// (`w`, `w/sub`, disclosed), a copy's JavaScript in the pass for
-    /// JavaScript (`j`), an `@types` declaration (`t`) — but a copy holding
-    /// no file for the specifier leaves it to the link (`j/sub`), and a
-    /// link nearer than anything else is read first (`b`'s `w`), as is one
-    /// above a copy holding only JavaScript in the pass for TypeScript, and
-    /// before the `@types` beside it (`b`'s `t`). A declaration past the
-    /// link comes before the package's JavaScript (`b`'s `j`).
+    /// tsc 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler` and `node16`: a
+    /// nearer `node_modules` holding the name takes it first — a registry copy
+    /// whose `exports` pack does not follow (`w`, `w/sub`, disclosed), a copy's
+    /// JavaScript in the pass for JavaScript (`j`), an `@types` declaration
+    /// (`t`) — but a copy holding no file for the specifier leaves it to the
+    /// link (`j/sub`), and a link nearer than anything else is read first
+    /// (`b`'s `w`), as is one above a copy holding only JavaScript in the pass
+    /// for TypeScript, and before the `@types` beside it (`b`'s `t`). A
+    /// declaration past the link comes before the package's JavaScript (`b`'s
+    /// `j`).
     #[test]
     fn a_nearer_node_modules_takes_a_workspace_packages_name_before_its_link() {
         let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
@@ -8878,22 +8857,20 @@ mod tests {
         );
     }
 
-    /// TypeScript reads a workspace package's `exports` with its
-    /// extensions, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler`,
-    /// `node16` and `nodenext` (`e_targets_*`, `e_types_*`): the whole walk
-    /// of its conditions with TypeScript's extensions, so a later
-    /// condition's declaration comes before an earlier one's JavaScript
-    /// (`w/p`), then every `node_modules` from the importer's directory up,
-    /// `@types` included (`v`), the package's own link there finding what it
-    /// found, then the walk with JavaScript's. A target writing a TypeScript
-    /// extension is that file or none (`w/t`), any other is read with the
-    /// pass's extensions in its place (`w/a`), none added, so one writing no
-    /// extension or naming a directory names no file and is disclosed;
-    /// where no pass finds one, a file of any kind a target spells exactly is
-    /// the one (`w/s.css`). A package's own name read from inside it
-    /// (`s_types_*`, `t2_self_noconfig`) is not looked for in `node_modules`
-    /// between the passes (`s/j`), which read it as from another package
-    /// where nothing sets `allowJs` (`s/p`).
+    /// TypeScript reads a workspace package's `exports` with its extensions, as
+    /// tsc 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler`, `node16` and
+    /// `nodenext`: the whole walk of its conditions with TypeScript's
+    /// extensions, so a later condition's declaration comes before an earlier
+    /// one's JavaScript (`w/p`), then every `node_modules` from the importer's
+    /// directory up, `@types` included (`v`), the package's own link there
+    /// finding what it found, then the walk with JavaScript's. A target writing
+    /// a TypeScript extension is that file or none (`w/t`), any other is read
+    /// with the pass's extensions in its place (`w/a`), none added, so one
+    /// writing no extension or naming a directory names no file and is
+    /// disclosed; where no pass finds one, a file of any kind a target spells
+    /// exactly is the one (`w/s.css`). A package's own name read from inside it
+    /// is not looked for in `node_modules` between the passes (`s/j`), which
+    /// read it as from another package where nothing sets `allowJs` (`s/p`).
     #[test]
     fn an_exports_target_is_read_with_typescripts_extensions_before_javascripts() {
         let imports = "import \"w/a\";\nimport \"w/t\";\nimport \"w/p\";\nimport \"w/e\";\n\
@@ -9014,34 +8991,30 @@ mod tests {
         assert!(graph.undetermined_imports.is_empty());
     }
 
-    /// A package's own name read from inside it is read under the options
-    /// of the project compiling the importer, as tsc 5.9.3, 6.0.3 and 7.0.2
-    /// trace it. Where that project's configuration lies in the package's
-    /// directory and sets `outDir` or `declarationDir`, a target in either,
-    /// written as `.js`, `.json`, `.d.ts` or their module kinds, names its
-    /// input below `rootDir`, here set through `extends` against the
-    /// configuration setting it (`m/o`, `m/od`, `m/data`, `m/mm`;
-    /// `s_rootdir_*`, `m_extends_*`, `s_ext_*`), before the output a build
-    /// wrote there (`m/b`; `m_built_*`); a target outside them is read as
-    /// written (`m/a`, `m/p`). 5.9.3 and 6.0.3 map to a JavaScript input in
-    /// the JavaScript walk alone (`m/q`, `m/q2`, `m/r3`; `m_jsinput_*`), 7.0.2
-    /// in either, read with every extension (`m_ts7_*`). Without `rootDir`,
-    /// 5.9.3 tries the directory of a `composite` configuration (`cs/o`;
-    /// `m_srccomp_*`), else each directory from the filesystem's root down
-    /// to the package's, reporting TS2209 (`g/o`; `m_guessorder_*`), and 6.0.3
-    /// and 7.0.2 the configuration's (`m_srccfg*`). A configuration outside
-    /// the package maps nothing (`r/o`; `m_rootcfg_*`), nor does another
-    /// package's import of the name (`app`; `x_outdir_*`), which reads a
-    /// referenced project's built declaration (`rb_*`). `allowJs`, else
-    /// `checkJs`, has the name walked once with every extension (`j/p`;
-    /// `s_checkjs_*`), as a `jsconfig.json` has by default (`js/p`;
-    /// `m_jsconfig_*`). What a configuration the chain cannot read may set
-    /// is disclosed: output directories (`u/x`), a root that a configuration
-    /// read below the unread one sets (`k/o`, where `k/a`,
+    /// A package's own name read from inside it is read under the options of
+    /// the project compiling the importer, as tsc 5.9.3, 6.0.3 and 7.0.2 trace
+    /// it. Where that project's configuration lies in the package's directory
+    /// and sets `outDir` or `declarationDir`, a target in either, written as
+    /// `.js`, `.json`, `.d.ts` or their module kinds, names its input below
+    /// `rootDir`, here set through `extends` against the configuration setting
+    /// it (`m/o`, `m/od`, `m/data`, `m/mm`), before the output a build wrote
+    /// there (`m/b`); a target outside them is read as written (`m/a`, `m/p`).
+    /// 5.9.3 and 6.0.3 map to a JavaScript input in the JavaScript walk alone
+    /// (`m/q`, `m/q2`, `m/r3`), 7.0.2 in either, read with every extension.
+    /// Without `rootDir`, 5.9.3 tries the directory of a `composite`
+    /// configuration (`cs/o`), else each directory from the filesystem's root
+    /// down to the package's, reporting TS2209 (`g/o`), and 6.0.3 and 7.0.2 the
+    /// configuration's. A configuration outside the package maps nothing
+    /// (`r/o`), nor does another package's import of the name (`app`), which
+    /// reads a referenced project's built declaration. `allowJs`, else
+    /// `checkJs`, has the name walked once with every extension (`j/p`), as a
+    /// `jsconfig.json` has by default (`js/p`). What a configuration the chain
+    /// cannot read may set is disclosed: output directories (`u/x`), a root
+    /// that a configuration read below the unread one sets (`k/o`, where `k/a`,
     /// outside them, is read), `allowJs` where one walk reads the name apart
-    /// (`u/p`); and so is a name the projects compiling the importer map
-    /// apart (`two/o`), though projects differing in these options alone
-    /// read every other specifier alike (`two/a`).
+    /// (`u/p`); and so is a name the projects compiling the importer map apart
+    /// (`two/o`), though projects differing in these options alone read every
+    /// other specifier alike (`two/a`).
     #[test]
     fn a_packages_own_name_is_read_under_its_projects_output_options() {
         let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
@@ -9312,16 +9285,14 @@ mod tests {
         assert!(graph.undetermined_imports.is_empty());
     }
 
-    /// A package's own name is read from a file whose nearest `package.json`
-    /// is the package's, through its `exports`, whether or not a workspace
-    /// lists the package, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it: a
-    /// single-package repository's root, here a workspace's (`my-lib`;
-    /// `zr_*`), a package below a workspace that does not list it
-    /// (`@acme/lib`; `s_scoped_*`). A file below a nearer `package.json`
-    /// (`test/esm`; `s_nested_scope_*`) reads no such name, nor one under
-    /// `node10`, which reads no `exports` (`old`; `s_single_node10`), nor
-    /// another package, which reaches one no workspace lists only where it
-    /// is installed (`w`'s `@acme/lib`).
+    /// A package's own name is read from a file whose nearest `package.json` is
+    /// the package's, through its `exports`, whether or not a workspace lists
+    /// the package, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it: a single-package
+    /// repository's root, here a workspace's (`my-lib`), a package below a
+    /// workspace that does not list it (`@acme/lib`). A file below a nearer
+    /// `package.json` (`test/esm`) reads no such name, nor one under `node10`,
+    /// which reads no `exports` (`old`), nor another package, which reaches one
+    /// no workspace lists only where it is installed (`w`'s `@acme/lib`).
     #[test]
     fn a_packages_own_name_is_read_whether_or_not_a_workspace_lists_it() {
         let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
@@ -9395,14 +9366,14 @@ mod tests {
     }
 
     /// A path option starting with `${configDir}`, wherever in the `extends`
-    /// chain it is set, names a path below the directory of the
-    /// configuration the chain starts from, as tsc 5.9.3, 6.0.3 and 7.0.2
-    /// trace it (`zc_*`, `c*_*`): a `paths` substitution (`@/y`, where one
-    /// without it resolves against the configuration declaring it, `~/s`),
-    /// `typeRoots` (`foo`), `outDir` and `rootDir`, which map a package's own
-    /// name to its input before the built output (`a/o`), `baseUrl` (`c`'s
-    /// `y`), and `include` and `exclude`, which decide that a project of
-    /// `references` compiles `b/src/x.ts` and none `b/src/skip/k.ts`.
+    /// chain it is set, names a path below the directory of the configuration
+    /// the chain starts from, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it: a `paths`
+    /// substitution (`@/y`, where one without it resolves against the
+    /// configuration declaring it, `~/s`), `typeRoots` (`foo`), `outDir` and
+    /// `rootDir`, which map a package's own name to its input before the built
+    /// output (`a/o`), `baseUrl` (`c`'s `y`), and `include` and `exclude`,
+    /// which decide that a project of `references` compiles `b/src/x.ts` and
+    /// none `b/src/skip/k.ts`.
     #[test]
     fn a_config_dir_template_names_the_directory_a_chain_starts_from() {
         let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
@@ -9480,24 +9451,23 @@ mod tests {
         assert!(graph.undetermined_imports.is_empty());
     }
 
-    /// A `#` specifier is read through the `imports` of the importer's
-    /// nearest `package.json`, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it under
-    /// `bundler`, `node16` and `nodenext` (`zi_*`, `i*_*`): an exact or a
-    /// pattern key (`#cfg`, `#u/a`), its conditions as `exports` reads them
-    /// (`#c`), in one walk with every extension (`#p`), a target naming a
-    /// package as that package's name (`#dep`, `#self`), a target in an
-    /// output directory as its input (`#o`). One no key maps, whose package
-    /// is not installed, or whose target climbs out of the package, which
-    /// names no package even beside a `node_modules` (`outside.ts`), is
-    /// disclosed (`#missing`, `#lost`, `#up`), as is one whose target is a
-    /// `#` specifier, which tsc follows and 5.9.3 overflows its stack on
-    /// where it names itself (`#chain`; `i_loop`); `#`
-    /// names nothing, nor does `#/slash` under 5, where 6 reads it under
-    /// `bundler` but under `nodenext` alone of the `node16` family, which
-    /// pack discloses. `node10` reads no `imports`, nor does a file below a
-    /// nearer `package.json` holding none (`esm`). Node reads a JavaScript
-    /// file's as the script module a target spells (`js`; `i_js`), and
-    /// `#/r` as its version decides, which pack does not know.
+    /// A `#` specifier is read through the `imports` of the importer's nearest
+    /// `package.json`, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler`,
+    /// `node16` and `nodenext`: an exact or a pattern key (`#cfg`, `#u/a`), its
+    /// conditions as `exports` reads them (`#c`), in one walk with every
+    /// extension (`#p`), a target naming a package as that package's name
+    /// (`#dep`, `#self`), a target in an output directory as its input (`#o`).
+    /// One no key maps, whose package is not installed, or whose target climbs
+    /// out of the package, which names no package even beside a `node_modules`
+    /// (`outside.ts`), is disclosed (`#missing`, `#lost`, `#up`), as is one
+    /// whose target is a `#` specifier, which tsc follows and 5.9.3 overflows
+    /// its stack on where it names itself (`#chain`); `#` names nothing, nor
+    /// does `#/slash` under 5, where 6 reads it under `bundler` but under
+    /// `nodenext` alone of the `node16` family, which pack discloses. `node10`
+    /// reads no `imports`, nor does a file below a nearer `package.json`
+    /// holding none (`esm`). Node reads a JavaScript file's as the script
+    /// module a target spells (`js`), and `#/r` as its version decides, which
+    /// pack does not know.
     #[test]
     fn a_hash_specifier_is_read_through_the_imports_of_its_package_scope() {
         let bundler = "\"module\": \"esnext\", \"moduleResolution\": \"bundler\"";
@@ -9662,19 +9632,17 @@ mod tests {
         }
     }
 
-    /// A target keeps the module kind it writes and a name the scope that
-    /// reads it, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler`
-    /// (`zs_*`). A package's own name maps a `.d.cts` or `.d.mts` target in
-    /// its output directory to a `.cts` or `.mts` input, not a `.ts` one
-    /// beside it (`w/n`, `w/m`; `zs_modkinds_*`), and a `.cjs` or `.mjs`
-    /// target to the JavaScript input of its kind (`w/c3`, `w/m3`); a file
-    /// below a nearer `package.json` reads the name from another package,
-    /// which maps nothing (`esm`'s `w/o`; `zs_nested_only_*`). Another
-    /// package's `.d.mts` or `.d.cts` target is that declaration or none
-    /// with TypeScript's extensions, then names the JavaScript file of its
-    /// kind (`k/k`, `k/c`; `zs_dmts_*`), and a subpath of a package without
-    /// `exports` names the file before the directory of that name (`x/lib/x`;
-    /// `zs_subdir_both_*`).
+    /// A target keeps the module kind it writes and a name the scope that reads
+    /// it, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler`. A package's
+    /// own name maps a `.d.cts` or `.d.mts` target in its output directory to a
+    /// `.cts` or `.mts` input, not a `.ts` one beside it (`w/n`, `w/m`), and a
+    /// `.cjs` or `.mjs` target to the JavaScript input of its kind (`w/c3`,
+    /// `w/m3`); a file below a nearer `package.json` reads the name from
+    /// another package, which maps nothing (`esm`'s `w/o`). Another package's
+    /// `.d.mts` or `.d.cts` target is that declaration or none with
+    /// TypeScript's extensions, then names the JavaScript file of its kind
+    /// (`k/k`, `k/c`), and a subpath of a package without `exports` names the
+    /// file before the directory of that name (`x/lib/x`).
     #[test]
     fn a_target_keeps_its_module_kind_and_a_name_the_scope_reading_it() {
         let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
