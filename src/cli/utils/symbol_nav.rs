@@ -212,8 +212,8 @@ pub fn holder_of(symbols: &[Symbol], line: u32, column: u32) -> Option<&Symbol> 
 /// declare ([`declared_with`]). A line holding several members (`data class
 /// User(val id: Int, val name: String)`) is each of theirs, since a changed
 /// line does not say which of them changed. Any other symbol owns every line
-/// inside it, so a parameter or local listed inside a body (pyright and
-/// tsserver list them) hands the line to the declaration it sits in. A container owns
+/// inside it, so a local function or type listed inside a body hands the
+/// line to the declaration it sits in. A container owns
 /// each of its lines that no member covers — its decorators or attributes,
 /// its name, bases and clauses, and what lies between and after its members
 /// — since an answer need not list every member: a server can leave one
@@ -481,8 +481,7 @@ pub fn line_addressed_symbol(symbols: &[Symbol], line: u32) -> SymbolResolution<
 }
 
 /// A symbol declared on the line inside another declared there is part of
-/// it, not a second declaration of the line: pyright lists the parameters
-/// of `def f(self, cart):` under `f`, and a one-line `struct P { x: i32 }`
+/// it, not a second declaration of the line: a one-line `struct P { x: i32 }`
 /// holds its field. A statement that declares several names (`int a, b;`)
 /// declares each over the one range they share, so it stays ambiguous.
 fn declared_or_enclosing(symbols: &[Symbol], line: u32) -> SymbolResolution<'_> {
@@ -960,21 +959,18 @@ mod tests {
         )
     }
 
-    /// A server that lists a function's parameters and locals (pyright,
-    /// tsserver) hands a line among them to the function, as one that lists
-    /// none (rust-analyzer, gopls) does.
+    /// A line of a local function belongs to the function declaring it,
+    /// as every other line of its body does.
     #[test]
-    fn a_line_among_a_functions_locals_belongs_to_the_function() {
+    fn a_line_of_a_local_function_belongs_to_the_function_declaring_it() {
         let symbols = vec![nest(
-            declared("compute", SymbolKind::Function, 1, 3),
-            vec![
-                declared("a", SymbolKind::Variable, 1, 1),
-                declared("total", SymbolKind::Variable, 2, 2),
-            ],
+            declared("compute", SymbolKind::Function, 1, 4),
+            vec![declared("inner", SymbolKind::Function, 2, 3)],
         )];
 
-        assert_eq!(owners(&symbols, 1), ["compute"]);
-        assert_eq!(owners(&symbols, 2), ["compute"]);
+        for line in 1..=4 {
+            assert_eq!(owners(&symbols, line), ["compute"], "line {line}");
+        }
     }
 
     /// A container's members own their lines, and the container owns the

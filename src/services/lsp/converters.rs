@@ -114,16 +114,26 @@ pub(super) fn extract_hover_content(contents: &HoverContents) -> String {
     }
 }
 
+/// Convert a server's document symbol tree, each symbol under the name and
+/// kind of the one holding it. In a code language, a value bound directly in
+/// a function, method or constructor — a parameter or local, which pyright
+/// and tsserver list — is no declaration and is left out with what it
+/// holds, as the grammar leaves it out; what the function declares, a local
+/// function or type, stays. Nothing else is judged by its kind: zls reports
+/// a Zig type bound by `const` as a constant holding its members.
 pub(super) fn convert_document_symbols(
     symbols: &[DocumentSymbol],
     file: &Path,
     options: &FindSymbolsOptions,
-    container: Option<&str>,
+    container: Option<(&str, SymbolKind)>,
     current_depth: u32,
     conv: &mut PositionConverter,
 ) -> Vec<Symbol> {
+    let binds_locals = Language::from_path(file).is_code()
+        && container.is_some_and(|(_, kind)| kind.is_callable());
     symbols
         .iter()
+        .filter(|doc_sym| !binds_locals || !convert_symbol_kind(doc_sym.kind, file).is_low_level())
         .map(|doc_sym| {
             let sel = &doc_sym.selection_range;
             let range = &doc_sym.range;
@@ -158,8 +168,8 @@ pub(super) fn convert_document_symbols(
                 location,
             );
 
-            if let Some(c) = container {
-                symbol = symbol.with_container(c);
+            if let Some((name, _)) = container {
+                symbol = symbol.with_container(name);
             }
 
             if current_depth < options.depth
@@ -169,7 +179,7 @@ pub(super) fn convert_document_symbols(
                     children,
                     file,
                     options,
-                    Some(&display_name),
+                    Some((&display_name, symbol.kind)),
                     current_depth + 1,
                     conv,
                 );
@@ -424,6 +434,119 @@ mod tests {
         PositionEncoding, convert_symbol_kind, diagnostic_code_string, find_resource_operation,
         parse_workspace_edit, parse_workspace_edit_snapshot,
     };
+
+    /// A function's parameters and locals are no declarations, whichever
+    /// server lists them, nor is what a local holds; what a function
+    /// declares is. What anything else holds is kept whatever its kind: a
+    /// Zig type is a constant holding constants. A data document's tree is no
+    /// declaration tree.
+    #[test]
+    fn values_a_function_binds_are_not_listed() {
+        use super::{FindSymbolsOptions, PositionConverter, convert_document_symbols};
+        use crate::infra::lsp::protocol::DocumentSymbol;
+
+        // (name, LSP kind, children)
+        fn tree(nodes: &[(&str, u8, serde_json::Value)]) -> serde_json::Value {
+            let range = serde_json::json!({
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 1 },
+            });
+            nodes
+                .iter()
+                .map(|(name, kind, children)| {
+                    serde_json::json!({
+                        "name": name, "kind": kind, "range": range,
+                        "selectionRange": range, "children": children,
+                    })
+                })
+                .collect()
+        }
+        fn listed(file: &str, symbols: serde_json::Value) -> Vec<String> {
+            fn paths(symbols: &[crate::models::symbol::Symbol], out: &mut Vec<String>) {
+                for symbol in symbols {
+                    out.push(match &symbol.container {
+                        Some(container) => format!("{container}/{}", symbol.name),
+                        None => symbol.name.clone(),
+                    });
+                    paths(&symbol.children, out);
+                }
+            }
+            let symbols: Vec<DocumentSymbol> = serde_json::from_value(symbols).unwrap();
+            let file = std::path::Path::new(file);
+            let mut conv = PositionConverter::new(PositionEncoding::Utf16);
+            let converted = convert_document_symbols(
+                &symbols,
+                file,
+                &FindSymbolsOptions::default(),
+                None,
+                0,
+                &mut conv,
+            );
+            let mut out = Vec::new();
+            paths(&converted, &mut out);
+            out
+        }
+        let none = serde_json::json!([]);
+        const VARIABLE: u8 = 13;
+        const CONSTANT: u8 = 14;
+        let python = tree(&[
+            ("LIMIT", CONSTANT, none.clone()),
+            (
+                "outer",
+                12,
+                tree(&[
+                    ("a", VARIABLE, none.clone()),
+                    ("inner", 12, tree(&[("x", VARIABLE, none.clone())])),
+                    ("Local", 5, tree(&[("field", VARIABLE, none.clone())])),
+                ]),
+            ),
+            (
+                "Svc",
+                5,
+                tree(&[
+                    ("attr", VARIABLE, none.clone()),
+                    ("run", 6, tree(&[("done", VARIABLE, none.clone())])),
+                ]),
+            ),
+        ]);
+        assert_eq!(
+            listed("a.py", python),
+            [
+                "LIMIT",
+                "outer",
+                "outer/inner",
+                "outer/Local",
+                "Local/field",
+                "Svc",
+                "Svc/attr",
+                "Svc/run"
+            ]
+        );
+        let typescript = tree(&[(
+            "Svc",
+            5,
+            tree(&[(
+                "run",
+                6,
+                tree(&[("done", CONSTANT, tree(&[("helper", 12, none.clone())]))]),
+            )]),
+        )]);
+        assert_eq!(listed("a.ts", typescript), ["Svc", "Svc/run"]);
+        let zig = tree(&[(
+            "Outer",
+            CONSTANT,
+            tree(&[
+                ("Inner", CONSTANT, tree(&[("x", 8, none.clone())])),
+                ("LIMIT", CONSTANT, none.clone()),
+            ]),
+        )]);
+        assert_eq!(
+            listed("a.zig", zig),
+            ["Outer", "Outer/Inner", "Inner/x", "Outer/LIMIT"]
+        );
+        let json = tree(&[("c", 18, tree(&[("0", 16, none.clone())]))]);
+        assert_eq!(listed("a.json", json), ["c", "c/0"]);
+    }
 
     #[test]
     fn a_swift_namespace_is_the_extension_of_a_type() {

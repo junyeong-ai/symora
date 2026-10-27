@@ -167,8 +167,8 @@ enum Counted {
 type ReferenceCounts = HashMap<(u32, u32), Counted>;
 
 /// The declarations a listing counts references for: every listed one, and
-/// beneath one that holds members, those members. What a function holds — its
-/// parameters and locals — is internal to it and is not counted.
+/// beneath one that holds members, those members. What anything else holds —
+/// a function's local function or type — is internal to it and is not counted.
 fn countable<'a>(symbols: &'a [Symbol], out: &mut Vec<&'a Symbol>) {
     for symbol in symbols {
         out.push(symbol);

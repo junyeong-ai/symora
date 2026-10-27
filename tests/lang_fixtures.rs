@@ -330,6 +330,10 @@ fn pyright_resolves_across_package_boundaries() {
         listed.iter().any(|path| path == "Circle/perimeter"),
         "{tree}"
     );
+    // pyright lists a function's parameters beside what it declares; only
+    // the declaration is listed.
+    assert!(listed.iter().any(|path| path == "area/squared"), "{tree}");
+    assert!(!listed.iter().any(|path| path == "area/radius"), "{tree}");
     assert_eq!(distinct.len(), listed.len(), "{tree}");
     assert_eq!(
         tree["count"],

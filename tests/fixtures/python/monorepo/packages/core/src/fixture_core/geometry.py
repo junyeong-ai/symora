@@ -4,7 +4,10 @@ PI = 3.14159
 
 
 def area(radius: float) -> float:
-    return PI * radius * radius
+    def squared(value: float) -> float:
+        return value * value
+
+    return PI * squared(radius)
 
 
 class Circle:
