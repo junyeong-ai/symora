@@ -101,7 +101,8 @@ impl Anchor {
     }
 
     /// A position that denotes a declaration the symbol tree does not list —
-    /// a local, a parameter, a generated item. The analysis anchors at that
+    /// a local, a parameter, a generated item, one the server's outline
+    /// omits. The analysis anchors at that
     /// declaration so its reference set is exact, and the target is disclosed
     /// as a binding rather than dressed up as a symbol.
     fn binding(input: &ParsedLocation, definition: &Location) -> Self {

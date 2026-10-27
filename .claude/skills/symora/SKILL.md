@@ -33,7 +33,7 @@ Lines and Unicode-scalar columns are 1-indexed.
 - For `refs`, callers/callees, implementations, type hierarchy, context, and impact: `file:line` addresses the declaration on that line or its enclosing symbol. An explicit column addresses the exact token and resolves usages through their definitions. Header keywords/whitespace may address that declaration; empty body positions address nothing.
 - `def`, hover, typedef, and rename are position-exact; an omitted column means 1. Take name positions from actual results.
 - A `--symbol` path is a bare name, a `Class/method` suffix, a `*/method` wildcard, or an exact `name_path`. A trailing `[kind]` selects one kind among same-named declarations (`Svc[class]`, not its constructors); a segment written wholly in brackets is a name (`Cache/[key]`). Kinds come from whichever source answered, and the index and a server can differ (pyright reports `MAX_SIZE` as `constant`, the index as `variable`). Take a kind from `symbols <file>` for the file you act on, and treat a zero under `--kind` as unverified.
-- Read the echoed target. `anchor_status` is absent when a declaration resolved; `binding` is a local or parameter absent from the document-symbol tree; `not_a_symbol` and `unavailable` resolved nothing, so the counts are about no declaration. Source edits address declarations, not body tokens.
+- Read the echoed target. `anchor_status` is absent when a declaration resolved; `binding` is a declaration absent from the document-symbol tree, such as a local, a parameter, or one the server's outline omits; `not_a_symbol` and `unavailable` resolved nothing, so the counts are about no declaration. Source edits address declarations, not body tokens.
 
 ## Interpret limits
 

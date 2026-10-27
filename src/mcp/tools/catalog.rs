@@ -282,8 +282,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     "target",
                     "object",
                     "The symbol the position resolved to: { name, kind, file, line, signature?, \
-                     anchor_status? } — anchor_status is \"binding\" (a local or parameter \
-                     the symbol tree does not list; the list is exactly its), \
+                     anchor_status? } — anchor_status is \"binding\" (a declaration the \
+                     symbol tree does not list, such as a local or a parameter; the list is \
+                     exactly its), \
                      \"not_a_symbol\", or \"unavailable\" only when the position did not \
                      resolve to a listed symbol, omitted when resolved",
                 ),
@@ -371,7 +372,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     "anchor_status",
                     "string",
                     "Present when the from-position did not resolve to a listed symbol: \
-                     \"binding\" (a local or parameter; the set is exactly its), \
+                     \"binding\" (a declaration the symbol tree does not list, such as a local or \
+                     a parameter; the set is exactly its), \
                      \"not_a_symbol\" (read OK, denotes nothing) or \"unavailable\" (a read \
                      failed); for the last two an empty set is not authoritative (depth>1 only)",
                 ),
