@@ -77,4 +77,4 @@ jobs:
           persist-credentials: false
 
       - name: Lint shell scripts
-        run: shellcheck -S warning scripts/*.sh
+        run: shellcheck -S warning scripts/*.sh scripts/agent-eval/*.sh
