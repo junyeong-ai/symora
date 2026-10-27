@@ -192,7 +192,7 @@ async fn count_references(
     futures::stream::iter(targets.into_iter().cloned())
         .map(|symbol: Symbol| async move {
             let key = (symbol.location.line, symbol.location.column);
-            let Some(served) = answer.served_as(app.lsp.as_ref(), file, &symbol).await else {
+            let Ok(Some(served)) = answer.served_as(app.lsp.as_ref(), file, &symbol).await else {
                 return (key, Counted::Unavailable);
             };
             let served = served.clone();

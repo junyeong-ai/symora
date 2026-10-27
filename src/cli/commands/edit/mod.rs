@@ -421,7 +421,7 @@ async fn symbol_edit(
     // avoids any post-edit position drift. The diagnostics for those files are
     // pulled AFTER the write, so they reflect the edit's effect.
     let caller_files = if verify_callers && !dry_run {
-        Some(collect_caller_files(app, file, addressed.served(app).await).await)
+        Some(collect_caller_files(app, addressed).await)
     } else {
         None
     };
@@ -590,7 +590,7 @@ async fn delete_symbol(
     ensure_anchor_not_stale(symbol, &doc.lines)?;
     ensure_exclusive_line_ownership(&doc.lines, symbol, &span, &addressed.declared_with)?;
 
-    let check = check_dangling_references(app, file, addressed.served(app).await, &span).await;
+    let check = check_dangling_references(app, addressed, &span).await;
     if expect_no_references {
         ensure_no_dangling_references(&symbol.name, &check)?;
     }
@@ -634,25 +634,26 @@ enum ReferenceCheck {
     /// (`"unsupported"` | `"unavailable"`).
     Unverifiable(&'static str),
     /// The language server reads no position as the declaration — the
-    /// grammar answered for it, and the server reads its position as
-    /// another declaration or as none — so it was not asked. Emitted as
+    /// grammar answered for it, and no definition the server names at its
+    /// position is it — so it was not asked. Emitted as
     /// `references_status: unavailable`.
     Unplaced,
 }
 
 /// References at the *name* position (not the declaration start the
-/// splice uses — nothing references the `pub` keyword) of `served`, the
-/// symbol the language server reads as the deleted declaration
+/// splice uses — nothing references the `pub` keyword) of the symbol the
+/// language server reads as the deleted declaration
 /// ([`Addressed::served`]), that live outside the deleted span. Honest per
 /// invariant 4: when the language can't answer, return a status instead of
 /// implying "none".
 async fn check_dangling_references(
     app: &App,
-    file: &Path,
-    served: Option<&Symbol>,
+    addressed: &Addressed,
     span: &LineRange,
 ) -> ReferenceCheck {
     use crate::cli::response::LocationOutput;
+
+    let file = addressed.file.as_path();
     use crate::infra::lsp::capabilities::{LspFeature, SupportLevel, get_support_level};
 
     if get_support_level(Language::from_path(file), LspFeature::FindReferences)
@@ -660,8 +661,13 @@ async fn check_dangling_references(
     {
         return ReferenceCheck::Unverifiable("unsupported");
     }
-    let Some(symbol) = served else {
-        return ReferenceCheck::Unplaced;
+    let symbol = match addressed.served(app).await {
+        Ok(Some(symbol)) => symbol,
+        Ok(None) => return ReferenceCheck::Unplaced,
+        Err(e) => {
+            tracing::warn!("Definition lookup for delete's reference check failed: {e}");
+            return ReferenceCheck::Unverifiable("unavailable");
+        }
     };
 
     let refs = match app
@@ -762,10 +768,10 @@ fn ensure_no_dangling_references(symbol_name: &str, check: &ReferenceCheck) -> R
                  cannot be verified (references_status: unavailable)"
             ),
             format!(
-                "The language server's symbols lack this declaration, and the server reads \
-                 its position as another declaration or as none, so its references cannot be \
-                 asked for; verify call sites manually (try: symora search content -- {}) and \
-                 rerun without --expect-no-references.",
+                "The language server's symbols lack this declaration, and no definition the \
+                 server names at its position is it, so its references cannot be asked for; \
+                 verify call sites manually (try: symora search content -- {}) and rerun \
+                 without --expect-no-references.",
                 shell_arg(symbol_name)
             ),
         )),
@@ -880,15 +886,17 @@ struct CallerFiles {
     status: Option<&'static str>,
 }
 
-/// Resolve the distinct files that reference `symbol`, EXCLUDING the edited file
-/// — its same-file callers are covered by the edit's own edited-file diagnostics
-/// (which verify-callers forces on), so listing it here too would double-diagnose
-/// it. Capped and deterministic. `status` is set only when the reference lookup
-/// could not run — never paired with files — which includes a declaration the
-/// language server reads at no position (`served`, [`Addressed::served`]).
-async fn collect_caller_files(app: &App, file: &Path, served: Option<&Symbol>) -> CallerFiles {
+/// Resolve the distinct files that reference the addressed declaration,
+/// EXCLUDING the edited file — its same-file callers are covered by the edit's
+/// own edited-file diagnostics (which verify-callers forces on), so listing it
+/// here too would double-diagnose it. Capped and deterministic. `status` is set
+/// only when the reference lookup could not run — never paired with files —
+/// which includes a declaration the language server reads at no position
+/// ([`Addressed::served`]).
+async fn collect_caller_files(app: &App, addressed: &Addressed) -> CallerFiles {
     use crate::infra::lsp::capabilities::{LspFeature, SupportLevel, get_support_level};
 
+    let file = addressed.file.as_path();
     let empty = |status| CallerFiles {
         files: Vec::new(),
         total: 0,
@@ -900,8 +908,13 @@ async fn collect_caller_files(app: &App, file: &Path, served: Option<&Symbol>) -
     {
         return empty("unsupported");
     }
-    let Some(symbol) = served else {
-        return empty("unavailable");
+    let symbol = match addressed.served(app).await {
+        Ok(Some(symbol)) => symbol,
+        Ok(None) => return empty("unavailable"),
+        Err(e) => {
+            tracing::warn!("verify-callers definition lookup failed: {e}");
+            return empty("unavailable");
+        }
     };
     let refs = match app
         .lsp
