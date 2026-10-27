@@ -126,22 +126,44 @@ fn map_summary_emits_valid_json_with_compact_format() {
     );
 }
 
-#[test]
-fn pack_emits_valid_json_with_focus_bias() {
-    let out = run(&[
-        "--format", "compact", "pack", "--tokens", "500", "--focus", "src",
-    ]);
-    assert!(out.status.success());
-    let json: serde_json::Value =
-        common::parse_response(&out.stdout).expect("pack stdout must be valid JSON");
-    assert_eq!(json["focus"], "src");
-    assert!(json["files"]["count"].as_u64().unwrap_or(0) > 0);
-    assert!(json["budget_tokens"].as_u64().unwrap() == 500);
+/// A TypeScript project of two files, one importing the other, for `pack`
+/// to rank.
+#[cfg(unix)]
+fn pack_project() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(
+        root.path().join("src/a.ts"),
+        "import { b } from \"./b\";\nexport const a = b;\n",
+    )
+    .unwrap();
+    std::fs::write(root.path().join("src/b.ts"), "export const b = 1;\n").unwrap();
+    root
 }
 
+#[cfg(unix)]
+#[test]
+fn pack_emits_valid_json_with_focus_bias() {
+    let root = pack_project();
+    let json = json_ok(
+        root.path(),
+        &[
+            "--format", "compact", "pack", "--tokens", "500", "--focus", "src",
+        ],
+    );
+    assert_eq!(json["focus"], "src");
+    assert!(json["files"]["count"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(json["budget_tokens"], 500);
+}
+
+#[cfg(unix)]
 #[test]
 fn pack_markdown_shape_emits_plain_text_header() {
-    let out = run(&["pack", "--tokens", "500", "--shape", "markdown"]);
+    let root = pack_project();
+    let out = run_in(
+        root.path(),
+        &["pack", "--tokens", "500", "--shape", "markdown"],
+    );
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.starts_with("# Symora context pack"));
