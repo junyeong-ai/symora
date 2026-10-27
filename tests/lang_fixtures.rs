@@ -352,7 +352,13 @@ fn pyright_resolves_across_package_boundaries() {
 
     // diagnostics on the importing file are clean: a broken venv or
     // wiped settings surface as phantom missing-import diagnostics.
-    let diagnostics = run_in_fixture(&["diagnostics".into(), report_rel.into()]);
+    let diagnostics = settled(
+        &mut session,
+        "get_diagnostics",
+        json!({"file": report_rel}),
+        |page| page.get("status").is_none(),
+        "pyright confirms the importing file's diagnostics",
+    );
     let import_errors = diagnostics["items"]
         .as_array()
         .expect("diagnostics items")
