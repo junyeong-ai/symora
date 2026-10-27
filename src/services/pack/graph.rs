@@ -9584,6 +9584,52 @@ mod tests {
         );
     }
 
+    /// A `package.json` that is no JSON is still the package scope of the
+    /// files below it, declaring nothing, as tsc 5.9.3, 6.0.3 and 7.0.2
+    /// read it under `node16`: no `imports` (`#cfg`), no name (`lib/cfg`)
+    /// and no `"type"`, so an import is a CommonJS one, which adds an
+    /// extension (`../x`); the scope above it is not read in its place.
+    #[test]
+    fn a_package_json_that_is_no_json_is_a_scope_declaring_nothing() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let nodes = vec![
+            ts(
+                0,
+                "src/main.ts",
+                "import \"#cfg\";\nimport \"lib/cfg\";\nimport \"./x\";\n",
+            ),
+            ts(1, "src/sub/m.ts", "import \"#cfg\";\n"),
+            ts(2, "src/sub/o.ts", "import \"lib/cfg\";\n"),
+            ts(3, "src/sub/r.ts", "import \"../x\";\n"),
+            ts(4, "src/cfg.ts", ""),
+            ts(5, "src/x.ts", ""),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"name\": \"lib\", \"type\": \"module\", \"exports\": {\"./cfg\": \
+                     \"./src/cfg.ts\"}, \"imports\": {\"#cfg\": \"./src/cfg.js\"}, \
+                     \"devDependencies\": {\"typescript\": \"5.9.3\"}}",
+                ),
+                (
+                    "tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"node16\", \"moduleResolution\": \
+                     \"node16\"}}",
+                ),
+                ("src/sub/package.json", "{ \"type\": \"module\", "),
+            ],
+            &nodes,
+        );
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        assert_eq!(edges(0), ["src/cfg.ts"]);
+        assert!(edges(1).is_empty());
+        assert!(edges(2).is_empty());
+        assert_eq!(edges(3), ["src/x.ts"]);
+        let graph = build_import_graph(&nodes, &manifests);
+        assert!(graph.undetermined_imports.is_empty());
+    }
+
     /// A package's `exports` maps by conditions, read in their written order
     /// as TypeScript 6 matches them: `types`, `default` and the configured
     /// `customConditions` always, `import` under `bundler` or for an ES
