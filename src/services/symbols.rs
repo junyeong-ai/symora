@@ -1,15 +1,16 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
 
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 
-/// A parser and its pre-compiled extraction query for one language. The
-/// query is compiled once at startup, not per file — query compilation is
-/// the dominant per-call cost otherwise.
+/// A parser and its compiled extraction query for one language, built the
+/// first time a file of that language is read and kept for every later one:
+/// query compilation is the dominant cost of a read otherwise, and a process
+/// that reads one language need not compile the others.
 struct LanguageEntry {
     parser: Mutex<Parser>,
     query: Query,
@@ -21,9 +22,9 @@ struct LanguageEntry {
 /// Tree-sitter declaration extraction: the index's symbol rows, and the
 /// grammar's answer wherever a language server does not read a file. One
 /// registry maps each supported language to its parser and compiled query;
-/// adding a language is a single `register` call.
+/// adding a language is one `EXTRACTORS` row.
 pub struct SymbolExtractor {
-    languages: HashMap<Language, LanguageEntry>,
+    languages: HashMap<Language, OnceLock<Option<LanguageEntry>>>,
 }
 
 impl Default for SymbolExtractor {
@@ -122,11 +123,26 @@ const EXTRACTORS: &[(Language, fn() -> tree_sitter::Language, &str)] = &[
 
 impl SymbolExtractor {
     pub fn new() -> Self {
-        let mut languages = HashMap::new();
-        for (language, grammar, query) in EXTRACTORS {
-            register(&mut languages, *language, grammar(), query);
-        }
+        let languages = EXTRACTORS
+            .iter()
+            .map(|(language, _, _)| (*language, OnceLock::new()))
+            .collect();
         Self { languages }
+    }
+
+    /// The parser and query of `language`, compiled the first time it is
+    /// asked for ([`compile`]); `None` for a language with no extractor, or
+    /// one this build cannot compile.
+    fn entry(&self, language: Language) -> Option<&LanguageEntry> {
+        self.languages
+            .get(&language)?
+            .get_or_init(|| {
+                let (_, grammar, query) = EXTRACTORS
+                    .iter()
+                    .find(|(registered, _, _)| *registered == language)?;
+                compile(grammar(), query)
+            })
+            .as_ref()
     }
 
     /// What this binary's extraction would make of a file, as one value.
@@ -558,7 +574,7 @@ impl SymbolExtractor {
     /// declarations. So each blank needs a proof of its own, and a file reads
     /// what its proved blanks give.
     fn parse(&self, content: &str, language: Language) -> Option<Tree> {
-        let entry = self.languages.get(&language)?;
+        let entry = self.entry(language)?;
         let mut parser = entry.parser.lock().ok()?;
         let mut tree = parser.parse(content, None)?;
         if language == Language::Cpp {
@@ -595,7 +611,7 @@ impl SymbolExtractor {
         content: &str,
         language: Language,
     ) -> Vec<(Node<'t>, Symbol)> {
-        let Some(entry) = self.languages.get(&language) else {
+        let Some(entry) = self.entry(language) else {
             return Vec::new();
         };
         let mut cursor = QueryCursor::new();
@@ -3383,37 +3399,24 @@ fn takes_self(parameters: Node) -> bool {
     })
 }
 
-fn register(
-    languages: &mut HashMap<Language, LanguageEntry>,
-    language: Language,
-    ts_language: tree_sitter::Language,
-    query_src: &str,
-) {
-    // The grammar and its query are compiled into the binary, so registration
+fn compile(ts_language: tree_sitter::Language, query_src: &str) -> Option<LanguageEntry> {
+    // The grammar and its query are compiled into the binary, so compilation
     // is deterministic for a given build. A failure means a defective grammar
-    // (an incompatible ABI or a query whose node types moved) — skip that one
-    // language so an unrelated language never loses indexing over it. The
-    // registration- and extraction-completeness tests fail loudly when a
-    // language is missing or under-extracted, so a defective grammar surfaces as
-    // a targeted test failure rather than silent index loss.
+    // (an incompatible ABI or a query whose node types moved) — that one
+    // language reads nothing, so an unrelated language never loses indexing
+    // over it. The registration- and extraction-completeness tests fail
+    // loudly when a language is missing or under-extracted, so a defective
+    // grammar surfaces as a targeted test failure rather than silent index
+    // loss.
     let mut parser = Parser::new();
-    if parser.set_language(&ts_language).is_err() {
-        return;
-    }
-    let Ok(query) = Query::new(&ts_language, query_src) else {
-        return;
-    };
-    let Some(declaration) = query.capture_index_for_name("symbol") else {
-        return;
-    };
-    languages.insert(
-        language,
-        LanguageEntry {
-            parser: Mutex::new(parser),
-            query,
-            declaration,
-        },
-    );
+    parser.set_language(&ts_language).ok()?;
+    let query = Query::new(&ts_language, query_src).ok()?;
+    let declaration = query.capture_index_for_name("symbol")?;
+    Some(LanguageEntry {
+        parser: Mutex::new(parser),
+        query,
+        declaration,
+    })
 }
 
 /// The symbols the declaration `node` declares: its one name, or each name a
@@ -6277,8 +6280,7 @@ mod tests {
                     *expected,
                     "{language:?} {name}: {}",
                     extractor
-                        .languages
-                        .get(language)
+                        .entry(*language)
                         .unwrap()
                         .parser
                         .lock()
@@ -7741,7 +7743,7 @@ region     = "us-central1"
         },
     ];
 
-    /// Pins the static `supported_languages` answer to runtime registration:
+    /// Pins the static `supported_languages` answer to runtime compilation:
     /// a grammar bump that breaks one language's ABI or extraction query
     /// fails here loudly instead of degrading to silent empty results.
     #[test]
@@ -7749,14 +7751,10 @@ region     = "us-central1"
         let extractor = SymbolExtractor::new();
         for language in SymbolExtractor::supported_languages() {
             assert!(
-                extractor.languages.contains_key(language),
-                "{language:?} failed to register — its grammar ABI or extraction query is broken"
+                extractor.entry(*language).is_some(),
+                "{language:?} failed to compile — its grammar ABI or extraction query is broken"
             );
         }
-        assert_eq!(
-            extractor.languages.len(),
-            SymbolExtractor::supported_languages().len()
-        );
     }
 
     #[test]
@@ -7879,7 +7877,7 @@ region     = "us-central1"
         let extractor = SymbolExtractor::new();
         let mut unread = Vec::new();
         for (language, _, query_src) in EXTRACTORS {
-            let query = &extractor.languages[language].query;
+            let query = &extractor.entry(*language).unwrap().query;
             let mut matched = vec![false; query.pattern_count()];
             for fixture in DECLARATION_FIXTURES
                 .iter()

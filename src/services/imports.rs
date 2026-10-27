@@ -4,14 +4,15 @@
 //! depends on the language, source roots, and build configuration.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 
 use crate::models::symbol::Language;
 
-/// A parser and its compiled import query for one language, both built once.
+/// A parser and its compiled import query for one language, both built the
+/// first time a file of that language is read.
 struct LanguageEntry {
     parser: Mutex<Parser>,
     query: Query,
@@ -48,7 +49,7 @@ enum Dialect {
 }
 
 pub struct ImportExtractor {
-    languages: HashMap<Language, LanguageEntry>,
+    languages: HashMap<Language, OnceLock<Option<LanguageEntry>>>,
 }
 
 impl Default for ImportExtractor {
@@ -59,11 +60,26 @@ impl Default for ImportExtractor {
 
 impl ImportExtractor {
     pub fn new() -> Self {
-        let mut languages = HashMap::new();
-        for &(language, grammar, query, dialect) in IMPORT_EXTRACTORS {
-            register(&mut languages, language, grammar(), query, dialect);
-        }
+        let languages = IMPORT_EXTRACTORS
+            .iter()
+            .map(|&(language, _, _, _)| (language, OnceLock::new()))
+            .collect();
         Self { languages }
+    }
+
+    /// The parser and query of `language`, compiled the first time it is
+    /// asked for ([`compile`]); `None` for a language pack reads no imports
+    /// of, or one this build cannot compile.
+    fn entry(&self, language: Language) -> Option<&LanguageEntry> {
+        self.languages
+            .get(&language)?
+            .get_or_init(|| {
+                let &(_, grammar, query, dialect) = IMPORT_EXTRACTORS
+                    .iter()
+                    .find(|(registered, _, _, _)| *registered == language)?;
+                compile(grammar(), query, dialect)
+            })
+            .as_ref()
     }
 
     pub fn shared() -> &'static Self {
@@ -104,7 +120,7 @@ impl ImportExtractor {
     /// The package `content` declares and the module references it makes.
     pub fn extract(&self, content: &str, language: Language) -> FileImports {
         let mut imports = FileImports::default();
-        let Some(entry) = self.languages.get(&language) else {
+        let Some(entry) = self.entry(language) else {
             return imports;
         };
         let tree = {
@@ -429,34 +445,25 @@ pub enum ModulePath {
     Undetermined,
 }
 
-fn register(
-    languages: &mut HashMap<Language, LanguageEntry>,
-    language: Language,
+fn compile(
     ts_language: tree_sitter::Language,
     query_src: &str,
     dialect: Dialect,
-) {
+) -> Option<LanguageEntry> {
     // The grammar and its query are compiled into the binary, so
-    // registration is deterministic for a given build. A failure means a
+    // compilation is deterministic for a given build. A failure means a
     // defective grammar — an incompatible ABI, or a query whose node types
     // moved — so that one language loses its edges rather than taking the
     // rest down with it. The coverage test below fails loudly when one goes
     // missing.
     let mut parser = Parser::new();
-    if parser.set_language(&ts_language).is_err() {
-        return;
-    }
-    let Ok(query) = Query::new(&ts_language, query_src) else {
-        return;
-    };
-    languages.insert(
-        language,
-        LanguageEntry {
-            parser: Mutex::new(parser),
-            query,
-            dialect,
-        },
-    );
+    parser.set_language(&ts_language).ok()?;
+    let query = Query::new(&ts_language, query_src).ok()?;
+    Some(LanguageEntry {
+        parser: Mutex::new(parser),
+        query,
+        dialect,
+    })
 }
 
 /// The references one matched import names.
@@ -1480,7 +1487,7 @@ module "ordinary-percent" { source = "./100%" }
         let extractor = ImportExtractor::new();
         let mut unread = Vec::new();
         for (language, _, query_src, _) in IMPORT_EXTRACTORS {
-            let entry = &extractor.languages[language];
+            let entry = extractor.entry(*language).unwrap();
             let (_, source) = IMPORT_FIXTURES
                 .iter()
                 .find(|(fixture, _)| fixture == language)
@@ -1526,7 +1533,7 @@ module "ordinary-percent" { source = "./100%" }
             Language::Terraform,
         ] {
             assert!(
-                extractor.languages.contains_key(&language),
+                extractor.entry(language).is_some(),
                 "{language:?} lost its import query — a defective grammar or a moved node type"
             );
         }
