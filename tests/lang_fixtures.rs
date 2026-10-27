@@ -1077,6 +1077,62 @@ fn a_caller_read_right_after_an_edit_answers_for_it() {
     }
 }
 
+/// A package of the project installed editable is on the import path through
+/// the venv's `.pth` file. pyright reads a module it reaches first through an
+/// import from there as a third-party one, and drops its errors even once the
+/// module is opened, so a package another module imports has to be local to
+/// pyright to report its own errors.
+#[test]
+#[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
+fn an_editable_package_read_after_its_importer_reports_its_errors() {
+    if !pyright_on_path() {
+        return;
+    }
+    let module = "packages/lib/src/lib_pkg/__init__.py";
+    let repo = repository(&[
+        (module, "def f(x: int) -> int:\n    return str(x)\n"),
+        ("app.py", "from lib_pkg import f\n\nf(1)\n"),
+    ]);
+    let venv = Command::new("python3")
+        .args(["-m", "venv", "--without-pip", ".venv"])
+        .current_dir(repo.path())
+        .status()
+        .expect("python3");
+    assert!(venv.success());
+    let site = std::fs::read_dir(repo.path().join(".venv/lib"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("site-packages");
+    std::fs::write(
+        site.join("_editable_lib.pth"),
+        format!(
+            "{}\n",
+            repo.path()
+                .canonicalize()
+                .unwrap()
+                .join("packages/lib/src")
+                .display()
+        ),
+    )
+    .unwrap();
+    let mut session = McpSession::new(Some(repo.path()));
+    settled(
+        &mut session,
+        "get_diagnostics",
+        json!({"file": "app.py"}),
+        |page| page.get("status").is_none(),
+        "pyright reads the module that imports the package",
+    );
+    let page = session
+        .call("get_diagnostics", json!({"file": module}))
+        .remove(0);
+    assert!(page.get("status").is_none(), "{page}");
+    assert_eq!(errors(&page), 1, "{page}");
+}
+
 /// rust-analyzer is read by pull once it reports its workspace loaded, so a
 /// read right after an edit answers for the edited content, including an
 /// edit that leaves its diagnostics as they were, which it publishes no

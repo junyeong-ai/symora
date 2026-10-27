@@ -438,7 +438,7 @@ pythonPath = "/path/to/project/.venv/bin/python"
 extraPaths = ["packages/core/src"]
 ```
 
-프로젝트가 사용하는 환경이나 서버 자체 설정을 우선 준비하세요. 위 경로는 명시적인 설정 예시이며 Symora가 패키지 경로를 추측해 추가하지는 않습니다. 같은 언어에 대해 프로젝트 설정에 둔 `[lsp.servers.<language>]` 섹션은 사용자 설정의 같은 섹션 전체를 대체합니다.
+프로젝트가 사용하는 환경이나 서버 자체 설정을 우선 준비하세요. 위 경로는 명시적인 설정 예시입니다. Symora가 직접 넣는 경로는 프로젝트 venv의 `.pth` 파일이 import 경로에 올리는 디렉터리 중 프로젝트 안에 있는 것, 곧 편집 가능하게 설치한 프로젝트 패키지의 소스 루트뿐입니다. pyright는 site-packages를 거쳐 처음 만난 모듈을 서드파티로 읽어 그 파일을 열어도 오류와 경고를 빼므로, 이 경로를 `extraPaths`로 전달해 프로젝트 코드로 읽게 합니다. `settings`에 `extraPaths`를 지정하면 그 값이 대신 적용됩니다. 같은 언어에 대해 프로젝트 설정에 둔 `[lsp.servers.<language>]` 섹션은 사용자 설정의 같은 섹션 전체를 대체합니다.
 
 `symora doctor python`의 `python_interpreter`는 새 서버에 전달할 인터프리터 설정의 출처를 표시합니다. 명시한 `settings`, 프로젝트에서 찾은 `project_environment`, 서버에 선택을 맡긴 `server_default`를 구분합니다. `serves`가 확인하는 것은 LSP 핸드셰이크 완료뿐이며, 두 필드 모두 import 해석이나 참조의 완전성을 검증하지 않습니다. 유지 중인 daemon 세션에 변경한 설정이나 새로 준비한 환경을 적용하려면 `symora daemon restart --project`를 실행해야 합니다.
 
