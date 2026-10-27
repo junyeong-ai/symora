@@ -79,18 +79,23 @@ pub struct Range {
     pub end: Position,
 }
 
-/// A `textDocument/definition` answer: the target declaration, and whether
+/// A `textDocument/definition` answer: the target declaration, whether
 /// the server said the queried token IS its own definition — the target
 /// lies inside the origin token it identified at the query position
 /// (`LocationLink.originSelectionRange`), or, for a server answering plain
-/// `Location`s, exactly at the queried position. A self-definition names
-/// no other position (a declaration keyword — rust-analyzer's `fn` — or a
-/// binding queried at its own declaration), so readers treat it exactly
-/// as they treat "no definition".
+/// `Location`s, exactly at the queried position — and every definition the
+/// server named. A self-definition names no other position (a declaration
+/// keyword — rust-analyzer's `fn` — or a binding queried at its own
+/// declaration), so readers treat it exactly as they treat "no definition".
 #[derive(Debug, Clone)]
 pub struct Definition {
     pub location: crate::models::symbol::Location,
     pub is_self: bool,
+    /// Every definition the server named, in its order, `location` among
+    /// them. A server names each declaration of a symbol declared more than
+    /// once: pyright each `@overload` stub of a function and each accessor
+    /// of a property.
+    pub candidates: Vec<crate::models::symbol::Location>,
 }
 
 impl Range {

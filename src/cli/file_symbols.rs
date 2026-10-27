@@ -48,10 +48,11 @@ impl FileSymbols {
     /// if their names share a character ([`names_alike`]): clangd reads the
     /// qualifier where the grammar places `Widget::set` as class `Widget`,
     /// and its own `set` as the member. Otherwise the grammar's position
-    /// serves if the server's definition there is the same declaration, and
-    /// nothing does where it is none or another: the analyzer reads the `(`
-    /// where the grammar places a Dart enum's primary constructor as the
-    /// enum.
+    /// serves if a definition the server names there is the same
+    /// declaration — pyright names every `@overload` stub of a function at
+    /// each of them, and its outline holds the implementation alone — and
+    /// nothing does where each is another: the analyzer reads the `(` where
+    /// the grammar places a Dart enum's primary constructor as the enum.
     pub async fn served_as<'a>(
         &'a self,
         lsp: &dyn LspService,
@@ -69,13 +70,18 @@ impl FileSymbols {
             return Some(alike);
         }
         let definition = lsp.goto_definition(file, line, column).await.ok()?.data?;
-        let defined = &definition.location;
-        (defined.file == file
-            && share_a_character(
-                span(defined, defined.end_line.zip(defined.end_column)),
-                name_span(symbol),
-            ))
-        .then_some(symbol)
+        let name = name_span(symbol);
+        definition
+            .candidates
+            .iter()
+            .any(|defined| {
+                defined.file == file
+                    && share_a_character(
+                        span(defined, defined.end_line.zip(defined.end_column)),
+                        name,
+                    )
+            })
+            .then_some(symbol)
     }
 }
 

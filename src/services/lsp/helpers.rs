@@ -436,20 +436,24 @@ pub(super) fn filter_locations_within_project(
         .collect()
 }
 
-/// Order definition candidates by source priority: in-project source beats
+/// The index of the definition candidate, among those at `uris`, that
+/// navigation follows, by source priority: in-project source beats
 /// vendored/generated paths inside the project, which beat locations outside
 /// it. Within a tier, a TS/JS implementation beats its `.d.ts` declaration.
-/// A lone vendored or external candidate is still returned — a real location
+/// A lone vendored or external candidate is still chosen — a real location
 /// is more honest than an empty result (invariant #4).
 pub(super) fn select_best_definition<'a>(
-    locations: &'a [LspLocation],
+    uris: impl IntoIterator<Item = &'a str>,
     project_root: &Path,
-) -> Option<&'a LspLocation> {
+) -> Option<usize> {
     // On ties `min_by_key` keeps the first candidate, preserving server order.
-    locations.iter().min_by_key(|l| {
-        let tier = definition_tier(&uri_to_path(&l.uri), project_root);
-        (tier, l.uri.ends_with(".d.ts"))
-    })
+    uris.into_iter()
+        .enumerate()
+        .min_by_key(|(_, uri)| {
+            let tier = definition_tier(&uri_to_path(uri), project_root);
+            (tier, uri.ends_with(".d.ts"))
+        })
+        .map(|(index, _)| index)
 }
 
 pub fn find_containing_callable(symbols: &[Symbol], target_line: u32) -> Option<&Symbol> {
@@ -613,14 +617,6 @@ mod tests {
         assert!(result.is_none());
     }
 
-    fn lsp_location(uri: &str) -> LspLocation {
-        LspLocation {
-            uri: uri.to_string(),
-            range: Default::default(),
-            origin: None,
-        }
-    }
-
     #[test]
     fn definition_tier_classifies_per_component_not_substring() {
         let root = Path::new("/proj");
@@ -656,47 +652,37 @@ mod tests {
     #[test]
     fn select_best_definition_prefers_in_project_source_for_any_language() {
         let root = Path::new("/proj");
-        let locs = vec![
-            lsp_location("file:///proj/vendor/dep/lib.go"),
-            lsp_location("file:///usr/lib/go/fmt/print.go"),
-            lsp_location("file:///proj/internal/svc/handler.go"),
+        let uris = [
+            "file:///proj/vendor/dep/lib.go",
+            "file:///usr/lib/go/fmt/print.go",
+            "file:///proj/internal/svc/handler.go",
         ];
-        assert_eq!(
-            select_best_definition(&locs, root).unwrap().uri,
-            "file:///proj/internal/svc/handler.go"
-        );
+        assert_eq!(select_best_definition(uris, root), Some(2));
     }
 
     #[test]
     fn select_best_definition_returns_a_lone_external_candidate() {
         let root = Path::new("/proj");
-        let locs = vec![lsp_location("file:///usr/lib/python3/site-packages/os.py")];
         // A real external location beats an empty answer (invariant #4).
-        assert!(select_best_definition(&locs, root).is_some());
-        assert!(select_best_definition(&[], root).is_none());
+        assert_eq!(
+            select_best_definition(["file:///usr/lib/python3/site-packages/os.py"], root),
+            Some(0)
+        );
+        assert_eq!(select_best_definition([], root), None);
     }
 
     #[test]
     fn select_best_definition_demotes_d_ts_within_a_tier_only() {
         let root = Path::new("/proj");
         // Within in-project candidates the implementation wins over .d.ts…
-        let locs = vec![
-            lsp_location("file:///proj/src/api.d.ts"),
-            lsp_location("file:///proj/src/api.ts"),
-        ];
-        assert_eq!(
-            select_best_definition(&locs, root).unwrap().uri,
-            "file:///proj/src/api.ts"
-        );
+        let uris = ["file:///proj/src/api.d.ts", "file:///proj/src/api.ts"];
+        assert_eq!(select_best_definition(uris, root), Some(1));
         // …but an in-project .d.ts still beats a vendored implementation.
-        let locs = vec![
-            lsp_location("file:///proj/node_modules/dep/index.js"),
-            lsp_location("file:///proj/types/api.d.ts"),
+        let uris = [
+            "file:///proj/node_modules/dep/index.js",
+            "file:///proj/types/api.d.ts",
         ];
-        assert_eq!(
-            select_best_definition(&locs, root).unwrap().uri,
-            "file:///proj/types/api.d.ts"
-        );
+        assert_eq!(select_best_definition(uris, root), Some(1));
     }
 
     #[test]

@@ -74,40 +74,38 @@ pub(super) async fn goto_definition(
     line: u32,
     column: u32,
 ) -> Result<Indexed<Option<Definition>>, LspError> {
-    let project_root = service.manager.root().to_path_buf();
-    let chosen = goto_location(
-        service,
-        file,
-        line,
-        column,
-        "textDocument/definition",
-        None,
-        |locs| select_best_definition(locs, &project_root).cloned(),
-    )
-    .await?;
-    Ok(Indexed::new(
-        chosen.data.map(|(wire, location)| {
-            // The server said the queried token is its own definition when the
-            // target starts inside the origin token it identified at the query
-            // position. A plain-Location server names no origin; the one thing
-            // it can still say that way is a definition of the exact queried
-            // position to itself. Same-file is judged on the PARSED path — a
-            // raw URI comparison would split on percent-encoding choices the
-            // two sides are free to make differently (`(`, `,`, `+`, …).
-            let is_self = location.file == file
-                && match &wire.origin {
-                    Some(origin) => {
-                        (origin.start.line, origin.start.character)
-                            <= (wire.range.start.line, wire.range.start.character)
-                            && (wire.range.start.line, wire.range.start.character)
-                                < (origin.end.line, origin.end.character)
-                    }
-                    None => (location.line, location.column) == (line, column),
-                };
-            Definition { location, is_self }
-        }),
-        chosen.indexing,
-    ))
+    let named =
+        goto_locations(service, file, line, column, "textDocument/definition", None).await?;
+    let best = select_best_definition(
+        named.data.iter().map(|(wire, _)| wire.uri.as_str()),
+        service.manager.root(),
+    );
+    let definition = best.map(|index| {
+        let (wire, location) = &named.data[index];
+        // The server said the queried token is its own definition when the
+        // target starts inside the origin token it identified at the query
+        // position. A plain-Location server names no origin; the one thing
+        // it can still say that way is a definition of the exact queried
+        // position to itself. Same-file is judged on the PARSED path — a
+        // raw URI comparison would split on percent-encoding choices the
+        // two sides are free to make differently (`(`, `,`, `+`, …).
+        let is_self = location.file == file
+            && match &wire.origin {
+                Some(origin) => {
+                    (origin.start.line, origin.start.character)
+                        <= (wire.range.start.line, wire.range.start.character)
+                        && (wire.range.start.line, wire.range.start.character)
+                            < (origin.end.line, origin.end.character)
+                }
+                None => (location.line, location.column) == (line, column),
+            };
+        Definition {
+            location: location.clone(),
+            is_self,
+            candidates: named.data.iter().map(|(_, named)| named.clone()).collect(),
+        }
+    });
+    Ok(Indexed::new(definition, named.indexing))
 }
 
 pub(super) async fn goto_type_definition(
@@ -116,7 +114,7 @@ pub(super) async fn goto_type_definition(
     line: u32,
     column: u32,
 ) -> Result<Indexed<Option<Location>>, LspError> {
-    let chosen = goto_location(
+    let named = goto_locations(
         service,
         file,
         line,
@@ -127,24 +125,25 @@ pub(super) async fn goto_type_definition(
         // never yields None for it, so a gate here would be inert dead code. A
         // genuine -32601 from the server is already mapped to honest Unsupported.
         None,
-        |locs| locs.first().cloned(),
     )
     .await?;
     Ok(Indexed::new(
-        chosen.data.map(|(_, location)| location),
-        chosen.indexing,
+        named.data.into_iter().next().map(|(_, location)| location),
+        named.indexing,
     ))
 }
 
-async fn goto_location(
+/// Every location a navigation request names at a position, in the server's
+/// order: as the server sent it, which keeps the origin a `LocationLink`
+/// names, and decoded.
+async fn goto_locations(
     service: &DefaultLspService,
     file: &Path,
     line: u32,
     column: u32,
     method: &str,
     feature: Option<LspFeature>,
-    select: impl Fn(&[LspLocation]) -> Option<LspLocation>,
-) -> Result<Indexed<Option<(LspLocation, Location)>>, LspError> {
+) -> Result<Indexed<Vec<(LspLocation, Location)>>, LspError> {
     if let Some(feat) = feature {
         check_feature_support(file, feat)?;
     }
@@ -159,7 +158,6 @@ async fn goto_location(
             let file = file.clone();
             let manager = Arc::clone(&manager);
             let method = method.clone();
-            let select = &select;
             async move {
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
@@ -181,17 +179,18 @@ async fn goto_location(
                     .request(&method, Some(serde_json::to_value(params)?))
                     .await?;
 
-                // The chosen target is decoded from the wire encoding here,
-                // where the client (and so the encoding) is in scope.
-                let chosen = parse_location_response(&result).and_then(|locs| select(&locs));
-                match chosen {
-                    Some(loc) => {
-                        let mut conv = PositionConverter::new(client.position_encoding().await);
-                        let converted = convert_location(&loc, &mut conv);
-                        Ok(indexing.finish(Some((loc, converted))))
-                    }
-                    None => Ok(indexing.finish(None)),
-                }
+                // Each target is decoded from the wire encoding here, where the
+                // client (and so the encoding) is in scope.
+                let mut conv = PositionConverter::new(client.position_encoding().await);
+                let named = parse_location_response(&result)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|loc| {
+                        let decoded = convert_location(&loc, &mut conv);
+                        (loc, decoded)
+                    })
+                    .collect();
+                Ok(indexing.finish(named))
             }
         })
         .await
