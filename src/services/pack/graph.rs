@@ -2370,7 +2370,9 @@ impl ProjectIndex<'_> {
     /// left open, a subpath stands for the file below the package it
     /// spells, as for Node and the bundlers, for which the name stands for
     /// its `main`, else its `index`, where no `module` or `browser` field
-    /// names another (`bundler_entry_differs`). Under `classic`, which reads
+    /// names another (`bundler_entry_differs`), and where no `node_modules`
+    /// before the package takes the name (`installed_before`), with or
+    /// without `exports`. Under `classic`, which reads
     /// no `package.json`, no name is a package's. A package whose file pack
     /// cannot determine is disclosed: a condition the importer's
     /// configuration leaves open, an entry naming no file, or a name two
@@ -2441,6 +2443,11 @@ impl ProjectIndex<'_> {
                 let found =
                     self.workspace_passes(specifier, importer, directory, lookup, true, &read);
                 return Some(found.or_else(spelled).unwrap_or_else(undetermined));
+            }
+            if !typescript
+                && let Some(installed) = self.installed_before(specifier, importer, directory)
+            {
+                return Some(installed);
             }
             let entries: Vec<&str> = if !subpath.is_empty() {
                 vec![subpath]
@@ -2513,6 +2520,9 @@ impl ProjectIndex<'_> {
             self.export_target(target, directory, importer, lookup)
         };
         if !typescript {
+            if !own && let Some(installed) = self.installed_before(specifier, importer, directory) {
+                return installed;
+            }
             return match walk(TargetRead::Script, None) {
                 Exported::Files(files) => Resolution::Files(files),
                 _ => undetermined(),
@@ -2837,6 +2847,41 @@ impl ProjectIndex<'_> {
             .or_else(|| elsewhere(typescript, false))
             .or_else(|| elsewhere(javascript, true))
             .or_else(|| pass(javascript))
+    }
+
+    /// What Node and the bundlers take for a workspace package's name
+    /// before they read the package, as Node 26.12.1, esbuild 0.28.2 and
+    /// webpack's enhanced-resolve 5.24.5 resolve it from the importer's
+    /// directory up, `@types` aside: `None` where the first `node_modules`
+    /// holding the name holds a link to the package, or none holds it, as a
+    /// package manager links it; else no file pack reads, which Node takes
+    /// whatever that `node_modules` holds and the bundlers where it, or
+    /// another before the link, sets `exports` or holds a file for the
+    /// specifier (`node_modules_finds`); and where none does, which the
+    /// bundlers pass over to the link, a disclosure.
+    fn installed_before(
+        &self,
+        specifier: &str,
+        importer: &Importer,
+        package: &[String],
+    ) -> Option<Resolution> {
+        let root = self.manifests.root.as_ref()?;
+        let name = split_components(split_package_name(specifier).0);
+        let first = project_file(root, &importer.node.directory)
+            .ancestors()
+            .map(|at| project_file(&at.join("node_modules"), &name))
+            .find(|installed| installed.is_dir())?;
+        if first.canonicalize().ok() == project_file(root, package).canonicalize().ok() {
+            return None;
+        }
+        let at = Some(importer.node.directory.as_slice());
+        let (lookup, javascript) = (PathLookup::Bundler, Extensions::JavaScript);
+        Some(
+            match self.node_modules_finds(at, specifier, lookup, javascript, Some(package), true) {
+                Some(false) => Resolution::Undetermined(specifier.to_string()),
+                Some(true) | None => Resolution::Files(Vec::new()),
+            },
+        )
     }
 
     /// Whether a bundler can take a package without `exports` for another
@@ -8653,6 +8698,91 @@ mod tests {
                 "{options}"
             );
         }
+    }
+
+    /// Where no TypeScript reads an import, a `node_modules` from the
+    /// importer's directory up holding a workspace package's name before
+    /// its link takes it, as Node 26.12.1, esbuild 0.28.2 and webpack's
+    /// enhanced-resolve 5.24.5 resolve it: a registry copy setting `exports`
+    /// (`w`, `w/sub`) or holding the file (`m`) forms no edge, and one
+    /// holding no file for it (`m/sub.js`), which Node takes and the
+    /// bundlers pass over to the link, is disclosed. `@types` is passed over
+    /// (`t`), a link nearer than a copy is read first (`b`'s `w`), and a
+    /// package's own name read from inside it before a copy of itself (`w`'s
+    /// `w`).
+    #[test]
+    fn a_nearer_node_modules_takes_a_workspace_packages_name_for_node_and_the_bundlers() {
+        let js = |id, rel, source| node_in(id, rel, source, Language::JavaScript);
+        let nodes = vec![
+            js(
+                0,
+                "packages/app/src/main.js",
+                "import \"w\";\nimport \"w/sub\";\nimport \"m\";\nimport \"m/sub.js\";\n\
+                 import \"t\";\n",
+            ),
+            js(1, "packages/b/src/main.js", "import \"w\";\n"),
+            js(2, "packages/w/src/index.js", ""),
+            js(3, "packages/w/src/sub.js", ""),
+            js(4, "packages/m/src/index.js", ""),
+            js(5, "packages/m/sub.js", ""),
+            js(6, "packages/t/src/index.js", ""),
+            js(7, "packages/w/src/self.js", "import \"w\";\n"),
+        ];
+        let copy = "packages/app/node_modules";
+        let manifests = linked_manifests_of(
+            &[
+                ("package.json", "{\"workspaces\": [\"packages/*\"]}"),
+                (
+                    "packages/w/package.json",
+                    "{\"name\": \"w\", \"type\": \"module\", \"exports\": {\".\": \
+                     \"./src/index.js\", \"./sub\": \"./src/sub.js\"}}",
+                ),
+                (
+                    "packages/m/package.json",
+                    "{\"name\": \"m\", \"type\": \"module\", \"main\": \"./src/index.js\"}",
+                ),
+                (
+                    "packages/t/package.json",
+                    "{\"name\": \"t\", \"type\": \"module\", \"exports\": {\".\": \
+                     \"./src/index.js\"}}",
+                ),
+                (
+                    &format!("{copy}/w/package.json"),
+                    "{\"name\": \"w\", \"type\": \"module\", \"exports\": {\".\": \
+                     \"./dist/index.js\", \"./sub\": \"./dist/sub.js\"}}",
+                ),
+                (&format!("{copy}/w/dist/index.js"), ""),
+                (&format!("{copy}/w/dist/sub.js"), ""),
+                (
+                    &format!("{copy}/m/package.json"),
+                    "{\"name\": \"m\", \"type\": \"module\", \"main\": \"./dist/index.js\"}",
+                ),
+                (&format!("{copy}/m/dist/index.js"), ""),
+                (&format!("{copy}/@types/t/index.d.ts"), ""),
+                (
+                    "packages/w/node_modules/w/package.json",
+                    "{\"name\": \"w\", \"type\": \"module\", \"exports\": {\".\": \
+                     \"./dist/index.js\"}}",
+                ),
+                ("packages/w/node_modules/w/dist/index.js", ""),
+            ],
+            &[
+                ("node_modules/w", "packages/w"),
+                ("node_modules/m", "packages/m"),
+                ("node_modules/t", "packages/t"),
+                ("packages/b/node_modules/w", "packages/w"),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        assert_eq!(edges(0), ["packages/t/src/index.js"]);
+        assert_eq!(edges(1), ["packages/w/src/index.js"]);
+        assert_eq!(edges(7), ["packages/w/src/index.js"]);
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["m/sub.js".to_string()])
+        );
     }
 
     /// TypeScript reads a workspace package's `exports` with its
