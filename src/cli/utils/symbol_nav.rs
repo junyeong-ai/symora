@@ -383,7 +383,8 @@ pub enum AnchorResolution {
     /// through its definition).
     Resolved,
     /// Anchored at a declaration the symbol tree does not list — a local, a
-    /// parameter, a generated item — reached through the position's
+    /// parameter, a generated item, one the server's outline omits — reached
+    /// through the position's
     /// definition. The answer is that binding's; the target cannot be named
     /// from the tree.
     Binding,

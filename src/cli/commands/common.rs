@@ -115,13 +115,14 @@ impl Anchor {
             )),
             AnchorResolution::Resolved => None,
             AnchorResolution::Binding if self.input_is_anchor() => Some(format!(
-                "{at} is a binding the symbol tree does not list (a local, a parameter, a module, or a \
-                 generated item); the {subject} shown are its own"
+                "{at} is a binding the symbol tree does not list (a local, a parameter, a module, a \
+                 generated item, or a declaration the server's outline omits); the {subject} shown \
+                 are its own"
             )),
             AnchorResolution::Binding => Some(format!(
                 "{at} denotes a binding declared at {} that the symbol tree does not list (a \
-                 local, a parameter, a module, or a generated item); the {subject} shown are that \
-                 binding's",
+                 local, a parameter, a module, a generated item, or a declaration the server's \
+                 outline omits); the {subject} shown are that binding's",
                 self.declared_at(root),
             )),
             AnchorResolution::NotASymbol if input.column_explicit => Some(format!(
@@ -200,12 +201,13 @@ impl Anchor {
             AnchorResolution::Resolved => {}
             AnchorResolution::Binding if self.input_is_anchor() => hints.push(format!(
                 "{role} {at} is a binding the symbol tree does not list (a local, a parameter, a module, \
-                 or a generated item); the verdict is about that binding"
+                 a generated item, or a declaration the server's outline omits); the verdict is about \
+                 that binding"
             )),
             AnchorResolution::Binding => hints.push(format!(
                 "{role} {at} denotes a binding the symbol tree does not list (a local, a \
-                 parameter, a module, or a generated item); the verdict is about that binding, \
-                 anchored at its declaration {}",
+                 parameter, a module, a generated item, or a declaration the server's outline \
+                 omits); the verdict is about that binding, anchored at its declaration {}",
                 self.declared_at(root),
             )),
             AnchorResolution::NotASymbol => hints.push(format!(
