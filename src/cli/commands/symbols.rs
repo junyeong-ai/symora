@@ -9,7 +9,7 @@ use crate::app::App;
 use crate::cli::analysis::LocationAnalysis;
 use crate::cli::commands::common::parse_symbol_kind;
 use crate::cli::response::{Section, SymbolOutput, SymbolSource};
-use crate::cli::{OutputError, resolve_project_file};
+use crate::cli::{FileSymbols, OutputError, resolve_project_file};
 use crate::constants::defaults::SYMBOL_REFS_CONCURRENCY;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Symbol, SymbolFilter, SymbolKind};
@@ -111,13 +111,13 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
         None => crate::cli::declared_in(app, &abs_path, options).await,
     };
     match answer {
-        Ok(answer) => {
-            let declarations = filter.outermost(answer.symbols);
+        Ok(mut answer) => {
+            let declarations = filter.outermost(std::mem::take(&mut answer.symbols));
 
             let total = declarations.len();
             let listed = &declarations[..total.min(limit)];
             let counts = match args.refs {
-                true => Some(count_references(app, &abs_path, listed).await),
+                true => Some(count_references(app, &abs_path, &answer, listed).await),
                 false => None,
             };
             let items: Vec<SymbolOutput> = listed
@@ -178,14 +178,26 @@ fn countable<'a>(symbols: &'a [Symbol], out: &mut Vec<&'a Symbol>) {
     }
 }
 
-async fn count_references(app: &App, file: &Path, listed: &[Symbol]) -> ReferenceCounts {
+/// Each listed declaration's references, asked where the language server
+/// reads that declaration ([`FileSymbols::served_as`]): a count taken at a
+/// position it reads as another declaration would be that declaration's.
+async fn count_references(
+    app: &App,
+    file: &Path,
+    answer: &FileSymbols,
+    listed: &[Symbol],
+) -> ReferenceCounts {
     let mut targets = Vec::new();
     countable(listed, &mut targets);
     futures::stream::iter(targets.into_iter().cloned())
         .map(|symbol: Symbol| async move {
             let key = (symbol.location.line, symbol.location.column);
+            let Some(served) = answer.served_as(app.lsp.as_ref(), file, &symbol).await else {
+                return (key, Counted::Unavailable);
+            };
+            let served = served.clone();
             let analysis =
-                LocationAnalysis::for_symbol(app.lsp.as_ref(), file, symbol, app.root()).await;
+                LocationAnalysis::for_symbol(app.lsp.as_ref(), file, served, app.root()).await;
             let counted = match analysis {
                 Ok(analysis) => {
                     let classified = analysis.classify(app.test_scope());

@@ -4719,6 +4719,17 @@ fn a_declaration_the_servers_tree_lacks_is_answered_from_the_grammar() {
     assert_eq!(answer["backend"], "document", "{answer}");
     assert_eq!(answer["count"], 0, "{answer}");
 
+    // A row's references are asked where the server reads its declaration:
+    // the analyzer's definition at the representation field's name is the
+    // field, and at the `(` where the grammar places the enum's constructor
+    // is the enum, so no count is taken for the constructor.
+    let answer = json_ok(dir, &["symbols", "f.dart", "--symbol", "X/raw", "--refs"]);
+    assert_eq!(answer["items"][0]["refs"], 1, "{answer}");
+    let answer = json_ok(dir, &["symbols", "f.dart", "--symbol", "E/E", "--refs"]);
+    assert_eq!(answer["items"][0]["name_path"], "E/E", "{answer}");
+    assert_eq!(answer["items"][0]["refs_status"], "unavailable", "{answer}");
+    assert!(answer["items"][0].get("refs").is_none(), "{answer}");
+
     let edit = json_ok(
         dir,
         &[
@@ -4848,6 +4859,131 @@ fn an_edit_at_a_qualified_cpp_definition_is_the_servers_whatever_part_of_its_nam
             "{at}: {edit}"
         );
     }
+}
+
+/// A row or an edit target the grammar answered in the server's place is
+/// asked about where the server reads the same declaration. The grammar
+/// places `Widget::set` at its qualifier, which clangd reads as the class,
+/// and clangd places its own `Widget::set` at `set`, so a kind only the
+/// grammar gives it is counted and checked there, as the server's row is.
+#[cfg(unix)]
+#[test]
+fn a_grammar_answered_cpp_definitions_references_are_asked_where_clangd_reads_it() {
+    let Some(root) = clangd_shaped_project() else {
+        return;
+    };
+    let dir = root.path();
+    for (path, backend, kind) in [
+        ("Widget::set", "document", "method"),
+        ("Widget::set[function]", "ast", "function"),
+    ] {
+        let answer = json_ok(dir, &["symbols", "w.cpp", "--symbol", path, "--refs"]);
+        assert_eq!(answer["backend"], backend, "{path}: {answer}");
+        assert_eq!(answer["items"][0]["kind"], kind, "{path}: {answer}");
+        assert_eq!(answer["items"][0]["refs"], 2, "{path}: {answer}");
+    }
+    let edit = json_ok(
+        dir,
+        &[
+            "edit",
+            "delete",
+            "w.cpp",
+            "--symbol",
+            "Widget::set[function]",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(edit["target_kind"], "function", "{edit}");
+    assert_eq!(
+        listed_references(&edit, "dangling_references"),
+        ["w.cpp:5:8", "w.cpp:13:25"],
+        "{edit}"
+    );
+}
+
+/// pyright's tree lists an overloaded method's implementation alone, and
+/// its definition at any of the method's declarations is the first. The
+/// grammar answers an edit at an `@overload` stub; the first stub's
+/// references are asked at its own name, while the second's position reads
+/// as another declaration, so nothing is asked for it: its check and its
+/// callers are unavailable, and a delete that needs no references refuses.
+#[cfg(unix)]
+#[test]
+fn a_declaration_the_server_reads_as_another_is_asked_nothing() {
+    if !Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("pyright-shaped protocol fixture requires python3");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path();
+    std::fs::write(
+        dir.join("o.py"),
+        "from typing import overload\n\n\nclass O:\n    @overload\n    \
+         def f(self, x: int) -> int: ...\n    @overload\n    \
+         def f(self, x: str) -> str: ...\n    def f(self, x):\n        return x\n\n\n\
+         O().f(1)\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.join(".symora")).unwrap();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/code_action_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"python": {
+        "command": "python3",
+        "args": [server, dir.canonicalize().unwrap().join("o.py"), "pyright-outline"]
+    }}}});
+    std::fs::write(
+        dir.join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    let edit = json_ok(dir, &["edit", "delete", "o.py:6:9", "--dry-run"]);
+    assert_eq!(
+        listed_references(&edit, "dangling_references"),
+        ["o.py:8:9", "o.py:9:9", "o.py:13:5"],
+        "{edit}"
+    );
+    let edit = json_ok(dir, &["edit", "delete", "o.py:8:9", "--dry-run"]);
+    assert_eq!(
+        edit["lines"],
+        serde_json::json!({"start": 7, "end": 8}),
+        "{edit}"
+    );
+    assert_eq!(edit["references_status"], "unavailable", "{edit}");
+    assert!(edit.get("dangling_references").is_none(), "{edit}");
+    let refused = run_in(
+        dir,
+        &[
+            "edit",
+            "delete",
+            "o.py:8:9",
+            "--dry-run",
+            "--expect-no-references",
+        ],
+    );
+    assert!(!refused.status.success());
+    let refused: serde_json::Value = common::parse_response(&refused.stdout).unwrap();
+    assert_eq!(refused["error"]["code"], "precondition_failed", "{refused}");
+
+    let edit = json_ok(
+        dir,
+        &[
+            "edit",
+            "replace-body",
+            "o.py:8:9",
+            "--body",
+            "    @overload\n    def f(self, x: bytes) -> bytes: ...",
+            "--verify-callers",
+        ],
+    );
+    assert_eq!(
+        edit["caller_verification"]["status"], "unavailable",
+        "{edit}"
+    );
 }
 
 /// A Go project served by the scripted rename server in `mode`, which never

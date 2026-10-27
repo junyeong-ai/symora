@@ -26,23 +26,36 @@ def server_status(health="ok", quiescent=True):
                   "params": {"health": health, "quiescent": quiescent}})
 
 
-def clangd_range(start, end):
+def lsp_range(start, end):
     return {"start": {"line": start[0], "character": start[1]},
             "end": {"line": end[0], "character": end[1]}}
 
 
-# What clangd 21 answers for each name of the `clangd-outline` source: the
-# tokens that name it, its declaration first, which is where a definition
-# request at any of them lands. A qualifier (`Widget::`) names the class.
-CLANGD_NAMES = [
-    [((0, 7), (0, 13)), ((1, 3), (1, 9)), ((2, 24), (2, 30)), ((7, 0), (7, 6)),
-     ((7, 9), (7, 15)), ((8, 5), (8, 11)), ((8, 30), (8, 36)), ((9, 0), (9, 6)),
-     ((10, 5), (10, 11)), ((12, 9), (12, 15))],
-    [((1, 2), (1, 3)), ((7, 8), (7, 9))],
-    [((2, 7), (2, 15)), ((8, 13), (8, 21)), ((12, 41), (12, 43))],
-    [((3, 11), (3, 19)), ((9, 8), (9, 16)), ((12, 54), (12, 55))],
-    [((4, 7), (4, 10)), ((10, 13), (10, 16)), ((12, 24), (12, 27))],
-]
+# What each outline mode's server answers for the names of its source: per
+# declaration, how many of the tokens naming it a definition request at any
+# of them answers (its declarations, first), and the tokens, which a
+# reference request answers. clangd 21 reads a qualifier (`Widget::`) as
+# its class; pyright answers each declaration of an overloaded method as
+# its definition; the Dart analyzer answers a position where a name ends as
+# it answers the name, so it reads the `(` after an enum's name as the enum.
+NAMES = {
+    "clangd-outline": [
+        (1, [((0, 7), (0, 13)), ((1, 3), (1, 9)), ((2, 24), (2, 30)), ((7, 0), (7, 6)),
+             ((7, 9), (7, 15)), ((8, 5), (8, 11)), ((8, 30), (8, 36)), ((9, 0), (9, 6)),
+             ((10, 5), (10, 11)), ((12, 9), (12, 15))]),
+        (1, [((1, 2), (1, 3)), ((7, 8), (7, 9))]),
+        (1, [((2, 7), (2, 15)), ((8, 13), (8, 21)), ((12, 41), (12, 43))]),
+        (1, [((3, 11), (3, 19)), ((9, 8), (9, 16)), ((12, 54), (12, 55))]),
+        (1, [((4, 7), (4, 10)), ((10, 13), (10, 16)), ((12, 24), (12, 27))]),
+    ],
+    "pyright-outline": [
+        (3, [((5, 8), (5, 9)), ((7, 8), (7, 9)), ((8, 8), (8, 9)), ((12, 4), (12, 5))]),
+    ],
+    "dart-outline": [
+        (1, [((0, 21), (0, 24)), ((1, 19), (1, 22))]),
+        (1, [((4, 5), (4, 6))]),
+    ],
+}
 
 
 def workspace_edit():
@@ -73,8 +86,7 @@ while True:
             "hoverProvider": True,
             "renameProvider": {"prepareProvider": True},
             "workspaceSymbolProvider": mode in ("ranked-symbols", "computed-members"),
-            "documentSymbolProvider": mode in ("computed-members", "dart-outline",
-                                               "clangd-outline")
+            "documentSymbolProvider": mode in ("computed-members", *NAMES)
         }}
     elif method == "initialized":
         if mode in ("unrelated-hover", "busy-rename", "ranked-symbols", "computed-members",
@@ -126,8 +138,8 @@ while True:
         # at its `~` and an operator or a conversion operator at its
         # `operator` keyword alone, a member function at its last name.
         def symbol(name, kind, start, end, selection, children=()):
-            return {"name": name, "kind": kind, "range": clangd_range(start, end),
-                    "selectionRange": clangd_range(*selection),
+            return {"name": name, "kind": kind, "range": lsp_range(start, end),
+                    "selectionRange": lsp_range(*selection),
                     "children": list(children)}
         result = [
             symbol("Widget", 5, (0, 0), (5, 1), ((0, 7), (0, 13)), [
@@ -141,16 +153,27 @@ while True:
             symbol("Widget::set", 6, (10, 0), (10, 24), ((10, 13), (10, 16))),
             symbol("use", 12, (12, 0), (12, 59), ((12, 5), (12, 8))),
         ]
-    elif method in ("textDocument/definition", "textDocument/references") \
-            and mode == "clangd-outline":
+    elif method == "textDocument/documentSymbol" and mode == "pyright-outline":
+        # pyright's outline of a method with two `@overload` stubs lists the
+        # implementation alone.
+        def symbol(name, kind, start, end, selection, children=()):
+            return {"name": name, "kind": kind, "range": lsp_range(start, end),
+                    "selectionRange": lsp_range(*selection),
+                    "children": list(children)}
+        result = [symbol("O", 5, (3, 0), (9, 16), ((3, 6), (3, 7)), [
+            symbol("f", 6, (8, 4), (9, 16), ((8, 8), (8, 9)), [
+                symbol("x", 13, (8, 16), (8, 17), ((8, 16), (8, 17)))])])]
+    elif method in ("textDocument/definition", "textDocument/references") and mode in NAMES:
         at = message["params"]["position"]
         at = (at["line"], at["character"])
-        named = next((tokens for tokens in CLANGD_NAMES
-                      if any(start <= at < end for start, end in tokens)), [])
-        result = [{"uri": source.as_uri(), "range": clangd_range(start, end)}
+        ends = mode == "dart-outline"
+        declared, named = next(((declared, tokens) for declared, tokens in NAMES[mode]
+                                if any(start <= at < end or ends and at == end
+                                       for start, end in tokens)), (0, []))
+        result = [{"uri": source.as_uri(), "range": lsp_range(start, end)}
                   for start, end in named]
         if method == "textDocument/definition":
-            result = result[:1]
+            result = result[:declared]
     elif method == "textDocument/documentSymbol":
         result = []
     elif method == "workspace/symbol" and mode == "computed-members":

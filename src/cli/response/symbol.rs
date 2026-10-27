@@ -26,7 +26,9 @@ pub struct SymbolOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prod_refs: Option<usize>,
     /// Present when the counts are not authoritative: `unavailable` (the
-    /// reference query failed, so they are absent rather than zero) or
+    /// reference query failed, or was not asked because the language
+    /// server reads no position as the declaration, so they are absent
+    /// rather than zero) or
     /// `indexing_degraded` (they are a lower bound).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refs_status: Option<&'static str>,

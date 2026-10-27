@@ -10,7 +10,7 @@ use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::cli::response::LineRange;
 use crate::cli::utils::{declared_with, shell_arg};
-use crate::cli::{declared_addressing, declared_at, declared_in};
+use crate::cli::{FileSymbols, declared_addressing, declared_at, declared_in};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Symbol;
 
@@ -114,16 +114,16 @@ pub(crate) fn resolve_file_path(app: &App, target: impl AsRef<Path>) -> Result<P
 /// resolution stays unit-tested without an LSP round-trip.
 async fn find_symbol_by_path(app: &App, file: PathBuf, pattern: &str) -> Result<Addressed> {
     let expected_hash = crate::infra::hash_content(&fs::read_to_string(&file)?);
-    let symbols = declared_addressing(
+    let declared = declared_addressing(
         app,
         &file,
         FindSymbolsOptions::default().with_depth(10),
         |symbols| !Symbol::filter_by_path(symbols, pattern).is_empty(),
     )
-    .await?
-    .symbols;
-    let symbol = unique_symbol_by_path(&symbols, pattern, &app.output.relative_path(&file))?;
-    Ok(Addressed::among(file, symbol, &symbols, expected_hash))
+    .await?;
+    let symbol =
+        unique_symbol_by_path(&declared.symbols, pattern, &app.output.relative_path(&file))?;
+    Ok(Addressed::among(file, symbol, declared, expected_hash))
 }
 
 /// Pick the one symbol a flexible `--symbol` pattern names: exactly one
@@ -156,25 +156,22 @@ async fn find_symbol_at_location(
     use crate::cli::utils::{SymbolResolution, column_addressed_symbol, line_addressed_symbol};
     let expected_hash = crate::infra::hash_content(&fs::read_to_string(&file)?);
 
-    let symbols = match column {
+    let declared = match column {
         Some(col) => declared_at(app, &file, FindSymbolsOptions::default(), line, col).await?,
         None => declared_in(app, &file, FindSymbolsOptions::default()).await?,
-    }
-    .symbols;
+    };
 
     let resolution = match column {
-        Some(col) => column_addressed_symbol(&symbols, line, col),
-        None => line_addressed_symbol(&symbols, line),
+        Some(col) => column_addressed_symbol(&declared.symbols, line, col),
+        None => line_addressed_symbol(&declared.symbols, line),
     };
 
     let file_display = app.output.relative_path(&file);
     match resolution {
-        SymbolResolution::Match(symbol) => Ok(Addressed::among(
-            file,
-            symbol.clone(),
-            &symbols,
-            expected_hash,
-        )),
+        SymbolResolution::Match(symbol) => {
+            let symbol = symbol.clone();
+            Ok(Addressed::among(file, symbol, declared, expected_hash))
+        }
         SymbolResolution::NotFound => Err(anyhow::Error::new(match column {
             Some(col) => crate::cli::OutputError::not_found(format!(
                 "Column {col} of line {line} in {file_display} is not on a symbol's declaration"
@@ -206,18 +203,20 @@ async fn find_symbol_at_location(
     }
 }
 
-/// The symbol an edit addresses, and the names its declaration declares
-/// with it ([`declared_with`]), which a whole-line edit of it would remove.
+/// The symbol an edit addresses, the names its declaration declares with it
+/// ([`declared_with`]), which a whole-line edit of it would remove, and the
+/// declarations it was found among.
 pub(super) struct Addressed {
     pub(super) expected_hash: u64,
     pub(super) file: PathBuf,
     pub(super) symbol: Symbol,
     pub(super) declared_with: Vec<String>,
+    declared: FileSymbols,
 }
 
 impl Addressed {
-    fn among(file: PathBuf, symbol: Symbol, symbols: &[Symbol], expected_hash: u64) -> Self {
-        let declared_with = declared_with(symbols, &symbol)
+    fn among(file: PathBuf, symbol: Symbol, declared: FileSymbols, expected_hash: u64) -> Self {
+        let declared_with = declared_with(&declared.symbols, &symbol)
             .into_iter()
             .map(|other| other.name.clone())
             .collect();
@@ -226,7 +225,16 @@ impl Addressed {
             file,
             symbol,
             declared_with,
+            declared,
         }
+    }
+
+    /// The symbol the language server reads as the addressed declaration,
+    /// which its references are asked at ([`FileSymbols::served_as`]).
+    pub(super) async fn served(&self, app: &App) -> Option<&Symbol> {
+        self.declared
+            .served_as(app.lsp.as_ref(), &self.file, &self.symbol)
+            .await
     }
 }
 
