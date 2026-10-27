@@ -6,7 +6,8 @@ use crate::app::App;
 use crate::cli::utils::{SymbolResolution, column_addressed_symbol, placed_at};
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
-use crate::models::symbol::{Language, Symbol};
+use crate::models::symbol::{Language, Location, Symbol};
+use crate::services::lsp::LspService;
 use crate::services::symbols::SymbolExtractor;
 
 /// What produced a file's declarations — the same word `search` uses for
@@ -29,6 +30,53 @@ pub enum SymbolBackend {
 pub struct FileSymbols {
     pub symbols: Vec<Symbol>,
     pub backend: SymbolBackend,
+    /// The language server's tree, where the grammar's reading answered a
+    /// path that tree holds nothing on ([`declared_addressing`]), which can
+    /// still hold the same declaration under another path or kind.
+    pub served: Option<Vec<Symbol>>,
+}
+
+impl FileSymbols {
+    /// The symbol the language server reads as `symbol`, one of these
+    /// declarations, which a question to the server about it (its
+    /// references) is asked at; `None` where the server reads no position
+    /// as that declaration.
+    ///
+    /// The server's own tree places each of its symbols where it reads it.
+    /// A declaration the grammar answered for is the symbol that tree holds
+    /// at its position, where the answer kept the tree ([`Self::served`]),
+    /// if their names share a character ([`names_alike`]): clangd reads the
+    /// qualifier where the grammar places `Widget::set` as class `Widget`,
+    /// and its own `set` as the member. Otherwise the grammar's position
+    /// serves if the server's definition there is the same declaration, and
+    /// nothing does where it is none or another: the analyzer reads the `(`
+    /// where the grammar places a Dart enum's primary constructor as the
+    /// enum.
+    pub async fn served_as<'a>(
+        &'a self,
+        lsp: &dyn LspService,
+        file: &Path,
+        symbol: &'a Symbol,
+    ) -> Option<&'a Symbol> {
+        if self.backend == SymbolBackend::Document {
+            return Some(symbol);
+        }
+        let (line, column) = (symbol.location.line, symbol.location.column);
+        if let Some(served) = &self.served
+            && let SymbolResolution::Match(alike) = column_addressed_symbol(served, line, column)
+            && names_alike(alike, symbol)
+        {
+            return Some(alike);
+        }
+        let definition = lsp.goto_definition(file, line, column).await.ok()?.data?;
+        let defined = &definition.location;
+        (defined.file == file
+            && share_a_character(
+                span(defined, defined.end_line.zip(defined.end_column)),
+                name_span(symbol),
+            ))
+        .then_some(symbol)
+    }
 }
 
 /// The declarations a file makes.
@@ -53,6 +101,7 @@ pub async fn declared_in(
             return Ok(FileSymbols {
                 symbols,
                 backend: SymbolBackend::Document,
+                served: None,
             });
         }
         Err(e) => e,
@@ -83,7 +132,10 @@ pub async fn declared_addressing(
         return Ok(answer);
     }
     Ok(match read_by_grammar(app, file, &options).await {
-        Some(read) if addresses(&read.symbols) => read,
+        Some(read) if addresses(&read.symbols) => FileSymbols {
+            served: Some(answer.symbols),
+            ..read
+        },
         _ => answer,
     })
 }
@@ -138,19 +190,30 @@ pub async fn declared_at(
 /// and the primary constructor the grammar places at the `(` or `<` after
 /// it.
 fn names_alike(one: &Symbol, other: &Symbol) -> bool {
-    let (one, other) = (name_span(one), name_span(other));
+    share_a_character(name_span(one), name_span(other))
+}
+
+/// Where a name begins, and where it ends, exclusive.
+type Span = ((u32, u32), (u32, u32));
+
+fn share_a_character(one: Span, other: Span) -> bool {
     one.0 < other.1 && other.0 < one.1
 }
 
-/// Where a symbol's name begins and where it ends, exclusive. A reading
-/// that states no end for a name, or one at its start, places only its
-/// first character.
-fn name_span(symbol: &Symbol) -> ((u32, u32), (u32, u32)) {
+fn name_span(symbol: &Symbol) -> Span {
     let location = &symbol.location;
+    span(
+        location,
+        location.name_end_line.zip(location.name_end_column),
+    )
+}
+
+/// The span of a name that begins at `location` and ends at `end`. A
+/// reading that states no end for it, or one at its start, places only its
+/// first character.
+fn span(location: &Location, end: Option<(u32, u32)>) -> Span {
     let start = (location.line, location.column);
-    let end = location
-        .name_end_line
-        .zip(location.name_end_column)
+    let end = end
         .filter(|&end| end > start)
         .unwrap_or((location.line, location.column + 1));
     (start, end)
@@ -180,6 +243,7 @@ pub async fn read_by_grammar(
     Some(FileSymbols {
         symbols,
         backend: SymbolBackend::Ast,
+        served: None,
     })
 }
 

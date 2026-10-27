@@ -35,7 +35,8 @@ pub struct EditOutput {
     pub dangling_references: Option<Section<LocationOutput>>,
     /// `delete` only, and only when the reference check could not run:
     /// `unsupported` (language server lacks references) or
-    /// `unavailable` (the lookup failed). Never paired with a list —
+    /// `unavailable` (the lookup failed, or the language server reads no
+    /// position as the declaration). Never paired with a list —
     /// an empty list is a real "none found", not a fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub references_status: Option<&'static str>,
@@ -62,7 +63,8 @@ pub struct CallerVerification {
     pub callers: Section<CallerFileDiagnostics>,
     /// Set only when the reference lookup could not run: `unsupported`
     /// (language server lacks references) or `unavailable` (the lookup
-    /// failed). Never paired with a non-empty list — an empty `Section` under
+    /// failed, or the language server reads no position as the edited
+    /// declaration). Never paired with a non-empty list — an empty `Section` under
     /// a status is "could not enumerate callers", not "no callers".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<&'static str>,
