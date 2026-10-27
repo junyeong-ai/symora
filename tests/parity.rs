@@ -26,6 +26,24 @@ struct ParityCase {
     arguments: &'static str,
     /// Equivalent CLI argv (without the binary).
     cli: &'static [&'static str],
+    /// The error code both surfaces answer with; `None` where they succeed.
+    error: Option<&'static str>,
+}
+
+impl ParityCase {
+    /// Each payload answers as the case expects: with `error`'s code, or with
+    /// none where it is `None`. Two surfaces that fail alike compare equal,
+    /// so their agreement says nothing about a case meant to succeed.
+    fn assert_answered(&self, payloads: &[Value]) {
+        for payload in payloads {
+            assert_eq!(
+                payload["error"]["code"].as_str(),
+                self.error,
+                "parity case {:?} answered unexpectedly: {payload}",
+                self.cli,
+            );
+        }
+    }
 }
 
 /// Hermetic cases only: no LSP server, no daemon index required. Error
@@ -41,26 +59,31 @@ const CASES: &[ParityCase] = &[
             "--path",
             ".claude/skills/symora/SKILL.md",
         ],
+        error: None,
     },
     ParityCase {
         tool: "get_diff_impact",
         arguments: r#"{"revision":"symora_nonexistent_test_revision"}"#,
         cli: &["diff-impact", "symora_nonexistent_test_revision"],
+        error: Some("invalid_argument"),
     },
     ParityCase {
         tool: "get_project_overview",
         arguments: "{}",
         cli: &["map", "summary", "--limit", "10"],
+        error: None,
     },
     ParityCase {
         tool: "search_symbols",
         arguments: r#"{"query":""}"#,
         cli: &["search", "symbols", ""],
+        error: Some("invalid_argument"),
     },
     ParityCase {
         tool: "search_content",
         arguments: r#"{"query":""}"#,
         cli: &["search", "content", ""],
+        error: Some("invalid_argument"),
     },
     ParityCase {
         tool: "search_symbols",
@@ -72,11 +95,13 @@ const CASES: &[ParityCase] = &[
             "--path",
             "symora_missing_parity_path",
         ],
+        error: Some("not_found"),
     },
     ParityCase {
         tool: "get_diagnostics",
         arguments: r#"{"file":"src/main.rs","severity":"bogus"}"#,
         cli: &["diagnostics", "src/main.rs", "--severity", "bogus"],
+        error: Some("invalid_argument"),
     },
 ];
 
@@ -204,6 +229,7 @@ fn cli_and_mcp_emit_identical_payloads() {
             "parity case {:?} produced no output — the comparison is vacuous",
             case.cli,
         );
+        case.assert_answered(&cli);
     }
 }
 
@@ -384,6 +410,7 @@ fn daemon_and_direct_emit_identical_payloads() {
                 tool: "list_file_symbols",
                 arguments: r#"{"file":"src/lib.rs","depth":1}"#,
                 cli: &["symbols", "src/lib.rs", "--depth", "1"],
+                error: None,
             },
             Some("document"),
         ),
@@ -392,6 +419,7 @@ fn daemon_and_direct_emit_identical_payloads() {
                 tool: "find_references",
                 arguments: r#"{"file":"src/lib.rs","line":1,"column":8,"limit":5}"#,
                 cli: &["refs", "src/lib.rs:1:8", "--limit", "5"],
+                error: None,
             },
             None,
         ),
@@ -400,6 +428,7 @@ fn daemon_and_direct_emit_identical_payloads() {
                 tool: "get_diagnostics",
                 arguments: r#"{"file":"src/lib.rs"}"#,
                 cli: &["diagnostics", "src/lib.rs"],
+                error: None,
             },
             None,
         ),
@@ -431,10 +460,7 @@ fn daemon_and_direct_emit_identical_payloads() {
             !direct.is_empty(),
             "parity case {args:?} produced no output — the comparison is vacuous",
         );
-        assert!(
-            !direct.iter().any(|payload| payload.get("error").is_some()),
-            "parity case {args:?} failed — the comparison is vacuous: {direct:?}",
-        );
+        case.assert_answered(&direct);
         if let Some(backend) = server_backend {
             assert!(
                 direct.iter().all(|payload| payload["backend"] == *backend),
