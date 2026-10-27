@@ -8,7 +8,7 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 /// or dropping it stops the group: a server signalled alone leaves what it
 /// ran still running, as rust-analyzer leaves the `cargo check` it started,
 /// whether it was killed or exited when asked. A process it starts in a
-/// session of its own, as rust-analyzer starts its check on save, only the
+/// session of its own, as rust-analyzer starts a check it runs on save, only the
 /// server stops, which it does when asked to exit
 /// (`LspService::shutdown`). Out of Symora's group and terminal, a server
 /// is reached by no signal sent to either: a signal Symora does not handle,
