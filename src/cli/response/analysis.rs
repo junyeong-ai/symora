@@ -6,6 +6,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::{LocationOutput, Section};
+use crate::cli::LocationAnalysis;
 use crate::models::symbol::Symbol;
 
 /// Target symbol info (unified across `impact`, `context`, etc.).
@@ -22,13 +23,13 @@ pub struct TargetOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_omitted: Option<super::BodyOmission>,
     /// The unresolved-anchor disclosure, omitted when the target resolved: a
-    /// synthesized `symbol@line:col` placeholder carries `"binding"` (a
-    /// declaration the symbol tree does not list — the placeholder sits at
-    /// it), `"not_a_symbol"` (the position was checked and denotes nothing),
-    /// or `"unavailable"` (a read failed). One shared `*_status` vocabulary
-    /// across every surface (see `AnchorResolution::as_status`), so a
-    /// placeholder is never mistaken for a resolved symbol and a read failure
-    /// is never reported as "not a symbol".
+    /// placeholder carries `"binding"` (a declaration the symbol tree does
+    /// not list — the placeholder sits at it), `"not_a_symbol"` (the position
+    /// was checked and denotes nothing), or `"unavailable"` (a read failed).
+    /// One shared `*_status` vocabulary across every surface (see
+    /// `AnchorResolution::as_status`), so a placeholder is never mistaken for
+    /// a resolved symbol and a read failure is never reported as "not a
+    /// symbol".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_status: Option<&'static str>,
 }
@@ -77,35 +78,27 @@ impl TargetOutput {
         self
     }
 
-    /// When `symbol` is `None`, `anchor_status` carries WHY it did not resolve
-    /// (`AnchorResolution::as_status`: "binding", "not_a_symbol", or
-    /// "unavailable") and is recorded on the placeholder. A resolved symbol
-    /// ignores it (status omitted).
-    pub fn from_symbol_or_fallback(
-        symbol: Option<&Symbol>,
-        file: &Path,
-        line: u32,
-        column: u32,
-        root: &Path,
-        anchor_status: Option<&'static str>,
-    ) -> Self {
-        match symbol {
-            Some(sym) => Self::from_symbol(sym, root),
-            None => {
-                let file_str = file
-                    .strip_prefix(root)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| file.display().to_string());
-                Self {
-                    anchor_status,
-                    ..Self::new(
-                        format!("symbol@{}:{}", line, column),
-                        "unknown".to_string(),
-                        file_str,
-                        line,
-                    )
-                }
-            }
+    /// The symbol `analysis` answered for, or a placeholder at its anchor
+    /// whose `anchor_status` says why none resolved. A binding is named as
+    /// the reference at its declaration writes it, where there is one; any
+    /// other placeholder by its position, `symbol@line:col`.
+    pub fn from_analysis(analysis: &LocationAnalysis, root: &Path) -> Self {
+        let anchor = analysis.anchor();
+        if let Some(symbol) = &anchor.symbol {
+            return Self::from_symbol(symbol, root);
+        }
+        let file = anchor
+            .file
+            .strip_prefix(root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| anchor.file.display().to_string());
+        let name = analysis
+            .binding_name()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("symbol@{}:{}", anchor.line, anchor.column));
+        Self {
+            anchor_status: anchor.resolution.as_status(),
+            ..Self::new(name, "unknown".to_string(), file, anchor.line)
         }
     }
 }
@@ -200,7 +193,40 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::models::symbol::{Location, SymbolKind};
+    use crate::cli::ParsedLocation;
+    use crate::cli::analysis::Anchor;
+    use crate::cli::utils::AnchorResolution;
+    use crate::models::symbol::{Language, Location, SymbolKind};
+
+    fn analysis(
+        symbol: Option<Symbol>,
+        binding_name: Option<&str>,
+        resolution: AnchorResolution,
+    ) -> LocationAnalysis {
+        let input = ParsedLocation {
+            file: PathBuf::from("/proj/src/lib.rs"),
+            line: 42,
+            column: 7,
+            column_explicit: true,
+        };
+        LocationAnalysis {
+            anchor: Anchor {
+                file: input.file.clone(),
+                line: 42,
+                column: 7,
+                input,
+                symbol,
+                via_definition: false,
+                hint: None,
+                resolution,
+            },
+            binding_name: binding_name.map(str::to_string),
+            language: Language::Rust,
+            references: Vec::new(),
+            indexing: None,
+            declaring_type: None,
+        }
+    }
 
     #[test]
     fn anchor_status_is_omitted_for_a_real_symbol() {
@@ -209,13 +235,9 @@ mod tests {
             SymbolKind::Function,
             Location::point(PathBuf::from("/proj/src/lib.rs"), 42, 7),
         );
-        let target = TargetOutput::from_symbol_or_fallback(
-            Some(&symbol),
-            Path::new(""),
-            0,
-            0,
+        let target = TargetOutput::from_analysis(
+            &analysis(Some(symbol), None, AnchorResolution::Resolved),
             Path::new("/proj"),
-            None,
         );
         let value = serde_json::to_value(&target).unwrap();
 
@@ -224,17 +246,30 @@ mod tests {
         assert!(value.get("anchor_status").is_none());
     }
 
+    /// A binding is named as its declaration is written, and by its position
+    /// where that is not known; either way it stays a binding of no kind.
+    #[test]
+    fn a_binding_target_is_named_as_written() {
+        for (written, name) in [(Some("carried"), "carried"), (None, "symbol@42:7")] {
+            let target = TargetOutput::from_analysis(
+                &analysis(None, written, AnchorResolution::Binding),
+                Path::new("/proj"),
+            );
+            let value = serde_json::to_value(&target).unwrap();
+
+            assert_eq!(value["name"], name);
+            assert_eq!(value["kind"], "unknown");
+            assert_eq!(value["anchor_status"], "binding");
+        }
+    }
+
     /// A position checked and found NOT to be a symbol: `anchor_status` is
     /// "not_a_symbol" on the placeholder — the empty answer is authoritative.
     #[test]
     fn fallback_target_discloses_not_a_symbol() {
-        let target = TargetOutput::from_symbol_or_fallback(
-            None,
-            Path::new("/proj/src/lib.rs"),
-            42,
-            7,
+        let target = TargetOutput::from_analysis(
+            &analysis(None, None, AnchorResolution::NotASymbol),
             Path::new("/proj"),
-            Some("not_a_symbol"),
         );
         let value = serde_json::to_value(&target).unwrap();
 
@@ -248,13 +283,9 @@ mod tests {
     /// authoritative "not a symbol".
     #[test]
     fn fallback_target_discloses_unavailable_distinctly() {
-        let target = TargetOutput::from_symbol_or_fallback(
-            None,
-            Path::new("/proj/src/lib.rs"),
-            42,
-            7,
+        let target = TargetOutput::from_analysis(
+            &analysis(None, None, AnchorResolution::Unavailable),
             Path::new("/proj"),
-            Some("unavailable"),
         );
         let value = serde_json::to_value(&target).unwrap();
 

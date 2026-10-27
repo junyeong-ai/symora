@@ -473,14 +473,15 @@ fn target_output_from_symbol() {
 
 #[test]
 fn target_output_fallback_for_unknown_symbol() {
-    let out = TargetOutput::from_symbol_or_fallback(
-        None,
-        &root().join("src/main.rs"),
-        50,
-        4,
-        &root(),
-        Some("not_a_symbol"),
-    );
+    let out = TargetOutput {
+        anchor_status: Some("not_a_symbol"),
+        ..TargetOutput::new(
+            "symbol@50:4".to_string(),
+            "unknown".to_string(),
+            "src/main.rs".to_string(),
+            50,
+        )
+    };
     assert_json_snapshot!(out);
 }
 

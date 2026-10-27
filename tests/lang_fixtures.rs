@@ -340,6 +340,18 @@ fn pyright_resolves_across_package_boundaries() {
         tree["items"].as_array().unwrap().len(),
         "{tree}"
     );
+    // The parameter is still addressed: as the binding it is, under the name
+    // it is written with.
+    let (radius_line, radius_col) = find_identifier(&geometry, "radius", 1);
+    let radius = settled(
+        &mut session,
+        "find_references",
+        json!({"file": geometry_rel, "line": radius_line, "column": radius_col}),
+        |refs| refs["count"] == 1,
+        "`area` passes its parameter on once",
+    );
+    assert_eq!(radius["target"]["name"], "radius", "{radius}");
+    assert_eq!(radius["target"]["anchor_status"], "binding", "{radius}");
 
     // Each row with whether it is internal to something it is inside: what a
     // type or module holds are its members, what anything else holds is not.

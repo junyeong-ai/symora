@@ -71,14 +71,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                 .into_iter()
                 .collect();
 
-            let target = TargetOutput::from_symbol_or_fallback(
-                analysis.target(),
-                &analysis.anchor.file,
-                analysis.anchor.line,
-                analysis.anchor.column,
-                root,
-                analysis.anchor_resolution().as_status(),
-            );
+            let target = TargetOutput::from_analysis(&analysis, root);
 
             let exported = analysis.is_exported();
             let anchor_kind = analysis.target().map(|symbol| symbol.kind);
