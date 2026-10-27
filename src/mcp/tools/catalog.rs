@@ -228,10 +228,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "list_file_symbols",
             "List declarations in a known file, with optional bodies, signatures, or \
              reference counts. Reports backend: document for the language server's nested \
-             tree, or ast for flat syntax-derived declarations with name_path. refs counts \
-             each listed declaration's references, other than a function's parameters and \
-             locals; depth 1 lists a type's members. A zero is static and does not show that \
-             nothing reaches a declaration.",
+             tree, or ast for flat syntax-derived declarations with name_path; neither lists \
+             the parameters and locals a function, method or constructor binds. refs counts \
+             each listed declaration's references, other than what a function declares; \
+             depth 1 lists a type's members. A zero is static and does not show that nothing \
+             reaches a declaration.",
             schema_object(
                 &[
                     ("file", "string", "Project-relative file path"),
