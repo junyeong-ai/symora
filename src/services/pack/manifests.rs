@@ -1064,10 +1064,12 @@ impl Manifests {
                 Some((directory.clone(), package))
             })
             .collect();
+        // One that is no JSON declares nothing, but is still the package
+        // scope of the files below it, as tsc 5.9.3, 6.0.3 and 7.0.2 read it.
         let package_jsons: Vec<(Vec<String>, serde_json::Value)> =
             manifests_above(root, nodes, is_javascript, "package.json")
                 .into_iter()
-                .filter_map(|(directory, text)| Some((directory, json(&text)?)))
+                .map(|(directory, text)| (directory, json(&text).unwrap_or_default()))
                 .collect();
         let package_scopes = package_jsons
             .iter()
