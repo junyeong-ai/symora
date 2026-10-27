@@ -11,6 +11,7 @@ use crate::cli::ParsedLocation;
 use crate::cli::response::LineRange;
 use crate::cli::utils::{declared_with, shell_arg};
 use crate::cli::{FileSymbols, declared_addressing, declared_at, declared_in};
+use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Symbol;
 
@@ -231,7 +232,7 @@ impl Addressed {
 
     /// The symbol the language server reads as the addressed declaration,
     /// which its references are asked at ([`FileSymbols::served_as`]).
-    pub(super) async fn served(&self, app: &App) -> Option<&Symbol> {
+    pub(super) async fn served(&self, app: &App) -> Result<Option<&Symbol>, LspError> {
         self.declared
             .served_as(app.lsp.as_ref(), &self.file, &self.symbol)
             .await

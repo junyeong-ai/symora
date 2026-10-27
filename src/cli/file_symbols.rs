@@ -40,7 +40,7 @@ impl FileSymbols {
     /// The symbol the language server reads as `symbol`, one of these
     /// declarations, which a question to the server about it (its
     /// references) is asked at; `None` where the server reads no position
-    /// as that declaration.
+    /// as that declaration, and the error where asking it failed.
     ///
     /// The server's own tree places each of its symbols where it reads it.
     /// A declaration the grammar answered for is the symbol that tree holds
@@ -58,20 +58,22 @@ impl FileSymbols {
         lsp: &dyn LspService,
         file: &Path,
         symbol: &'a Symbol,
-    ) -> Option<&'a Symbol> {
+    ) -> Result<Option<&'a Symbol>, LspError> {
         if self.backend == SymbolBackend::Document {
-            return Some(symbol);
+            return Ok(Some(symbol));
         }
         let (line, column) = (symbol.location.line, symbol.location.column);
         if let Some(served) = &self.served
             && let SymbolResolution::Match(alike) = column_addressed_symbol(served, line, column)
             && names_one(alike, symbol, &self.symbols)
         {
-            return Some(alike);
+            return Ok(Some(alike));
         }
-        let definition = lsp.goto_definition(file, line, column).await.ok()?.data?;
+        let Some(definition) = lsp.goto_definition(file, line, column).await?.data else {
+            return Ok(None);
+        };
         let name = name_span(symbol);
-        definition
+        Ok(definition
             .candidates
             .iter()
             .any(|defined| {
@@ -81,7 +83,7 @@ impl FileSymbols {
                         name,
                     )
             })
-            .then_some(symbol)
+            .then_some(symbol))
     }
 }
 
