@@ -276,7 +276,7 @@ symora impact src/services/checkout.ts:48 --depth 2
 
 ```bash
 symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/processOrder' \
-  --body "$(cat new_processOrder.ts)" --dry-run
+  --body - --dry-run < new_processOrder.ts
 ```
 ```json
 {
@@ -343,7 +343,7 @@ symora diff-impact                                  # impact of tracked changes 
 symora diff-impact $(git merge-base main HEAD)      # impact of what this branch changed (a range A..B is refused)
 
 # Edit & refactor (mutations preview with --dry-run)
-symora edit replace-body <file> --symbol 'Class/method' --body "$(cat new.ts)" --dry-run
+symora edit replace-body <file> --symbol 'Class/method' --body - --dry-run < new.ts
 symora edit insert-before <file> --symbol 'Class/method' --code "// note"
 symora edit insert-after  <file> --symbol 'Class/method' --code "// note"
 symora edit delete        <file> --symbol 'Class/method' --expect-no-references

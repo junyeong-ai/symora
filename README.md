@@ -276,7 +276,7 @@ symora impact src/services/checkout.ts:48 --depth 2
 
 ```bash
 symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/processOrder' \
-  --body "$(cat new_processOrder.ts)" --dry-run
+  --body - --dry-run < new_processOrder.ts
 ```
 ```json
 {
@@ -343,7 +343,7 @@ symora diff-impact                                  # HEAD 대비 추적 중인 
 symora diff-impact $(git merge-base main HEAD)      # 이 브랜치가 바꾼 것의 영향 (범위 A..B는 받지 않음)
 
 # 편집 & 리팩터링 (변경 작업은 --dry-run으로 미리보기)
-symora edit replace-body <file> --symbol 'Class/method' --body "$(cat new.ts)" --dry-run
+symora edit replace-body <file> --symbol 'Class/method' --body - --dry-run < new.ts
 symora edit insert-before <file> --symbol 'Class/method' --code "// note"
 symora edit insert-after  <file> --symbol 'Class/method' --code "// note"
 symora edit delete        <file> --symbol 'Class/method' --expect-no-references
