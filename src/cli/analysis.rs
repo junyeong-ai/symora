@@ -153,19 +153,39 @@ pub async fn resolve_anchor(
 ) -> Result<Anchor, LspError> {
     let symbols = lsp.find_symbols(&input.file, options.clone()).await?;
     if !input.column_explicit {
-        return Ok(match line_addressed_symbol(&symbols, input.line) {
-            SymbolResolution::Match(symbol) => {
-                Anchor::declared(input, &input.file, symbol.clone(), None)
-            }
-            SymbolResolution::Ambiguous(declared) => {
-                let hint = ambiguity_hint(input.line, &declared);
-                Anchor::declared(input, &input.file, declared[0].clone(), Some(hint))
-            }
-            SymbolResolution::NotFound => Anchor::raw(input, AnchorResolution::NotASymbol),
-        });
+        return Ok(anchor_on_line(input, &symbols));
     }
+    anchor_at(lsp, input, &symbols, input.line, input.column, options).await
+}
 
-    if let Some(symbol) = find_named_at_position(&symbols, input.line, input.column) {
+/// The anchor a column-less input addresses in `symbols`, its file's tree:
+/// the declaration on its line, else the one enclosing it
+/// ([`line_addressed_symbol`]).
+pub fn anchor_on_line(input: &ParsedLocation, symbols: &[Symbol]) -> Anchor {
+    match line_addressed_symbol(symbols, input.line) {
+        SymbolResolution::Match(symbol) => {
+            Anchor::declared(input, &input.file, symbol.clone(), None)
+        }
+        SymbolResolution::Ambiguous(declared) => {
+            let hint = ambiguity_hint(input.line, &declared);
+            Anchor::declared(input, &input.file, declared[0].clone(), Some(hint))
+        }
+        SymbolResolution::NotFound => Anchor::raw(input, AnchorResolution::NotASymbol),
+    }
+}
+
+/// The anchor a column at `line:column` of the input's file addresses, given
+/// `symbols`, the language server's tree of that file; the input is kept as
+/// it was given.
+pub async fn anchor_at(
+    lsp: &dyn LspService,
+    input: &ParsedLocation,
+    symbols: &[Symbol],
+    line: u32,
+    column: u32,
+    options: FindSymbolsOptions,
+) -> Result<Anchor, LspError> {
+    if let Some(symbol) = find_named_at_position(symbols, line, column) {
         return Ok(Anchor::declared(input, &input.file, symbol.clone(), None));
     }
     // A definition that names no other position — none at all, or the
@@ -175,30 +195,25 @@ pub async fn resolve_anchor(
     // missing definition lacks: the position DOES declare something — a
     // binding queried at its own declaration (a parameter, a local) — and
     // is disclosed as that binding, never as "not a symbol".
-    let definition = lsp
-        .goto_definition(&input.file, input.line, input.column)
-        .await?
-        .data;
+    let definition = lsp.goto_definition(&input.file, line, column).await?.data;
     let self_declaration = definition
         .as_ref()
         .filter(|definition| definition.is_self)
         .map(|definition| definition.location.clone());
     let Some(definition) = definition.filter(|definition| !definition.is_self) else {
-        return Ok(
-            match column_addressed_symbol(&symbols, input.line, input.column) {
-                SymbolResolution::Match(symbol) => {
-                    Anchor::declared(input, &input.file, symbol.clone(), None)
-                }
-                SymbolResolution::Ambiguous(declared) => {
-                    let hint = ambiguity_hint(input.line, &declared);
-                    Anchor::declared(input, &input.file, declared[0].clone(), Some(hint))
-                }
-                SymbolResolution::NotFound => match self_declaration {
-                    Some(location) => Anchor::binding(input, &location),
-                    None => Anchor::raw(input, AnchorResolution::NotASymbol),
-                },
+        return Ok(match column_addressed_symbol(symbols, line, column) {
+            SymbolResolution::Match(symbol) => {
+                Anchor::declared(input, &input.file, symbol.clone(), None)
+            }
+            SymbolResolution::Ambiguous(declared) => {
+                let hint = ambiguity_hint(line, &declared);
+                Anchor::declared(input, &input.file, declared[0].clone(), Some(hint))
+            }
+            SymbolResolution::NotFound => match self_declaration {
+                Some(location) => Anchor::binding(input, &location),
+                None => Anchor::raw(input, AnchorResolution::NotASymbol),
             },
-        );
+        });
     };
     let definition = definition.location;
     // A definition names a declaration by its name position — that is what
@@ -209,7 +224,7 @@ pub async fn resolve_anchor(
     // header), and reading it by the header it happens to fall on would
     // answer for the wrong symbol.
     let symbol = if definition.file == input.file {
-        find_named_at_position(&symbols, definition.line, definition.column).cloned()
+        find_named_at_position(symbols, definition.line, definition.column).cloned()
     } else {
         find_named_at_position(
             &lsp.find_symbols(&definition.file, options).await?,
@@ -225,7 +240,7 @@ pub async fn resolve_anchor(
     // own position reads as the same declaration's header.
     let on_own_declaration = definition.file == input.file
         && matches!(
-            column_addressed_symbol(&symbols, input.line, input.column),
+            column_addressed_symbol(symbols, line, column),
             SymbolResolution::Match(header) if header.location == symbol.location
         );
     Ok(if on_own_declaration {
@@ -300,8 +315,9 @@ impl LocationAnalysis {
     }
 
     /// Whether the language server's reference set contradicts the input: the
-    /// input position was a usage — it resolved to this declaration through
-    /// its definition, from somewhere else — yet no reference covers it. The
+    /// input named a position, a usage — it resolved to this declaration
+    /// through its definition, from somewhere else — yet no reference covers
+    /// it; a column-less input names a line, which no reference covers. The
     /// set is then a lower bound; some servers omit the usages of certain
     /// bindings (rust-analyzer does for the parameters of async functions),
     /// and reporting their zero as the count would present a known-incomplete
@@ -314,6 +330,7 @@ impl LocationAnalysis {
         // The reference set is project-local, so only an input inside the
         // project can be expected in it — an outside usage proves nothing.
         input.file.starts_with(root)
+            && input.column_explicit
             && self.anchor.via_definition
             && elsewhere
             && !self.references.iter().any(|r| {
@@ -441,27 +458,17 @@ async fn declared_at(
 }
 
 impl LocationAnalysis {
-    /// Resolve the anchor and then fetch references from it.
+    /// The references of the declaration an input addresses, taken from its
+    /// resolved `anchor` so that a line-only, declaration-start, or
+    /// usage-site input does not silently answer a different question.
     ///
-    /// Soft-fails on the symbol read (target stays `None`); hard-fails on
-    /// `find_references` because every caller needs the refs list.
-    pub async fn at(
+    /// Hard-fails on `find_references` because every caller needs the refs
+    /// list.
+    pub async fn for_anchor(
         lsp: &dyn LspService,
-        input: ParsedLocation,
+        anchor: Anchor,
         root: &Path,
     ) -> Result<Self, LspError> {
-        // Resolve the anchor first so references and blast radius are taken
-        // from the declaration the input addresses, which keeps a line-only,
-        // declaration-start, or usage-site input from silently answering a
-        // different question. Serialized on purpose — the resolution must
-        // precede the reference lookup.
-        let anchor = resolve_anchor(
-            lsp,
-            &input,
-            FindSymbolsOptions::default().with_body().with_depth(10),
-        )
-        .await
-        .unwrap_or_else(|_| Anchor::unavailable(&input));
         let language = Language::from_path(&anchor.file);
         let references = lsp
             .find_references(&anchor.file, anchor.line, anchor.column)

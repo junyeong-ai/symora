@@ -7,8 +7,9 @@ use crate::cli::analysis::LocationAnalysis;
 use crate::cli::response::{LocationOutput, RefsOutput, Section, TargetOutput};
 use crate::cli::symbol_discovery::is_single_file_concentration;
 use crate::cli::utils::{read_line_at, read_lines_around, shell_arg};
+use crate::models::lsp::FindSymbolsOptions;
 
-use super::common::lsp_error_at;
+use super::common::{anchor_of, lsp_error_at};
 
 #[derive(Args, Debug)]
 pub struct RefsArgs {
@@ -33,10 +34,14 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
     let cfg = app.config();
     let limit = args.limit.unwrap_or(cfg.lsp.refs_limit);
     let loc = args.loc.parse()?.to_absolute()?;
-    // Kept for the error path: `at` consumes the anchor.
-    let err_file = loc.file.clone();
 
-    match LocationAnalysis::at(app.lsp.as_ref(), loc, ctx.root()).await {
+    let anchor = anchor_of(
+        app,
+        &loc,
+        FindSymbolsOptions::default().with_body().with_depth(10),
+    )
+    .await;
+    match LocationAnalysis::for_anchor(app.lsp.as_ref(), anchor, ctx.root()).await {
         Ok(analysis) => {
             let root = ctx.root();
             let usages = analysis.references();
@@ -61,7 +66,7 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 .collect();
 
             // Disclose the symbol the input resolved to. The signature reuses
-            // the body `LocationAnalysis::at` already fetched, so it costs no
+            // the body the anchor's symbol read already fetched, so it costs no
             // extra lookup; it is surfaced once at the top level, never per
             // reference.
             let target = TargetOutput::from_symbol_or_fallback(
@@ -119,7 +124,7 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                     .with_incomplete(incomplete),
             });
         }
-        Err(e) => ctx.print_error(lsp_error_at(e, &ctx.relative_path(&err_file))),
+        Err(e) => ctx.print_error(lsp_error_at(e, &ctx.relative_path(&loc.file))),
     }
 
     Ok(())

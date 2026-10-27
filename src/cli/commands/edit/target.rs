@@ -10,7 +10,7 @@ use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::cli::response::LineRange;
 use crate::cli::utils::{declared_with, shell_arg};
-use crate::cli::{FileSymbols, declared_addressing, declared_at, declared_in};
+use crate::cli::{FileSymbols, declared_addressing, declared_at, declared_at_line};
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Symbol;
@@ -159,7 +159,7 @@ async fn find_symbol_at_location(
 
     let declared = match column {
         Some(col) => declared_at(app, &file, FindSymbolsOptions::default(), line, col).await?,
-        None => declared_in(app, &file, FindSymbolsOptions::default()).await?,
+        None => declared_at_line(app, &file, FindSymbolsOptions::default(), line).await?,
     };
 
     let resolution = match column {

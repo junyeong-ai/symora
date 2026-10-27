@@ -17,7 +17,7 @@ use crate::cli::utils::{
 };
 use crate::cli::{LocationArg, OutputError};
 
-use super::common::lsp_error_at;
+use super::common::{anchor_of, lsp_error_at};
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
 use crate::models::symbol::Symbol;
 use crate::services::TestScope;
@@ -100,7 +100,13 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
         tests: config.lsp.tests_limit,
     };
 
-    let analysis = match LocationAnalysis::at(app.lsp.as_ref(), loc.clone(), ctx.root()).await {
+    let anchor = anchor_of(
+        app,
+        &loc,
+        FindSymbolsOptions::default().with_body().with_depth(10),
+    )
+    .await;
+    let analysis = match LocationAnalysis::for_anchor(app.lsp.as_ref(), anchor, ctx.root()).await {
         Ok(a) => a,
         Err(e) => {
             ctx.print_error(lsp_error_at(e, &ctx.relative_path(&loc.file)));

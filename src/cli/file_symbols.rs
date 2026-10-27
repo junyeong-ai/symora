@@ -3,7 +3,10 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::utils::{SymbolResolution, column_addressed_symbol, holds, placed_at};
+use crate::cli::utils::{
+    SymbolResolution, column_addressed_symbol, holds, line_addressed_symbol, placed_at,
+    symbols_declared_on_line,
+};
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Location, Symbol};
@@ -31,8 +34,9 @@ pub struct FileSymbols {
     pub symbols: Vec<Symbol>,
     pub backend: SymbolBackend,
     /// The language server's tree, where the grammar's reading answered a
-    /// path that tree holds nothing on ([`declared_addressing`]), which can
-    /// still hold the same declaration under another path or kind.
+    /// path ([`declared_addressing`]) or a line ([`declared_at_line`]) that
+    /// tree holds nothing on, which can still hold the same declaration
+    /// under another path or kind.
     pub served: Option<Vec<Symbol>>,
 }
 
@@ -183,6 +187,55 @@ pub async fn declared_at(
             _ => read,
         },
     )
+}
+
+/// A file's declarations ([`declared_in`]), read by the grammar where the
+/// declaration a line addresses there is one the language server's tree
+/// lacks, keeping that tree ([`FileSymbols::served`]).
+///
+/// A line addresses the declaration on it, else the innermost one enclosing
+/// it ([`line_addressed_symbol`]). pyright outlines a property once and an
+/// overloaded function by its implementation alone, so on the lines of the
+/// property's other accessor or of an `@overload` stub its tree addresses
+/// the enclosing class. Where the tree declares nothing on the line, the
+/// grammar's declaration answers if the tree addresses none, or one that
+/// holds it and does not name it ([`names_one`]).
+pub async fn declared_at_line(
+    app: &App,
+    file: &Path,
+    options: FindSymbolsOptions,
+    line: u32,
+) -> Result<FileSymbols, LspError> {
+    let answer = declared_in(app, file, options.clone()).await?;
+    if answer.backend == SymbolBackend::Ast
+        || !symbols_declared_on_line(&answer.symbols, line).is_empty()
+    {
+        return Ok(answer);
+    }
+    Ok(match read_by_grammar(app, file, &options).await {
+        Some(read) if lacks_line_declaration(&answer.symbols, &read.symbols, line) => FileSymbols {
+            served: Some(answer.symbols),
+            ..read
+        },
+        _ => answer,
+    })
+}
+
+/// Whether the declaration a line addresses in the grammar's flat
+/// `declarations` is one the language server's `tree` lacks: the tree
+/// addresses none there, or one that holds it without naming it.
+fn lacks_line_declaration(tree: &[Symbol], declarations: &[Symbol], line: u32) -> bool {
+    match line_addressed_symbol(declarations, line) {
+        SymbolResolution::Match(declared) => match line_addressed_symbol(tree, line) {
+            SymbolResolution::Match(served) => {
+                holds(served, declared) && !names_one(served, declared, declarations)
+            }
+            SymbolResolution::Ambiguous(_) => false,
+            SymbolResolution::NotFound => true,
+        },
+        SymbolResolution::Ambiguous(_) => symbols_declared_on_line(tree, line).is_empty(),
+        SymbolResolution::NotFound => false,
+    }
 }
 
 /// Whether a language server's symbol names `declaration`, one of the
@@ -362,5 +415,47 @@ mod tests {
         let declarations = [namespace.clone(), member.clone()];
         assert!(names_one(&whole, &namespace, &declarations));
         assert!(!names_one(&whole, &member, &declarations));
+    }
+
+    /// pyright outlines a property by its setter alone. The getter's lines,
+    /// its name's and its body's, address the getter, which the tree holds
+    /// nowhere, rather than the class enclosing it there; the setter's and
+    /// the class's own lines stay the tree's, and so does a line the grammar
+    /// addresses nothing on. So do a declaration the tree reads over a wider
+    /// range, and one it holds that the grammar does not read.
+    #[test]
+    fn a_line_addresses_the_grammars_declaration_where_the_tree_lacks_it() {
+        let setter = declared((10, 9), (10, 10), ((9, 5), (11, 13)));
+        let class = declared((4, 7), (4, 8), ((4, 1), (11, 13)));
+        let tree = [Symbol {
+            children: vec![setter.clone()],
+            ..class.clone()
+        }];
+        let getter = declared((6, 9), (6, 10), ((5, 5), (7, 17)));
+        let declarations = [class, getter, setter];
+        for line in [5, 6, 7] {
+            assert!(lacks_line_declaration(&tree, &declarations, line), "{line}");
+        }
+        for line in [4, 8, 10, 11, 12] {
+            assert!(
+                !lacks_line_declaration(&tree, &declarations, line),
+                "{line}"
+            );
+        }
+        assert!(lacks_line_declaration(&[], &declarations, 6));
+
+        let read = declared((3, 5), (3, 6), ((3, 1), (10, 2)));
+        let wider = declared((3, 5), (3, 6), ((2, 1), (10, 2)));
+        assert!(!lacks_line_declaration(
+            &[wider],
+            std::slice::from_ref(&read),
+            5
+        ));
+        let local = declared((5, 9), (5, 10), ((5, 5), (7, 6)));
+        let tree = [Symbol {
+            children: vec![local],
+            ..read.clone()
+        }];
+        assert!(!lacks_line_declaration(&tree, &[read], 6));
     }
 }
