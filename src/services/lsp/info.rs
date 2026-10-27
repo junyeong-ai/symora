@@ -91,7 +91,7 @@ pub(super) async fn diagnostics(
             async move {
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
-                let version = client.sync_document(&uri, &content).await?;
+                let version = client.sync_document_for_diagnostics(&uri, &content).await?;
                 // Snapshot AFTER the sync: for servers that omit publish
                 // versions, only arrivals strictly after the didChange went
                 // out can count as fresh. An in-flight publish for the old
