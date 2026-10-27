@@ -196,10 +196,9 @@ pub(super) fn client_capabilities(language: Language, file_watching: bool) -> Cl
                 "properties": ["tooltip", "textEdits", "label.tooltip", "label.location", "label.command"]
             }
         })),
-        diagnostic: Some(serde_json::json!({
-            "dynamicRegistration": false,
-            "relatedDocumentSupport": true
-        })),
+        // Diagnostics are read from publishes. A server offered pull
+        // diagnostics stops publishing them, and symora sends no pull.
+        diagnostic: None,
     };
 
     let workspace = WorkspaceClientCapabilities {
@@ -254,9 +253,7 @@ pub(super) fn client_capabilities(language: Language, file_watching: bool) -> Cl
         inlay_hint: Some(serde_json::json!({
             "refreshSupport": true
         })),
-        diagnostics: Some(serde_json::json!({
-            "refreshSupport": true
-        })),
+        diagnostics: None,
     };
 
     ClientCapabilities {
@@ -348,6 +345,25 @@ mod tests {
                 };
                 assert_eq!(dynamic, expected, "{language:?}");
             }
+        }
+    }
+
+    #[test]
+    fn diagnostics_are_offered_only_as_publishes() {
+        for language in Language::all() {
+            let capabilities = serde_json::to_value(client_capabilities(language, true)).unwrap();
+            assert!(
+                capabilities["textDocument"]["publishDiagnostics"].is_object(),
+                "{language:?}"
+            );
+            assert!(
+                capabilities["textDocument"].get("diagnostic").is_none(),
+                "{language:?}"
+            );
+            assert!(
+                capabilities["workspace"].get("diagnostics").is_none(),
+                "{language:?}"
+            );
         }
     }
 }
