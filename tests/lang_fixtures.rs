@@ -16,12 +16,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 mod common;
+mod mcp_session;
 
 use common::symora;
+use mcp_session::McpSession;
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/python/monorepo")
@@ -75,6 +78,35 @@ fn run_in_fixture(args: &[String]) -> Value {
         .find(|l| !l.trim().is_empty())
         .unwrap_or_else(|| panic!("no output for {args:?}"));
     serde_json::from_str(line).unwrap_or_else(|e| panic!("invalid JSON for {args:?}: {e}"))
+}
+
+/// What `tool` answers once pyright has read what `found` rests on.
+///
+/// A cold pyright answers before it has read the workspace: the package
+/// importing the one asked about, or a file just written. The session keeps
+/// pyright running, so the question is asked again while it reads, and the
+/// test fails with `what` and the last answer if `found` never holds.
+fn settled(
+    session: &mut McpSession,
+    tool: &str,
+    arguments: Value,
+    found: impl Fn(&Value) -> bool,
+    what: &str,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let page = session
+            .call(tool, arguments.clone())
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{tool} answered nothing"));
+        assert!(page.get("error").is_none(), "{what}: {page}");
+        if found(&page) {
+            return page;
+        }
+        assert!(Instant::now() < deadline, "{what}: {page}");
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 /// True when the environment can run the test; prints the reason and
@@ -187,20 +219,18 @@ fn pyright_resolves_across_package_boundaries() {
     );
 
     // refs on `area`'s definition include the call site in app.
+    let mut session = McpSession::new(Some(&fixture_root()));
     let (area_line, area_col) = find_identifier(&geometry, "area", 1);
-    let refs = run_in_fixture(&[
-        "refs".into(),
-        format!("{geometry_rel}:{area_line}:{area_col}"),
-    ]);
-    let files: Vec<&str> = refs["items"]
-        .as_array()
-        .expect("refs items")
-        .iter()
-        .filter_map(|i| i["file"].as_str())
-        .collect();
-    assert!(
-        files.contains(&report_rel),
-        "area references must include the cross-package call site, got {refs}"
+    settled(
+        &mut session,
+        "find_references",
+        json!({"file": geometry_rel, "line": area_line, "column": area_col}),
+        |refs| {
+            refs["items"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["file"] == report_rel))
+        },
+        "area references must include the cross-package call site",
     );
 
     let signed = run_in_fixture(&[
@@ -271,15 +301,6 @@ fn pyright_resolves_across_package_boundaries() {
         "{tree}"
     );
 
-    // Counting references takes each listed declaration and a class's members,
-    // never what a function holds.
-    let counted = run_in_fixture(&[
-        "symbols".into(),
-        geometry_rel.into(),
-        "--depth".into(),
-        "2".into(),
-        "--refs".into(),
-    ]);
     // Each row with whether it is internal to something it is inside: what a
     // type or module holds are its members, what anything else holds is not.
     fn flatten<'a>(items: &'a Value, internal: bool, out: &mut Vec<(&'a Value, bool)>) {
@@ -302,19 +323,27 @@ fn pyright_resolves_across_package_boundaries() {
             flatten(&item["children"], internal || !holds_members, out);
         }
     }
+
+    // Counting references takes each listed declaration and a class's members,
+    // never what a function holds.
+    let counted_once = |page: &Value, path: &str, field: &str| {
+        let mut rows = Vec::new();
+        flatten(&page["items"], false, &mut rows);
+        rows.iter()
+            .any(|(row, _)| row["name_path"] == path && row[field].as_u64() >= Some(1))
+    };
+    let counted = settled(
+        &mut session,
+        "list_file_symbols",
+        json!({"file": geometry_rel, "depth": 2, "refs": true}),
+        |page| {
+            counted_once(page, "area", "prod_refs")
+                && counted_once(page, "Circle/perimeter", "refs")
+        },
+        "area and Circle/perimeter are counted across the package boundary",
+    );
     let mut rows = Vec::new();
     flatten(&counted["items"], false, &mut rows);
-    let row = |path: &str| {
-        rows.iter()
-            .map(|(row, _)| row)
-            .find(|row| row["name_path"] == path)
-            .unwrap_or_else(|| panic!("{path} is listed: {counted}"))
-    };
-    assert!(row("area")["prod_refs"].as_u64() >= Some(1), "{counted}");
-    assert!(
-        row("Circle/perimeter")["refs"].as_u64() >= Some(1),
-        "{counted}"
-    );
     assert!(rows.iter().any(|(_, internal)| *internal), "{counted}");
     for (row, internal) in &rows {
         let measured = row.get("refs").is_some() || row.get("refs_status").is_some();
@@ -446,29 +475,19 @@ fn an_empty_reference_set_says_what_kind_of_empty_it_is() {
         return;
     }
     let geometry = fixture_root().join("packages/core/src/fixture_core/geometry.py");
-    let at = |ident: &str, occurrence: usize| {
-        let (line, column) = find_identifier(&geometry, ident, occurrence);
-        run_in_fixture(&[
-            "refs".to_string(),
-            format!("packages/core/src/fixture_core/geometry.py:{line}:{column}"),
-        ])
+    let at = |ident: &str| {
+        let (line, column) = find_identifier(&geometry, ident, 1);
+        json!({"file": "packages/core/src/fixture_core/geometry.py", "line": line, "column": column})
     };
+    let mut session = McpSession::new(Some(&fixture_root()));
 
-    // Each run starts pyright cold, and a cold pyright can answer before it
-    // has read the package that imports this one. What each check rests on,
-    // the references pyright finds there, is asked again until pyright gives
-    // it, and fails if it never does.
-    let settled = |ident: &str, found: &dyn Fn(&Value) -> bool, what: &str| {
-        (0..5)
-            .map(|_| at(ident, 1))
-            .find(|page| found(page))
-            .unwrap_or_else(|| panic!("{what}"))
-    };
     let counted = |page: &Value| page["count"].as_u64().is_some_and(|n| n > 0);
 
     let constructor = settled(
-        "__init__",
-        &|page| {
+        &mut session,
+        "find_references",
+        at("__init__"),
+        |page| {
             page["hints"].as_array().is_some_and(|hints| {
                 hints
                     .iter()
@@ -491,12 +510,20 @@ fn an_empty_reference_set_says_what_kind_of_empty_it_is() {
     );
 
     settled(
-        "area",
-        &counted,
+        &mut session,
+        "find_references",
+        at("area"),
+        counted,
         "the fixture calls `area` across the package boundary",
     );
 
-    let class = settled("Circle", &counted, "the fixture builds a `Circle`");
+    let class = settled(
+        &mut session,
+        "find_references",
+        at("Circle"),
+        counted,
+        "the fixture builds a `Circle`",
+    );
     assert!(
         class["hints"].as_array().is_none_or(|h| h
             .iter()
@@ -806,20 +833,19 @@ fn a_path_search_over_a_changed_file_lists_each_declaration_once_and_loses_none(
     assert_eq!(lines, [6, 10], "{port}");
     assert_eq!(port["count"], port["showing"], "{port}");
 
-    // Each run starts pyright cold, and a cold pyright can answer before it
-    // has read the file. The live row is what the merge is tested against,
-    // so the search is asked again until pyright gives it, and fails if it
-    // never does.
-    let shadow = (0..5)
-        .map(|_| run_in(shadow_root.path(), &["search", "symbols", "C/n"]))
-        .find(|shadow| {
-            shadow["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["backend"] != "index" && row["line"] == 5)
-        })
-        .expect("pyright lists the class now at the method's old line");
+    // The live row is what the merge is tested against.
+    let shadow = settled(
+        &mut McpSession::new(Some(shadow_root.path())),
+        "search_symbols",
+        json!({"query": "C/n"}),
+        |shadow| {
+            shadow["items"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["backend"] != "index" && row["line"] == 5)
+            })
+        },
+        "pyright lists the class now at the method's old line",
+    );
     let rows = shadow["items"].as_array().unwrap();
     let lines: Vec<u64> = rows
         .iter()
