@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use super::discovery::venv_python;
+use super::discovery::{editable_source_roots, venv_python};
 use super::exclude::lsp_exclude_globs;
 
 pub(super) fn python_init_options(root: &Path) -> Value {
@@ -34,6 +34,19 @@ pub(super) fn python_init_options(root: &Path) -> Value {
     // declining to guess beats injecting a wrong interpreter.
     if let Some(interpreter) = venv_python(root) {
         options["python"]["pythonPath"] = json!(interpreter.to_string_lossy());
+        // pyright reads a module it first reaches through site-packages as a
+        // third-party import and drops its errors and warnings, even once it
+        // is opened, and the project's own packages installed editable reach
+        // each other that way. On the extra paths they are local.
+        let roots = editable_source_roots(root, &interpreter);
+        if !roots.is_empty() {
+            options["python"]["analysis"]["extraPaths"] = json!(
+                roots
+                    .iter()
+                    .map(|root| root.to_string_lossy())
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     options
