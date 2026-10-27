@@ -69,15 +69,7 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
             // the body the anchor's symbol read already fetched, so it costs no
             // extra lookup; it is surfaced once at the top level, never per
             // reference.
-            let target = TargetOutput::from_symbol_or_fallback(
-                analysis.target(),
-                &analysis.anchor().file,
-                analysis.anchor().line,
-                analysis.anchor().column,
-                root,
-                analysis.anchor_resolution().as_status(),
-            )
-            .with_signature(
+            let target = TargetOutput::from_analysis(&analysis, root).with_signature(
                 analysis
                     .target()
                     .and_then(|target| target.signature.clone()),

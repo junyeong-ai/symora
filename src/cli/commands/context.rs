@@ -158,14 +158,7 @@ async fn fetch_context(
     let resolved_column = analysis.anchor.column;
 
     let mut target = {
-        let mut t = TargetOutput::from_symbol_or_fallback(
-            analysis.target(),
-            &analysis.anchor.file,
-            resolved_line,
-            resolved_column,
-            root,
-            analysis.anchor_resolution().as_status(),
-        );
+        let mut t = TargetOutput::from_analysis(&analysis, root);
         if let Some(sym) = analysis.target() {
             t = t.with_signature(sym.signature.clone());
             if args.body || args.all || args.with_bodies {

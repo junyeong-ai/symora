@@ -269,6 +269,10 @@ pub struct LocationAnalysis {
     /// resolved. Its `resolution.as_status()` is the `anchor_status` marker
     /// refs/impact/context emit, the same vocabulary the other surfaces use.
     pub(crate) anchor: Anchor,
+    /// The name a binding anchor is written with: the text of the reference
+    /// the server reports at it, which is its declaration. `None` for a
+    /// listed symbol, and for a binding whose references hold none there.
+    pub(crate) binding_name: Option<String>,
     pub(crate) language: Language,
     pub(crate) references: Vec<Location>,
     /// The indexing state the reference query ran under, captured at
@@ -289,6 +293,10 @@ impl LocationAnalysis {
 
     pub fn target(&self) -> Option<&Symbol> {
         self.anchor.symbol.as_ref()
+    }
+
+    pub fn binding_name(&self) -> Option<&str> {
+        self.binding_name.as_deref()
     }
 
     pub fn references(&self) -> &[Location] {
@@ -481,6 +489,16 @@ impl LocationAnalysis {
             }
             false => Vec::new(),
         };
+        let binding_name = match anchor.resolution {
+            AnchorResolution::Binding => references
+                .data
+                .iter()
+                .find(|r| {
+                    r.file == anchor.file && r.line == anchor.line && r.column == anchor.column
+                })
+                .and_then(written_name),
+            _ => None,
+        };
         let usages = usages_of(references.data, root, &declared);
         let declaring_type = match usages.is_empty() {
             true => declaring_type_reach(lsp, &anchor.file, anchor.line, anchor.column, root).await,
@@ -488,6 +506,7 @@ impl LocationAnalysis {
         };
         Ok(Self {
             anchor,
+            binding_name,
             language,
             references: usages,
             indexing: references.indexing,
@@ -520,6 +539,7 @@ impl LocationAnalysis {
         let usages = usages_of(references.data, root, &declared);
         Ok(Self {
             anchor,
+            binding_name: None,
             language,
             references: usages,
             indexing: references.indexing,
@@ -553,6 +573,24 @@ impl LocationAnalysis {
             target,
         )
     }
+}
+
+/// The text a one-line reference spans: the name as it is written there.
+fn written_name(reference: &Location) -> Option<String> {
+    let end = reference
+        .end_column
+        .filter(|_| reference.end_line == Some(reference.line))?;
+    let content = std::fs::read_to_string(&reference.file).ok()?;
+    let line: Vec<char> = content
+        .lines()
+        .nth(reference.line.checked_sub(1)? as usize)?
+        .chars()
+        .collect();
+    let name: String = line
+        .get(reference.column.checked_sub(1)? as usize..end.checked_sub(1)? as usize)?
+        .iter()
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// Reduce a raw `find_references` result to the symbol's usages: inside the
@@ -1121,6 +1159,7 @@ mod tests {
         LocationAnalysis {
             declaring_type: None,
             anchor,
+            binding_name: None,
             language: Language::Rust,
             references,
             indexing: None,
@@ -1186,6 +1225,45 @@ mod tests {
                 .as_deref(),
             Some("No reference to `render` was found, nor to `Widget`, which declares it")
         );
+    }
+
+    /// A binding is named as its declaration writes it: by the reference the
+    /// server reports there, in scalar columns, even where its definition
+    /// spans more than the name (pyright's spans a parameter's annotation).
+    /// References that hold nothing there leave it unnamed, never named by a
+    /// usage.
+    #[tokio::test]
+    async fn a_binding_is_named_by_the_reference_at_its_declaration() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("main.py");
+        std::fs::write(&file, "t = \"🎉\"; radius: float = 2\nprint(radius)\n").unwrap();
+        let path = file.to_str().unwrap();
+        let declaration = reference(path, 1, 10, 16);
+        let usage = reference(path, 2, 7, 13);
+        let definition = Location {
+            end_column: Some(23),
+            ..declaration.clone()
+        };
+        let stub = |references| AnchorStub {
+            symbols_by_file: HashMap::new(),
+            definitions: HashMap::new(),
+            references: HashMap::from([((file.clone(), 1, 10), references)]),
+        };
+        let anchor = || Anchor::binding(&at(path, 2, 7), &definition);
+
+        let named = LocationAnalysis::for_anchor(
+            &stub(vec![declaration, usage.clone()]),
+            anchor(),
+            directory.path(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(named.binding_name(), Some("radius"));
+        assert_eq!(named.references, vec![usage.clone()]);
+        let unnamed = LocationAnalysis::for_anchor(&stub(vec![usage]), anchor(), directory.path())
+            .await
+            .unwrap();
+        assert_eq!(unnamed.binding_name(), None);
     }
 
     #[test]
