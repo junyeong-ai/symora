@@ -3395,6 +3395,18 @@ mod tests {
         links: &[(&str, &str)],
         nodes: &[Node],
     ) -> ProjectManifests {
+        linked_manifests_in(None, files, links, nodes)
+    }
+
+    /// `linked_manifests_of` for a project in the directory `root` names
+    /// below the one the files and links are written to, so that a
+    /// `node_modules` can lie above the project.
+    fn linked_manifests_in(
+        root: Option<&str>,
+        files: &[(&str, &str)],
+        links: &[(&str, &str)],
+        nodes: &[Node],
+    ) -> ProjectManifests {
         let dir = tempfile::tempdir().expect("tempdir");
         for (path, contents) in files {
             let path = dir.path().join(path);
@@ -3406,8 +3418,9 @@ mod tests {
             std::fs::create_dir_all(link.parent().expect("a parent")).expect("mkdir");
             std::os::unix::fs::symlink(dir.path().join(target), link).expect("symlink");
         }
+        let project = root.map_or_else(|| dir.path().to_path_buf(), |root| dir.path().join(root));
         ProjectManifests {
-            manifests: Manifests::read(dir.path(), nodes),
+            manifests: Manifests::read(&project, nodes),
             _dir: dir,
         }
     }
@@ -8724,6 +8737,62 @@ mod tests {
         }
     }
 
+    /// TypeScript's walk up the `node_modules` directories goes on past the
+    /// project's root and stops at a link to a workspace package there, as
+    /// tsc 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler`: the package is
+    /// read before an `@types` declaration beside the link (`w`, `w/sub`),
+    /// and a registry copy above the root with no link takes its name
+    /// (`v`).
+    #[test]
+    fn a_link_above_the_project_root_is_read_before_the_types_beside_it() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let nodes = vec![
+            ts(
+                0,
+                "packages/app/src/main.ts",
+                "import \"w\";\nimport \"w/sub\";\nimport \"v\";\n",
+            ),
+            ts(1, "packages/w/src/index.ts", ""),
+            ts(2, "packages/w/src/sub.ts", ""),
+            ts(3, "packages/v/src/index.ts", ""),
+        ];
+        let manifests = linked_manifests_in(
+            Some("repo"),
+            &[
+                (
+                    "repo/package.json",
+                    "{\"workspaces\": [\"packages/*\"], \"devDependencies\": {\"typescript\": \"5.9.3\"}}",
+                ),
+                (
+                    "repo/packages/app/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"esnext\", \"moduleResolution\": \
+                     \"bundler\"}}",
+                ),
+                (
+                    "repo/packages/w/package.json",
+                    "{\"name\": \"w\", \"exports\": {\".\": \"./src/index.ts\", \"./sub\": \
+                     \"./src/sub.ts\"}}",
+                ),
+                (
+                    "repo/packages/v/package.json",
+                    "{\"name\": \"v\", \"types\": \"./src/index.ts\"}",
+                ),
+                ("node_modules/@types/w/index.d.ts", ""),
+                (
+                    "node_modules/v/package.json",
+                    "{\"name\": \"v\", \"types\": \"./index.d.ts\"}",
+                ),
+                ("node_modules/v/index.d.ts", ""),
+            ],
+            &[("node_modules/w", "repo/packages/w")],
+            &nodes,
+        );
+        assert_eq!(
+            edges_under(&nodes, 0, &manifests),
+            ["packages/w/src/index.ts", "packages/w/src/sub.ts"]
+        );
+    }
+
     /// Where no TypeScript reads an import, a `node_modules` from the
     /// importer's directory up holding a workspace package's name before
     /// its link takes it, as Node 26.12.1, esbuild 0.28.2 and webpack's
@@ -9770,6 +9839,74 @@ mod tests {
             graph.undetermined_imports,
             BTreeSet::from(["#dd".to_string()])
         );
+    }
+
+    /// An `imports` target is read through its conditions, pattern and
+    /// spelling, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler` and
+    /// `node16`: a package a condition names that a `node_modules` holds
+    /// takes the specifier there and ends the walk (`#fetch`'s `undici`
+    /// under `node16`, where `bundler` matches no `node` and reads
+    /// `default`), a package target's `*` takes what the key's matched
+    /// (`#ui/button.js`), and a target spelling a file of another kind
+    /// names it (`#vue/a`), which tsc leaves unresolved.
+    #[test]
+    fn an_imports_target_is_read_through_its_conditions_pattern_and_spelling() {
+        let modes = [
+            (
+                "\"module\": \"esnext\", \"moduleResolution\": \"bundler\"",
+                "ts",
+                Some("src/fetch.ts"),
+            ),
+            (
+                "\"module\": \"node16\", \"moduleResolution\": \"node16\"",
+                "mts",
+                None,
+            ),
+        ];
+        for (options, extension, fetch) in modes {
+            let nodes = vec![
+                node_in(
+                    0,
+                    &format!("src/main.{extension}"),
+                    "import \"#fetch\";\nimport \"#vue/a\";\nimport \"#ui/button.js\";\n",
+                    Language::TypeScript,
+                ),
+                node_in(1, "src/fetch.ts", "", Language::TypeScript),
+                node_in(2, "src/components/a.vue", "", Language::Vue),
+                node_in(3, "packages/ui/src/button.ts", "", Language::TypeScript),
+            ];
+            let config = format!("{{\"compilerOptions\": {{{options}}}}}");
+            let manifests = linked_manifests_of(
+                &[
+                    (
+                        "package.json",
+                        "{\"name\": \"app\", \"type\": \"module\", \"workspaces\": [\"packages/*\"], \
+                         \"devDependencies\": {\"typescript\": \"5.9.3\"}, \"imports\": {\"#fetch\": \
+                         {\"node\": \"undici\", \"default\": \"./src/fetch.js\"}, \"#vue/*\": \
+                         \"./src/components/*.vue\", \"#ui/*\": \"ui/*\"}}",
+                    ),
+                    ("tsconfig.json", &config),
+                    (
+                        "packages/ui/package.json",
+                        "{\"name\": \"ui\", \"exports\": {\"./*\": \"./src/*\"}}",
+                    ),
+                    (
+                        "node_modules/undici/package.json",
+                        "{\"name\": \"undici\", \"types\": \"./index.d.ts\"}",
+                    ),
+                    ("node_modules/undici/index.d.ts", ""),
+                ],
+                &[("node_modules/ui", "packages/ui")],
+                &nodes,
+            );
+            let graph = build_import_graph(&nodes, &manifests);
+            let expected: Vec<&str> = fetch
+                .into_iter()
+                .chain(["src/components/a.vue", "packages/ui/src/button.ts"])
+                .collect();
+            assert_eq!(edges_under(&nodes, 0, &manifests), expected, "{options}");
+            assert!(graph.undetermined_imports.is_empty(), "{options}");
+        }
     }
 
     /// A `package.json` starting with a UTF-8 byte order mark is read
