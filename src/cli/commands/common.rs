@@ -5,15 +5,19 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::analysis::{Anchor, resolve_anchor};
+use crate::cli::analysis::{Anchor, anchor_at, anchor_on_line, resolve_anchor};
 use crate::cli::output::OutputContext;
 use crate::cli::response::Section;
-use crate::cli::utils::{AnchorResolution, shell_arg};
-use crate::cli::{ErrorCode, LocationArg, OutputError, ParsedLocation};
+use crate::cli::utils::{
+    AnchorResolution, SymbolResolution, ambiguity_hint, line_addressed_symbol, shell_arg,
+};
+use crate::cli::{
+    ErrorCode, FileSymbols, LocationArg, OutputError, ParsedLocation, SymbolBackend,
+    declared_at_line,
+};
 use crate::error::LspError;
 use crate::models::lsp::{FindSymbolsOptions, Indexed};
 use crate::models::symbol::SymbolKind;
-use crate::services::lsp::LspService;
 
 /// Read a `--kind` value, naming the kinds it can be.
 pub(crate) fn parse_symbol_kind(text: &str) -> Result<SymbolKind, OutputError> {
@@ -222,11 +226,54 @@ impl Anchor {
 /// implementations, type hierarchy, impact, context — all route through the
 /// same rules, so a position means the same thing on every surface; the
 /// position-exact commands (def, hover, typedef, rename) read the raw
-/// position, and the anchor agrees with them by construction.
-pub(crate) async fn anchor_of(lsp: &dyn LspService, input: &ParsedLocation) -> Anchor {
-    resolve_anchor(lsp, input, FindSymbolsOptions::default().with_depth(10))
-        .await
-        .unwrap_or_else(|_| Anchor::unavailable(input))
+/// position, and the anchor agrees with them by construction. `options`
+/// shape the symbol read.
+///
+/// A column-less line whose declaration, on it or enclosing it, only the
+/// grammar's reading holds ([`declared_at_line`]) addresses that
+/// declaration's name as its column would, and an edit the same
+/// declaration; the first of several declared on it, with the hint naming
+/// the rest.
+pub(crate) async fn anchor_of(
+    app: &App,
+    input: &ParsedLocation,
+    options: FindSymbolsOptions,
+) -> Anchor {
+    let lsp = app.lsp.as_ref();
+    if input.column_explicit {
+        return resolve_anchor(lsp, input, options)
+            .await
+            .unwrap_or_else(|_| Anchor::unavailable(input));
+    }
+    let resolved = match declared_at_line(app, &input.file, options.clone(), input.line).await {
+        Ok(FileSymbols {
+            backend: SymbolBackend::Document,
+            symbols,
+            ..
+        }) => Ok(anchor_on_line(input, &symbols)),
+        Ok(FileSymbols {
+            symbols,
+            served: Some(served),
+            ..
+        }) => match line_addressed_symbol(&symbols, input.line) {
+            SymbolResolution::Match(declared) => {
+                let (line, column) = (declared.location.line, declared.location.column);
+                anchor_at(lsp, input, &served, line, column, options).await
+            }
+            SymbolResolution::Ambiguous(declared) => {
+                let (line, column) = (declared[0].location.line, declared[0].location.column);
+                anchor_at(lsp, input, &served, line, column, options)
+                    .await
+                    .map(|anchor| Anchor {
+                        hint: Some(ambiguity_hint(input.line, &declared)),
+                        ..anchor
+                    })
+            }
+            SymbolResolution::NotFound => Ok(anchor_on_line(input, &served)),
+        },
+        _ => return Anchor::unavailable(input),
+    };
+    resolved.unwrap_or_else(|_| Anchor::unavailable(input))
 }
 
 /// Execute a command that returns `Option<T>` from an LSP call.
@@ -292,7 +339,7 @@ where
 {
     let ctx = &app.output;
     let loc = loc.parse()?.to_absolute()?;
-    let anchor = anchor_of(app.lsp.as_ref(), &loc).await;
+    let anchor = anchor_of(app, &loc, FindSymbolsOptions::default().with_depth(10)).await;
 
     match lsp_call(anchor.file.clone(), anchor.line, anchor.column).await {
         Ok(result) => {

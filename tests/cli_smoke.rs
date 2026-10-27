@@ -4968,21 +4968,19 @@ fn a_server_symbol_over_two_declarations_answers_for_neither() {
     assert_eq!(answer["items"][0]["refs"], 1, "{answer}");
 }
 
-/// pyright's tree lists an overloaded method's implementation alone, and
-/// its definition at any of the method's declarations names all three. The
-/// grammar answers an edit at an `@overload` stub, and each stub's
-/// references are asked at its own name: a delete lists the method's other
-/// declarations and its call.
+/// A Python project served by a scripted server that answers as pyright
+/// does for `o.py`: a class `O` whose method `f` has two `@overload` stubs
+/// before its implementation, which its tree lists alone, and a call to it.
+/// Its definition at any of the method's declarations names all three.
 #[cfg(unix)]
-#[test]
-fn a_declaration_among_the_definitions_a_server_names_is_asked_at_its_name() {
+fn pyright_shaped_project() -> Option<tempfile::TempDir> {
     if !Command::new("python3")
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
     {
         eprintln!("pyright-shaped protocol fixture requires python3");
-        return;
+        return None;
     }
     let root = tempfile::tempdir().unwrap();
     let dir = root.path();
@@ -5006,6 +5004,19 @@ fn a_declaration_among_the_definitions_a_server_names_is_asked_at_its_name() {
         toml::to_string(&config).unwrap(),
     )
     .unwrap();
+    Some(root)
+}
+
+/// The grammar answers an edit at an `@overload` stub, and each stub's
+/// references are asked at its own name: a delete lists the method's other
+/// declarations and its call.
+#[cfg(unix)]
+#[test]
+fn a_declaration_among_the_definitions_a_server_names_is_asked_at_its_name() {
+    let Some(root) = pyright_shaped_project() else {
+        return;
+    };
+    let dir = root.path();
 
     let edit = json_ok(dir, &["edit", "delete", "o.py:6:9", "--dry-run"]);
     assert_eq!(
@@ -5024,6 +5035,33 @@ fn a_declaration_among_the_definitions_a_server_names_is_asked_at_its_name() {
         ["o.py:6:9", "o.py:9:9", "o.py:13:5"],
         "{edit}"
     );
+}
+
+/// The tree declares nothing on an `@overload` stub's line, which a
+/// column-less line would read as the enclosing class; the grammar's
+/// declaration on it answers instead, for an edit and for navigation alike,
+/// as the name's column does.
+#[cfg(unix)]
+#[test]
+fn a_line_only_the_grammar_declares_a_name_on_addresses_that_declaration() {
+    let Some(root) = pyright_shaped_project() else {
+        return;
+    };
+    let dir = root.path();
+
+    let edit = json_ok(dir, &["edit", "delete", "o.py:8", "--dry-run"]);
+    assert_eq!(edit["target_symbol"], "O/f", "{edit}");
+    assert_eq!(
+        edit["lines"],
+        serde_json::json!({"start": 7, "end": 8}),
+        "{edit}"
+    );
+
+    let by_line = json_ok(dir, &["refs", "o.py:8"]);
+    let by_column = json_ok(dir, &["refs", "o.py:8:9"]);
+    assert_eq!(by_line["target"], by_column["target"], "{by_line}");
+    assert_eq!(by_line["items"], by_column["items"], "{by_line}");
+    assert!(by_line.get("incomplete").is_none(), "{by_line}");
 }
 
 /// A Go project served by the scripted rename server in `mode`, which never

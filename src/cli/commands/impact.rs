@@ -12,6 +12,9 @@ use crate::cli::response::{
 use crate::cli::symbol_discovery::is_single_file_concentration;
 use crate::cli::utils::shell_arg;
 use crate::constants::defaults::{CALL_GRAPH_MAX_DEPTH, IMPACT_DEFAULT_DEPTH, IMPACT_FILES_LIMIT};
+use crate::models::lsp::FindSymbolsOptions;
+
+use super::common::anchor_of;
 
 #[derive(Args, Debug)]
 pub struct ImpactArgs {
@@ -37,7 +40,13 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
     let depth = args.depth.clamp(1, CALL_GRAPH_MAX_DEPTH);
     let limit = normalize_limit(args.limit);
 
-    match LocationAnalysis::at(app.lsp.as_ref(), loc, root).await {
+    let anchor = anchor_of(
+        app,
+        &loc,
+        FindSymbolsOptions::default().with_body().with_depth(10),
+    )
+    .await;
+    match LocationAnalysis::for_anchor(app.lsp.as_ref(), anchor, root).await {
         Ok(analysis) => {
             let classified = analysis.classify(test_scope);
 

@@ -45,7 +45,12 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
     let cfg = app.config();
     let limit = args.limit.unwrap_or(cfg.lsp.calls_limit);
     let loc = args.loc.parse()?.to_absolute()?;
-    let anchor = crate::cli::commands::common::anchor_of(app.lsp.as_ref(), &loc).await;
+    let anchor = crate::cli::commands::common::anchor_of(
+        app,
+        &loc,
+        FindSymbolsOptions::default().with_depth(10),
+    )
+    .await;
     let (line, column) = (anchor.line, anchor.column);
 
     let result = app.lsp.incoming_calls(&anchor.file, line, column).await;

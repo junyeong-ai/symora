@@ -25,7 +25,7 @@ use crate::cli::commands::common::{Reach, anchor_of, execute_list};
 use crate::cli::response::{CallHierarchyOutput, LocationOutput, Section};
 use crate::cli::{LocationArg, ParsedLocation};
 use crate::constants::defaults::CALL_GRAPH_MAX_DEPTH;
-use crate::models::lsp::{CallHierarchyItem, IndexingDegradation};
+use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions, IndexingDegradation};
 
 #[derive(Args, Debug)]
 pub struct CalleesArgs {
@@ -188,7 +188,7 @@ async fn probe_outgoing(app: &App, file: &std::path::Path, line: u32, column: u3
 async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) -> Result<()> {
     let ctx = &app.output;
     let loc = loc.parse()?.to_absolute()?;
-    let anchor = anchor_of(app.lsp.as_ref(), &loc).await;
+    let anchor = anchor_of(app, &loc, FindSymbolsOptions::default().with_depth(10)).await;
 
     if probe_outgoing(app, &anchor.file, anchor.line, anchor.column)
         .await
@@ -237,8 +237,13 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
     let loc = loc.parse()?.to_absolute()?;
     let target_loc = ParsedLocation::parse(to)?.to_absolute()?;
 
-    let anchor = anchor_of(app.lsp.as_ref(), &loc).await;
-    let target = anchor_of(app.lsp.as_ref(), &target_loc).await;
+    let anchor = anchor_of(app, &loc, FindSymbolsOptions::default().with_depth(10)).await;
+    let target = anchor_of(
+        app,
+        &target_loc,
+        FindSymbolsOptions::default().with_depth(10),
+    )
+    .await;
 
     if probe_outgoing(app, &anchor.file, anchor.line, anchor.column)
         .await
