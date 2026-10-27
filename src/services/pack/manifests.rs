@@ -666,17 +666,16 @@ fn finds_package(
 }
 
 /// The file TypeScript's lookup of a package in a `node_modules` directory
-/// takes below the package's directory, its `exports` not read, as tsc
-/// 5.9.3, 6.0.3 and 7.0.2 look one up
-/// (`loadModuleFromSpecificNodeModulesDirectory`), `package` being that
-/// directory's path below `base`, `root` its `package.json` and `add`
-/// whether a name is given an extension: for its name, the directory by
-/// that `package.json` (`directory_module`), whose `index` an ES import
-/// reads only where the `package.json` exists, as tsc's `index.js` fallback
-/// does (`p1c_*`, `q1b_*`, `q1e_*`); for a subpath, the file it names, then
-/// the directory by its own `package.json`, whose `index` an ES import does
-/// not read. Open where the `typesVersions` a subpath goes through decides.
-/// `existing` says what a path below `base` names.
+/// takes below the package's directory, its `exports` not read, as tsc 5.9.3,
+/// 6.0.3 and 7.0.2 look one up (`loadModuleFromSpecificNodeModulesDirectory`),
+/// `package` being that directory's path below `base`, `root` its
+/// `package.json` and `add` whether a name is given an extension: for its name,
+/// the directory by that `package.json` (`directory_module`), whose `index` an
+/// ES import reads only where the `package.json` exists, as tsc's `index.js`
+/// fallback does; for a subpath, the file it names, then the directory by its
+/// own `package.json`, whose `index` an ES import does not read. Open where the
+/// `typesVersions` a subpath goes through decides. `existing` says what a path
+/// below `base` names.
 pub(super) fn package_module(
     base: &Path,
     package: &[String],
@@ -811,19 +810,17 @@ pub(super) fn field_file(
 }
 
 /// The file TypeScript takes for a directory a path names, by the
-/// `package.json` it holds, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it
-/// (`dir_*`, `req_fields_*`): where that names one, the file the first of
-/// `typings` and `types`, where the extensions hold declarations, and
-/// `main` that is set names (`field_file`), so a declaration as written
-/// before its TypeScript twin, `lib/m.js` as `lib/m.ts` and never as
-/// written, and a declaration lookup's `x.ts` as `x.d.ts` (`f_field_decl_*`);
-/// else that path with an extension added and, for declarations alone, as
-/// a TypeScript file too (`named_extensions`), or that directory's `index`;
-/// else, a field naming no file included, its own `index`. A
-/// `typesVersions` there, which pack does not follow, leaves it open, since
-/// it may map the directory to another file. Its `exports` is not read.
-/// The `index` is looked up with an extension added where `add`, which an
-/// ES import under `node16` does not.
+/// `package.json` it holds, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it: where that
+/// names one, the file the first of `typings` and `types`, where the extensions
+/// hold declarations, and `main` that is set names (`field_file`), so a
+/// declaration as written before its TypeScript twin, `lib/m.js` as `lib/m.ts`
+/// and never as written, and a declaration lookup's `x.ts` as `x.d.ts`; else
+/// that path with an extension added and, for declarations alone, as a
+/// TypeScript file too (`named_extensions`), or that directory's `index`; else,
+/// a field naming no file included, its own `index`. A `typesVersions` there,
+/// which pack does not follow, leaves it open, since it may map the directory
+/// to another file. Its `exports` is not read. The `index` is looked up with an
+/// extension added where `add`, which an ES import under `node16` does not.
 pub(super) fn directory_module(
     directory: &[String],
     manifest: Option<&serde_json::Value>,
@@ -2340,13 +2337,12 @@ fn option_path<'p>(
     }
 }
 
-/// What a path option starting with `${configDir}` names below the
-/// directory of the configuration its chain starts from: the option with
-/// that template replaced by `./`, as tsc 5.9.3, 6.0.3 and 7.0.2
-/// substitute it in `baseUrl`, `paths`, `typeRoots`, `rootDir`, `outDir`,
-/// `declarationDir`, `files`, `include` and `exclude`, wherever in the
-/// chain it is set (`getSubstitutedPathWithConfigDirTemplate`; `zc_*`,
-/// `c*_*`). `None` for any other path.
+/// What a path option starting with `${configDir}` names below the directory of
+/// the configuration its chain starts from: the option with that template
+/// replaced by `./`, as tsc 5.9.3, 6.0.3 and 7.0.2 substitute it in `baseUrl`,
+/// `paths`, `typeRoots`, `rootDir`, `outDir`, `declarationDir`, `files`,
+/// `include` and `exclude`, wherever in the chain it is set
+/// (`getSubstitutedPathWithConfigDirTemplate`). `None` for any other path.
 fn below_config_dir(written: &str) -> Option<String> {
     let below = written.strip_prefix("${configDir}")?;
     Some(format!("./{below}"))
