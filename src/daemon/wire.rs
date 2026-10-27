@@ -600,6 +600,30 @@ impl DefinitionResponse {
             indexing: def.indexing,
         }
     }
+
+    /// The definition [`from_definition`](Self::from_definition) carried.
+    pub fn into_definition(self) -> lsp::Indexed<Option<lsp::Definition>> {
+        let Self {
+            definition,
+            is_self,
+            candidates,
+            indexing,
+            ..
+        } = self;
+        lsp::Indexed::new(
+            definition.map(|location| lsp::Definition {
+                location: location.into(),
+                is_self,
+                candidates: candidates.into_iter().map(Into::into).collect(),
+            }),
+            indexing,
+        )
+    }
+
+    /// The type definition [`from_type_definition`](Self::from_type_definition) carried.
+    pub fn into_type_definition(self) -> lsp::Indexed<Option<symbol::Location>> {
+        lsp::Indexed::new(self.definition.map(Into::into), self.indexing)
+    }
 }
 
 impl HoverResponse {
@@ -713,15 +737,29 @@ mod tests {
     fn every_definition_the_server_names_survives_the_daemon_wire() {
         let first = SymLocation::point(PathBuf::from("o.py"), 6, 9);
         let second = SymLocation::point(PathBuf::from("o.py"), 8, 9);
-        let response =
-            DefinitionResponse::from_definition(lsp::Indexed::complete(Some(lsp::Definition {
+        let response = DefinitionResponse::from_definition(lsp::Indexed::new(
+            Some(lsp::Definition {
                 location: first.clone(),
-                is_self: false,
+                is_self: true,
                 candidates: vec![first, second],
-            })));
+            }),
+            Some(lsp::IndexingDegradation::Unconfirmed),
+        ));
         let wire = serde_json::to_value(response).unwrap();
         let back: DefinitionResponse = serde_json::from_value(wire).unwrap();
-        let lines: Vec<u32> = back.candidates.iter().map(|named| named.line).collect();
+        let restored = back.into_definition();
+        assert_eq!(
+            restored.indexing,
+            Some(lsp::IndexingDegradation::Unconfirmed)
+        );
+        let definition = restored.data.expect("the definition survives");
+        assert!(definition.is_self);
+        assert_eq!(definition.location.line, 6);
+        let lines: Vec<u32> = definition
+            .candidates
+            .iter()
+            .map(|named| named.line)
+            .collect();
         assert_eq!(lines, [6, 8]);
 
         let typed = DefinitionResponse::from_type_definition(lsp::Indexed::complete(None));

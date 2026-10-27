@@ -94,18 +94,7 @@ impl LspService for DaemonLspService {
     ) -> Result<Indexed<Option<Definition>>, LspError> {
         let result = self.client.goto_definition(file, line, column).await?;
 
-        let response: DefinitionResponse = parse(result)?;
-
-        let is_self = response.is_self;
-        let candidates = response.candidates;
-        Ok(Indexed::new(
-            response.definition.map(|location| Definition {
-                location: location.into(),
-                is_self,
-                candidates: candidates.into_iter().map(Into::into).collect(),
-            }),
-            response.indexing,
-        ))
+        Ok(parse::<DefinitionResponse>(result)?.into_definition())
     }
 
     async fn goto_type_definition(
@@ -116,12 +105,7 @@ impl LspService for DaemonLspService {
     ) -> Result<Indexed<Option<Location>>, LspError> {
         let result = self.client.goto_type_definition(file, line, column).await?;
 
-        let response: DefinitionResponse = parse(result)?;
-
-        Ok(Indexed::new(
-            response.definition.map(Into::into),
-            response.indexing,
-        ))
+        Ok(parse::<DefinitionResponse>(result)?.into_type_definition())
     }
 
     async fn find_implementations(
