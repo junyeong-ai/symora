@@ -14,7 +14,8 @@ pub use capabilities::{
     get_unsupported_message, is_feature_supported, language_display_name, language_server_name,
 };
 pub use client::{
-    IndexingEvent, IndexingState, LspClient, content_generation, note_workspace_content_changed,
+    DiagnosticPull, IndexingEvent, IndexingState, LspClient, content_generation,
+    note_workspace_content_changed,
 };
 pub use health::HealthMonitor;
 pub use manager::{LspManager, ServerStatusDetail};

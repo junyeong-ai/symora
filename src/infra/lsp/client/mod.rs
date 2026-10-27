@@ -22,13 +22,16 @@ use crate::models::lsp::path_to_uri;
 use crate::models::symbol::Language;
 
 mod capabilities;
+mod diagnostic_pull;
 mod indexing;
 mod process;
 
-use capabilities::client_capabilities;
+use capabilities::{client_capabilities, offers_pull_diagnostics};
+use diagnostic_pull::{DIAGNOSTIC_METHOD, PullProviders};
 use indexing::IndexingStatus;
 use process::ServerProcess;
 
+pub use diagnostic_pull::DiagnosticPull;
 pub use indexing::{IndexingEvent, IndexingQuery, IndexingState};
 
 type PendingRequest = oneshot::Sender<Response>;
@@ -330,6 +333,8 @@ pub struct LspClient {
     /// manager decides, by [`FileWatch`](super::watch::FileWatch).
     file_watching: bool,
     watched_files: std::sync::Mutex<WatchRegistry>,
+    /// Kept only for a language whose server is offered pull diagnostics.
+    pull_providers: std::sync::Mutex<PullProviders>,
     /// The settings snapshot used for this session's configuration replies.
     settings: RwLock<Option<serde_json::Value>>,
 }
@@ -373,6 +378,7 @@ impl LspClient {
             indexing_status: std::sync::Mutex::new(IndexingStatus {
                 state: IndexingState::NotStarted,
                 revision: 0,
+                reported: false,
             }),
             indexing_notify: Notify::new(),
             dispatch_gate: RwLock::new(()),
@@ -380,6 +386,7 @@ impl LspClient {
             initialized: AtomicBool::new(false),
             file_watching,
             watched_files: std::sync::Mutex::new(WatchRegistry::default()),
+            pull_providers: std::sync::Mutex::new(PullProviders::default()),
             settings: RwLock::new(None),
         })
     }
@@ -544,6 +551,12 @@ impl LspClient {
         // Close the encoding negotiation: record the server's choice once.
         *self.position_encoding.write().await =
             PositionEncoding::from_capabilities(&result.capabilities);
+        if offers_pull_diagnostics(self.language) {
+            self.pull_providers
+                .lock()
+                .expect("pull providers poisoned")
+                .declare(&result.capabilities);
+        }
 
         // Store capabilities
         *self.capabilities.write().await = Some(result);
@@ -614,9 +627,27 @@ impl LspClient {
         method: &str,
         params: Option<Value>,
     ) -> Result<T, LspError> {
+        let answer = crate::infra::deadline::run(
+            self.config.request_timeout(),
+            self.request_inner(method, params, None),
+        )
+        .await?;
+        Ok(answer.expect("a request without an answer deadline is answered or fails"))
+    }
+
+    /// Send a request and wait for its answer until `answer_by`: `None` when
+    /// none came by then, and the request is cancelled. The request itself
+    /// is sent whatever the time, since a send cut short midway would leave
+    /// the server holding a document it was never told the rest of.
+    pub async fn request_answered_by<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        answer_by: tokio::time::Instant,
+    ) -> Result<Option<T>, LspError> {
         crate::infra::deadline::run(
             self.config.request_timeout(),
-            self.request_inner(method, params),
+            self.request_inner(method, params, Some(answer_by)),
         )
         .await
     }
@@ -625,7 +656,8 @@ impl LspClient {
         &self,
         method: &str,
         params: Option<Value>,
-    ) -> Result<T, LspError> {
+        answer_by: Option<tokio::time::Instant>,
+    ) -> Result<Option<T>, LspError> {
         self.usage
             .lock()
             .expect("client usage lock poisoned")
@@ -690,11 +722,18 @@ impl LspClient {
             write_request(stdin_guard, &request, self.config.request_timeout()).await?;
         }
 
-        match rx.await {
+        let response = match answer_by {
+            Some(answer_by) => match tokio::time::timeout_at(answer_by, rx).await {
+                Ok(response) => response,
+                Err(_) => return Ok(None),
+            },
+            None => rx.await,
+        };
+        match response {
             Ok(response) => match response.into_result() {
-                Ok(result) => {
-                    serde_json::from_value(result).map_err(|e| LspError::Protocol(e.to_string()))
-                }
+                Ok(result) => serde_json::from_value(result)
+                    .map(Some)
+                    .map_err(|e| LspError::Protocol(e.to_string())),
                 Err(err) if err.code == super::protocol::error_codes::SERVER_TERMINATED => {
                     Err(LspError::ServerTerminated {
                         language: self.language,
@@ -1052,10 +1091,8 @@ impl LspClient {
     /// When the sync produced a `didChange` — the content on disk moved
     /// under an open overlay — a `textDocument/didSave` follows: every
     /// caller passes content read straight from disk, so the overlay now
-    /// matches the saved file, and save is the signal that triggers
-    /// save-driven analysis (rust-analyzer runs flycheck on save, so a
-    /// warm daemon's diagnostics would otherwise stay unconfirmed after
-    /// every edit). A no-op sync sends nothing.
+    /// matches the saved file, and save is the signal a server that
+    /// analyzes on save waits for. A no-op sync sends nothing.
     pub async fn sync_document(&self, uri: &str, content: &str) -> Result<u32, LspError> {
         // Fingerprint the backing file alongside the content being sent,
         // so the drift sweep can later skip unchanged documents on a stat
@@ -1423,6 +1460,16 @@ impl LspClient {
         }
     }
 
+    /// Whether this client offered dynamic registration for `method`.
+    fn registers(&self, method: &str) -> bool {
+        match method {
+            WATCHED_FILES_METHOD => self.file_watching,
+            DIAGNOSTIC_METHOD => offers_pull_diagnostics(self.language),
+            _ => false,
+        }
+    }
+
+    /// Apply a registration batch whole or not at all.
     fn register_capabilities(&self, params: &Option<Value>) -> Result<Value, ResponseError> {
         let params: RegistrationParams =
             serde_json::from_value(params.clone().unwrap_or(Value::Null))
@@ -1430,18 +1477,27 @@ impl LspClient {
         if let Some(registration) = params
             .registrations
             .iter()
-            .find(|registration| !self.file_watching || registration.method != WATCHED_FILES_METHOD)
+            .find(|registration| !self.registers(&registration.method))
         {
             return Err(Self::invalid_registration(format!(
                 "Dynamic registration is not supported for {}",
                 registration.method
             )));
         }
+        let (pulls, watchers): (Vec<_>, Vec<_>) = params
+            .registrations
+            .into_iter()
+            .partition(|registration| registration.method == DIAGNOSTIC_METHOD);
+        let pulls = PullProviders::read(&pulls).map_err(Self::invalid_registration)?;
         self.watched_files
             .lock()
             .expect("watch registry poisoned")
-            .register(&params.registrations)
+            .register(&watchers)
             .map_err(Self::invalid_registration)?;
+        self.pull_providers
+            .lock()
+            .expect("pull providers poisoned")
+            .register(pulls);
         Ok(Value::Null)
     }
 
@@ -1449,17 +1505,28 @@ impl LspClient {
         let params: UnregistrationParams =
             serde_json::from_value(params.clone().unwrap_or(Value::Null))
                 .map_err(Self::invalid_registration)?;
-        if let Some(unregistration) = params.unregisterations.iter().find(|unregistration| {
-            !self.file_watching || unregistration.method != WATCHED_FILES_METHOD
-        }) {
+        if let Some(unregistration) = params
+            .unregisterations
+            .iter()
+            .find(|unregistration| !self.registers(&unregistration.method))
+        {
             return Err(Self::invalid_registration(format!(
                 "Dynamic registration is not supported for {}",
                 unregistration.method
             )));
         }
-        let mut watched = self.watched_files.lock().expect("watch registry poisoned");
         for unregistration in params.unregisterations {
-            watched.unregister(&unregistration.id);
+            if unregistration.method == DIAGNOSTIC_METHOD {
+                self.pull_providers
+                    .lock()
+                    .expect("pull providers poisoned")
+                    .unregister(&unregistration.id);
+            } else {
+                self.watched_files
+                    .lock()
+                    .expect("watch registry poisoned")
+                    .unregister(&unregistration.id);
+            }
         }
         Ok(Value::Null)
     }

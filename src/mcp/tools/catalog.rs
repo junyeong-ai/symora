@@ -628,7 +628,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     "string",
                     "Present only when the list is not authoritative: unconfirmed \
                      (no confirmed analysis within the wait window) or unsupported \
-                     (the server doesn't publish diagnostics) — empty items then \
+                     (the server provides no diagnostics) — empty items then \
                      means unknown, not clean",
                 ),
             ],

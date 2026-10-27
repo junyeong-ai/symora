@@ -73,7 +73,7 @@ pub(super) async fn diagnostics(
     use crate::models::lsp::{Position as LspPosition, Range as LspRange};
     use crate::models::symbol::Language;
 
-    // A language whose server doesn't publish diagnostics is an answer,
+    // A language whose server provides no diagnostics is an answer,
     // not a failure — callers attach the status inline instead of
     // branching on an error.
     let lang = Language::from_path(file);
@@ -99,7 +99,7 @@ pub(super) async fn diagnostics(
                 let seq_before = client.publish_seq_snapshot();
 
                 let Some(lsp_diagnostics) =
-                    wait_for_publish(&client, &uri, version, seq_before, wait_budget).await
+                    read_fresh_diagnostics(&client, &uri, version, seq_before, wait_budget).await?
                 else {
                     return Ok(DiagnosticsReport {
                         status: DiagnosticsStatus::Unconfirmed,
@@ -181,37 +181,164 @@ pub(super) async fn diagnostics(
         .await
 }
 
-/// Wait for a `publishDiagnostics` that reflects the synced content.
+/// Wait for diagnostics that reflect the synced content: the answer to a
+/// pull, from a server that serves pulls for the document, or else a fresh
+/// publish.
 ///
 /// A publish is fresh when the server stamps it with a document version
 /// at or past the one we synced (LSP 3.15+), or — for servers that omit
-/// versions — when it arrived after the sync began. A fresh publish
-/// returns immediately, so clean files don't burn the window. `None`
-/// means nothing fresh landed: the honest answer is "unconfirmed",
-/// never a synthesized "clean".
-async fn wait_for_publish(
+/// versions — when it arrived after the sync began. An answer returns
+/// immediately, so clean files don't burn the window. `None` means no
+/// answer for the synced content came within it: the honest answer is
+/// "unconfirmed", never a synthesized "clean".
+async fn read_fresh_diagnostics(
     client: &LspClient,
     uri: &str,
     synced_version: u32,
     seq_before: u64,
     budget: std::time::Duration,
-) -> Option<Vec<crate::infra::lsp::protocol::LspDiagnostic>> {
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+) -> Result<Option<Vec<crate::infra::lsp::protocol::LspDiagnostic>>, LspError> {
+    use crate::infra::lsp::DiagnosticPull;
+    use tokio::time::{Duration, Instant, sleep};
 
-    let start = std::time::Instant::now();
+    const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+    let deadline = Instant::now() + budget;
     loop {
-        if let Some(published) = client.published_diagnostics(uri).await {
-            let fresh = match published.doc_version {
-                Some(v) => v >= synced_version,
-                None => published.seq > seq_before,
-            };
-            if fresh {
-                return Some(published.items);
+        match client.pull_diagnostics(uri, deadline).await? {
+            DiagnosticPull::Answered(items) => return Ok(Some(items)),
+            DiagnosticPull::Unanalyzed => return Ok(None),
+            DiagnosticPull::Pending => {}
+            DiagnosticPull::NotServed => {
+                if let Some(published) = client.published_diagnostics(uri).await {
+                    let fresh = match published.doc_version {
+                        Some(v) => v >= synced_version,
+                        None => published.seq > seq_before,
+                    };
+                    if fresh {
+                        return Ok(Some(published.items));
+                    }
+                }
             }
         }
-        if start.elapsed() >= budget {
-            return None;
+        if Instant::now() >= deadline {
+            return Ok(None);
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::infra::lsp::servers::ServerLaunch;
+    use crate::models::symbol::Language;
+
+    async fn pull_server(root: &Path, mode: &str) -> Arc<LspClient> {
+        let client = LspClient::new(
+            Language::Python,
+            root.to_path_buf(),
+            Arc::new(crate::config::LspRuntimeConfig::default()),
+            false,
+        );
+        let launch = ServerLaunch {
+            command: PathBuf::from("python3"),
+            args: vec![
+                "-u".into(),
+                "-c".into(),
+                include_str!("../../../tests/fixtures/lsp/pull_server.py").into(),
+                mode.into(),
+            ],
+            env: Default::default(),
+        };
+        client.start(&launch, || {}).await.unwrap();
+        client
+    }
+
+    /// The lines a read reports errors on after `content` is written, or
+    /// `None` when the read stays unconfirmed.
+    async fn read(
+        client: &LspClient,
+        path: &Path,
+        content: &str,
+        budget: Duration,
+    ) -> Option<Vec<u32>> {
+        std::fs::write(path, content).unwrap();
+        let uri = path_to_uri(path);
+        let version = client
+            .sync_document_for_diagnostics(&uri, content)
+            .await
+            .unwrap();
+        let seq_before = client.publish_seq_snapshot();
+        read_fresh_diagnostics(client, &uri, version, seq_before, budget)
+            .await
+            .unwrap()
+            .map(|items| items.iter().map(|item| item.range.start.line).collect())
+    }
+
+    #[tokio::test]
+    async fn a_registered_pull_answers_for_the_current_content() {
+        let root = tempfile::tempdir().unwrap();
+        let client = pull_server(root.path(), "registered").await;
+        let file = root.path().join("a.py");
+        let budget = Duration::from_secs(10);
+        assert_eq!(
+            read(&client, &file, "error\nok\n", budget).await,
+            Some(vec![0])
+        );
+        assert_eq!(
+            read(&client, &file, "ok\nerror\n", budget).await,
+            Some(vec![1])
+        );
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pull_counts_only_while_the_workspace_is_reported_ready() {
+        let root = tempfile::tempdir().unwrap();
+        let client = pull_server(root.path(), "workspace").await;
+        let file = root.path().join("a.rs");
+        let short = Duration::from_millis(300);
+        let budget = Duration::from_secs(10);
+        assert_eq!(read(&client, &file, "error\n", short).await, None);
+        assert_eq!(
+            read(&client, &file, "error\nready\n", budget).await,
+            Some(vec![0])
+        );
+        assert_eq!(read(&client, &file, "error\nfailed\n", short).await, None);
+        assert_eq!(read(&client, &file, "error\ndegraded\n", short).await, None);
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pull_answered_across_a_reload_or_cancelled_is_asked_again() {
+        let root = tempfile::tempdir().unwrap();
+        let client = pull_server(root.path(), "workspace").await;
+        let file = root.path().join("a.rs");
+        let budget = Duration::from_secs(10);
+        for content in ["error\nready\nreload\n", "error\nready\ncancel\n"] {
+            assert_eq!(read(&client, &file, content, budget).await, Some(vec![0]));
+        }
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_empty_pull_counts_only_for_a_document_in_a_project() {
+        let root = tempfile::tempdir().unwrap();
+        let client = pull_server(root.path(), "workspace").await;
+        let file = root.path().join("a.rs");
+        let budget = Duration::from_secs(10);
+        let started = std::time::Instant::now();
+        assert_eq!(read(&client, &file, "ready\nlibrary\n", budget).await, None);
+        assert!(started.elapsed() < budget / 2, "{:?}", started.elapsed());
+        assert_eq!(
+            read(&client, &file, "error\nready\nlibrary\n", budget).await,
+            Some(vec![0])
+        );
+        assert_eq!(read(&client, &file, "ready\n", budget).await, Some(vec![]));
+        client.shutdown().await.unwrap();
     }
 }

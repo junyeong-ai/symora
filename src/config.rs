@@ -11,9 +11,9 @@ pub struct LspRuntimeConfig {
     base_timeout: Duration,
     pub max_file_size_bytes: u64,
     pub auto_restart: bool,
-    /// Wait window for `publishDiagnostics` after a document sync.
-    /// Confirmation short-circuits; the window only runs out when the
-    /// server stays silent.
+    /// Wait window for a document's diagnostics after a sync, pulled or
+    /// published. An answer short-circuits; the window only runs out when
+    /// none comes.
     pub diagnostics_wait: Duration,
     /// Custom project entry files per language (overrides defaults in find_project_entry)
     pub entry_files: BTreeMap<String, Vec<String>>,

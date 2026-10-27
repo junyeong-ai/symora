@@ -119,6 +119,9 @@ pub mod error_codes {
     /// would be stale. The spec's contract is "re-issue the request" — the
     /// canonical retryable error.
     pub const CONTENT_MODIFIED: i32 = -32801;
+    /// The server cancelled the request itself; a diagnostic pull it cannot
+    /// answer yet is cancelled this way, to be asked again.
+    pub const SERVER_CANCELLED: i32 = -32802;
 
     // Symora-specific error codes
     pub const SERVER_TERMINATED: i32 = -32099;
@@ -389,6 +392,12 @@ pub struct ServerCapabilities {
     pub type_hierarchy_provider: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub implementation_provider: Option<Value>,
+    /// Pull diagnostics declared at initialize ([`DiagnosticOptions`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic_provider: Option<Value>,
+    /// Server-specific capabilities, such as rust-analyzer's extensions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experimental: Option<Value>,
     /// The position encoding the server picked from the client's offered set
     /// (LSP 3.17). Absent means the spec default, utf-16.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -640,6 +649,46 @@ pub struct LspDiagnostic {
 pub struct LspDiagnosticRelatedInformation {
     pub location: LspLocation,
     pub message: String,
+}
+
+/// A server's pull diagnostics, declared at initialize or registered for
+/// `textDocument/diagnostic`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticOptions {
+    /// Set when the server declares its provider statically under an id it
+    /// may unregister it by.
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub identifier: Option<String>,
+    /// Absent or null: every document the server is sent.
+    #[serde(default)]
+    pub document_selector: Option<Vec<DocumentFilter>>,
+}
+
+/// A document filter. One that names none of `language`, `scheme` and
+/// `pattern` selects no text document, nor does one that names a notebook:
+/// it selects the cells of that notebook.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DocumentFilter {
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default)]
+    pub pattern: Option<GlobPattern>,
+    #[serde(default)]
+    pub notebook: Option<Value>,
+}
+
+/// The answer to a `textDocument/diagnostic` pull. `Unchanged` is only an
+/// answer to a pull that named a previous result.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum DocumentDiagnosticReport {
+    Full { items: Vec<LspDiagnostic> },
+    Unchanged,
 }
 
 // LSP Call Hierarchy Types

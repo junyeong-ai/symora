@@ -3,7 +3,7 @@
 //! These exercise the full stack — server resolution, venv discovery,
 //! workspace configuration, session lifetime — against a real pyright on
 //! a committed two-package uv workspace whose every assertion crosses
-//! the package boundary. The defect class they guard (server detection,
+//! the package boundary, and against a real rust-analyzer. The defect class they guard (server detection,
 //! settings delivery, protocol handling) is invisible to hermetic tests.
 //!
 //! Gated like the daemon parity test: `#[ignore]` by default, opt in with
@@ -146,6 +146,42 @@ fn pyright_on_path() -> bool {
         .status()
         .is_ok_and(|status| status.success());
     found || skip("pyright does not run here — follow tests/fixtures/python/monorepo/README.md")
+}
+
+fn rust_analyzer_on_path() -> bool {
+    let found = Command::new("rust-analyzer")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    found || skip("rust-analyzer does not run here — `rustup component add rust-analyzer`")
+}
+
+/// A scratch git repository holding `files`.
+fn repository(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let status = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .expect("git");
+    assert!(status.success());
+    for (name, content) in files {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+    dir
+}
+
+fn errors(page: &Value) -> usize {
+    page["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["severity"] == "error")
+        .count()
 }
 
 #[test]
@@ -981,4 +1017,90 @@ fn pyright_rename_applies_only_once_its_unconfirmed_edits_are_accepted() {
         read("caller.py"),
         "from target import renamed_target\nvalue = renamed_target()\n"
     );
+}
+
+/// A caller's diagnostics read right after an edit to what it calls answer
+/// for the edit, in both directions. pyright is read by pull, answered for
+/// the content it holds; its publish for the caller comes later, so a read
+/// of publishes then would still report the caller as it was.
+#[test]
+#[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
+fn a_caller_read_right_after_an_edit_answers_for_it() {
+    if !pyright_on_path() {
+        return;
+    }
+    let repo = repository(&[
+        ("lib.py", "def f(x: int) -> int:\n    return x\n"),
+        ("app.py", "from lib import f\n\nf(1)\n"),
+    ]);
+    let mut session = McpSession::new(Some(repo.path()));
+    let caller = json!({"file": "app.py"});
+    let before = settled(
+        &mut session,
+        "get_diagnostics",
+        caller.clone(),
+        |page| page.get("status").is_none(),
+        "pyright confirms the caller before the edit",
+    );
+    assert_eq!(errors(&before), 0, "{before}");
+    for (parameter, broken) in [("str", 1), ("int", 0), ("bytes", 1)] {
+        let edited = session
+            .call(
+                "replace_symbol_body",
+                json!({
+                    "file": "lib.py",
+                    "symbol": "f",
+                    "body": format!("def f(x: {parameter}) -> int:\n    return 0\n"),
+                }),
+            )
+            .remove(0);
+        assert!(edited.get("error").is_none(), "{edited}");
+        let page = session.call("get_diagnostics", caller.clone()).remove(0);
+        assert!(page.get("status").is_none(), "{parameter}: {page}");
+        assert_eq!(errors(&page), broken, "{parameter}: {page}");
+    }
+}
+
+/// rust-analyzer is read by pull once it reports its workspace loaded, so a
+/// read right after an edit answers for the edited content, including an
+/// edit that leaves its diagnostics as they were, which it publishes no
+/// second time. A file outside its workspace gets the same empty answer as
+/// a clean one, and stays unconfirmed.
+#[test]
+#[ignore = "requires rust-analyzer; run: cargo test --test lang_fixtures -- --ignored"]
+fn rust_analyzer_diagnostics_answer_for_each_edit() {
+    if !rust_analyzer_on_path() {
+        return;
+    }
+    let repo = repository(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"pull_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        ),
+        ("src/lib.rs", "pub fn f() -> u32 {\n    \"s\"\n}\n"),
+    ]);
+    let mut session = McpSession::new(Some(repo.path()));
+    let arguments = json!({"file": "src/lib.rs"});
+    settled(
+        &mut session,
+        "get_diagnostics",
+        arguments.clone(),
+        |page| page.get("status").is_none() && errors(page) == 1,
+        "rust-analyzer reports the type error once its workspace is ready",
+    );
+    for (body, expected) in [("1", 0), ("2", 0), ("\"t\"", 1)] {
+        let content = format!("pub fn f() -> u32 {{\n    {body}\n}}\n");
+        std::fs::write(repo.path().join("src/lib.rs"), &content).unwrap();
+        let page = session.call("get_diagnostics", arguments.clone()).remove(0);
+        assert!(page.get("status").is_none(), "{content}: {page}");
+        assert_eq!(errors(&page), expected, "{content}: {page}");
+    }
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = elsewhere.path().join("outside.rs");
+    std::fs::write(&outside, "pub fn g() -> u32 {\n    \"s\"\n}\n").unwrap();
+    let page = session
+        .call("get_diagnostics", json!({"file": outside}))
+        .remove(0);
+    assert_eq!(page["status"], "unconfirmed", "{page}");
 }
