@@ -1099,6 +1099,22 @@ impl LspClient {
         .await
     }
 
+    /// Sync the document for a diagnostics read and return its version.
+    ///
+    /// The read asks the server about the workspace as a request does but
+    /// sends none, so the overlay sweep a request runs first
+    /// (`refresh_drifted_overlays`) runs here: a document another tool
+    /// edited on disk reaches the server before the read, not at the next
+    /// request.
+    pub async fn sync_document_for_diagnostics(
+        &self,
+        uri: &str,
+        content: &str,
+    ) -> Result<u32, LspError> {
+        self.refresh_drifted_overlays().await;
+        self.sync_document(uri, content).await
+    }
+
     async fn notify_did_save(&self, uri: &str) {
         let _ = self
             .notify(
@@ -1990,5 +2006,55 @@ mod tests {
         let before = content_generation();
         client.note_document_changed();
         assert!(content_generation() > before);
+    }
+
+    /// A diagnostics read sends the server no request, so it runs the
+    /// overlay sweep itself: an open document edited on disk reaches the
+    /// server before another document's diagnostics are read.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_diagnostics_read_brings_drifted_overlays_back_to_disk() {
+        async fn published_at(client: &LspClient, uri: &str, version: u32) {
+            for _ in 0..500 {
+                let published = client.published_diagnostics(uri).await;
+                if published.is_some_and(|published| published.doc_version == Some(version)) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("the server never saw {uri} at version {version}");
+        }
+        let root = tempfile::tempdir().unwrap();
+        let client = LspClient::new(
+            Language::Python,
+            root.path().to_path_buf(),
+            Arc::new(crate::config::LspRuntimeConfig::default()),
+            false,
+        );
+        let launch = super::super::servers::ServerLaunch {
+            command: PathBuf::from("python3"),
+            args: vec![
+                "-u".into(),
+                "-c".into(),
+                include_str!("../../../../tests/fixtures/lsp/publish_server.py").into(),
+            ],
+            env: Default::default(),
+        };
+        client.start(&launch, || {}).await.unwrap();
+        let (caller_path, target_path) =
+            (root.path().join("caller.py"), root.path().join("target.py"));
+        let (caller, target) = (path_to_uri(&caller_path), path_to_uri(&target_path));
+        std::fs::write(&caller_path, "from target import f\n").unwrap();
+        std::fs::write(&target_path, "def f(a):\n").unwrap();
+
+        client.sync_document(&target, "def f(a):\n").await.unwrap();
+        published_at(&client, &target, 1).await;
+        std::fs::write(&target_path, "def f(a, b):\n").unwrap();
+        client
+            .sync_document_for_diagnostics(&caller, "from target import f\n")
+            .await
+            .unwrap();
+        published_at(&client, &target, 2).await;
+        client.shutdown().await.unwrap();
     }
 }
