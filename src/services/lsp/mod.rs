@@ -155,14 +155,13 @@ pub trait LspService: Send + Sync {
     /// the language layer in line with the new bytes — invalidate per-file
     /// symbol caches, advance the workspace-content generation so cached
     /// workspace-wide answers can't outlive the write, and sync + save any
-    /// live server's overlay (rust-analyzer re-checks on save) — without
-    /// ever booting a server just to note an edit. Best-effort: an edit's
-    /// success never depends on it.
+    /// live server's overlay — without ever booting a server just to note
+    /// an edit. Best-effort: an edit's success never depends on it.
     async fn note_files_edited(&self, _files: &[std::path::PathBuf]) {}
 
     /// The process is done with the language layer: each server this
     /// service started is asked to exit, so it stops what it started in a
-    /// session of its own, as rust-analyzer stops its check on save, which
+    /// session of its own, as rust-analyzer stops a check it runs on save, which
     /// stopping its group does not reach. The servers are asked together,
     /// each within the bound `LspClient::shutdown` keeps. A daemon's servers
     /// are the daemon's to stop.

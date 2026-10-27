@@ -27,20 +27,10 @@ pub(super) fn rust_init_options() -> Value {
             "target": null,
             "unsetTest": ["core"]
         },
-        "check": {
-            "allTargets": true,
-            "command": "clippy",
-            "extraArgs": ["--", "-W", "clippy::all"],
-            "extraEnv": {},
-            "features": null,
-            "ignore": [],
-            "invocationLocation": "workspace",
-            "invocationStrategy": "per_workspace",
-            "noDefaultFeatures": null,
-            "overrideCommand": null,
-            "targets": null,
-            "workspace": true
-        },
+        // Diagnostics are pulled, and a pull answers from rust-analyzer's own
+        // analysis. A cargo check run would add results only as publishes,
+        // which carry no sign of the content they checked.
+        "checkOnSave": false,
         "procMacro": {
             "enable": true,
             "attributes": {
