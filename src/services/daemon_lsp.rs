@@ -97,10 +97,12 @@ impl LspService for DaemonLspService {
         let response: DefinitionResponse = parse(result)?;
 
         let is_self = response.is_self;
+        let candidates = response.candidates;
         Ok(Indexed::new(
             response.definition.map(|location| Definition {
                 location: location.into(),
                 is_self,
+                candidates: candidates.into_iter().map(Into::into).collect(),
             }),
             response.indexing,
         ))

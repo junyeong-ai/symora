@@ -386,6 +386,10 @@ pub struct DefinitionResponse {
     /// (see [`lsp::Definition`]); always false for type definitions.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_self: bool,
+    /// Every definition the server named, `definition` among them (see
+    /// [`lsp::Definition`]); empty for type definitions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<Location>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -574,6 +578,11 @@ impl DefinitionResponse {
         Self {
             is_self: def.data.as_ref().is_some_and(|d| d.is_self),
             definition: def.data.as_ref().map(|d| Location::from(&d.location)),
+            candidates: def
+                .data
+                .as_ref()
+                .map(|d| d.candidates.iter().map(Location::from).collect())
+                .unwrap_or_default(),
             message,
             indexing: def.indexing,
         }
@@ -583,6 +592,7 @@ impl DefinitionResponse {
         Self {
             definition: def.data.as_ref().map(Location::from),
             is_self: false,
+            candidates: Vec::new(),
             message: def
                 .data
                 .is_none()
@@ -695,6 +705,32 @@ mod tests {
         let restored: lsp::CodeAction = decoded.actions.into_iter().next().unwrap().into();
         assert_eq!(restored.expected_hash, Some(42));
         assert_eq!(restored.document_hashes["file:///other.rs"], 84);
+    }
+
+    /// `served_as` asks about a declaration where any definition the server
+    /// names is that declaration, so the daemon must carry every one.
+    #[test]
+    fn every_definition_the_server_names_survives_the_daemon_wire() {
+        let first = SymLocation::point(PathBuf::from("o.py"), 6, 9);
+        let second = SymLocation::point(PathBuf::from("o.py"), 8, 9);
+        let response =
+            DefinitionResponse::from_definition(lsp::Indexed::complete(Some(lsp::Definition {
+                location: first.clone(),
+                is_self: false,
+                candidates: vec![first, second],
+            })));
+        let wire = serde_json::to_value(response).unwrap();
+        let back: DefinitionResponse = serde_json::from_value(wire).unwrap();
+        let lines: Vec<u32> = back.candidates.iter().map(|named| named.line).collect();
+        assert_eq!(lines, [6, 8]);
+
+        let typed = DefinitionResponse::from_type_definition(lsp::Indexed::complete(None));
+        assert!(
+            serde_json::to_value(typed)
+                .unwrap()
+                .get("candidates")
+                .is_none()
+        );
     }
 
     #[test]

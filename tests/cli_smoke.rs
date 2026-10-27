@@ -4774,6 +4774,26 @@ fn a_declaration_the_servers_tree_lacks_is_answered_from_the_grammar() {
     let answer = json_ok(dir, &["search", "symbols", "X/X", "--signature"]);
     assert_eq!(answer["items"][0]["name_path"], "X/X", "{answer}");
     assert_eq!(answer["items"][0]["signature"], "X(int raw)", "{answer}");
+
+    // The analyzer reads the enum constructor's `(` as the enum, so its
+    // callers are not asked for either.
+    let edit = json_ok(
+        dir,
+        &[
+            "edit",
+            "insert-after",
+            "f.dart",
+            "--symbol",
+            "E/E",
+            "--code",
+            "// x",
+            "--verify-callers",
+        ],
+    );
+    assert_eq!(
+        edit["caller_verification"]["status"], "unavailable",
+        "{edit}"
+    );
 }
 
 /// A C++ project served by a scripted server that answers as clangd 21 does
@@ -4902,14 +4922,13 @@ fn a_grammar_answered_cpp_definitions_references_are_asked_where_clangd_reads_it
 }
 
 /// pyright's tree lists an overloaded method's implementation alone, and
-/// its definition at any of the method's declarations is the first. The
-/// grammar answers an edit at an `@overload` stub; the first stub's
-/// references are asked at its own name, while the second's position reads
-/// as another declaration, so nothing is asked for it: its check and its
-/// callers are unavailable, and a delete that needs no references refuses.
+/// its definition at any of the method's declarations names all three. The
+/// grammar answers an edit at an `@overload` stub, and each stub's
+/// references are asked at its own name: a delete lists the method's other
+/// declarations and its call.
 #[cfg(unix)]
 #[test]
-fn a_declaration_the_server_reads_as_another_is_asked_nothing() {
+fn a_declaration_among_the_definitions_a_server_names_is_asked_at_its_name() {
     if !Command::new("python3")
         .arg("--version")
         .output()
@@ -4953,35 +4972,9 @@ fn a_declaration_the_server_reads_as_another_is_asked_nothing() {
         serde_json::json!({"start": 7, "end": 8}),
         "{edit}"
     );
-    assert_eq!(edit["references_status"], "unavailable", "{edit}");
-    assert!(edit.get("dangling_references").is_none(), "{edit}");
-    let refused = run_in(
-        dir,
-        &[
-            "edit",
-            "delete",
-            "o.py:8:9",
-            "--dry-run",
-            "--expect-no-references",
-        ],
-    );
-    assert!(!refused.status.success());
-    let refused: serde_json::Value = common::parse_response(&refused.stdout).unwrap();
-    assert_eq!(refused["error"]["code"], "precondition_failed", "{refused}");
-
-    let edit = json_ok(
-        dir,
-        &[
-            "edit",
-            "replace-body",
-            "o.py:8:9",
-            "--body",
-            "    @overload\n    def f(self, x: bytes) -> bytes: ...",
-            "--verify-callers",
-        ],
-    );
     assert_eq!(
-        edit["caller_verification"]["status"], "unavailable",
+        listed_references(&edit, "dangling_references"),
+        ["o.py:6:9", "o.py:9:9", "o.py:13:5"],
         "{edit}"
     );
 }

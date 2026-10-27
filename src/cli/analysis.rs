@@ -629,6 +629,15 @@ mod tests {
         }
     }
 
+    /// A definition the server names alone.
+    fn definition(location: Location, is_self: bool) -> Definition {
+        Definition {
+            candidates: vec![location.clone()],
+            location,
+            is_self,
+        }
+    }
+
     #[async_trait]
     impl LspService for AnchorStub {
         async fn find_symbols(
@@ -839,73 +848,43 @@ mod tests {
         let mut definitions = HashMap::new();
         definitions.insert(
             (PathBuf::from("routes.rs"), 31, 28),
-            Definition {
-                location: Location::point(PathBuf::from("svc.rs"), 5, 8),
-                is_self: false,
-            },
+            definition(Location::point(PathBuf::from("svc.rs"), 5, 8), false),
         );
         definitions.insert(
             (PathBuf::from("routes.rs"), 33, 9),
-            Definition {
-                location: Location::point(PathBuf::from("routes.rs"), 25, 9),
-                is_self: false,
-            },
+            definition(Location::point(PathBuf::from("routes.rs"), 25, 9), false),
         );
         definitions.insert(
             (PathBuf::from("routes.rs"), 22, 3),
-            Definition {
-                location: Location::point(PathBuf::from("ext.rs"), 1, 12),
-                is_self: false,
-            },
+            definition(Location::point(PathBuf::from("ext.rs"), 1, 12), false),
         );
         definitions.insert(
             (PathBuf::from("routes.rs"), 50, 1),
-            Definition {
-                location: Location::point(PathBuf::from("types.rs"), 3, 12),
-                is_self: false,
-            },
+            definition(Location::point(PathBuf::from("types.rs"), 3, 12), false),
         );
         definitions.insert(
             (PathBuf::from("routes.rs"), 23, 5),
-            Definition {
-                location: Location::point(PathBuf::from("routes.rs"), 23, 5),
-                is_self: true,
-            },
+            definition(Location::point(PathBuf::from("routes.rs"), 23, 5), true),
         );
         definitions.insert(
             (PathBuf::from("routes.rs"), 23, 6),
-            Definition {
-                location: Location::point(PathBuf::from("routes.rs"), 23, 5),
-                is_self: true,
-            },
+            definition(Location::point(PathBuf::from("routes.rs"), 23, 5), true),
         );
         definitions.insert(
             (PathBuf::from("routes.rs"), 20, 12),
-            Definition {
-                location: Location::point(PathBuf::from("models/mod.rs"), 1, 1),
-                is_self: false,
-            },
+            definition(Location::point(PathBuf::from("models/mod.rs"), 1, 1), false),
         );
         definitions.insert(
             (PathBuf::from("routes.rs"), 35, 5),
-            Definition {
-                location: Location::point(PathBuf::from("routes.rs"), 23, 1),
-                is_self: false,
-            },
+            definition(Location::point(PathBuf::from("routes.rs"), 23, 1), false),
         );
         definitions.insert(
             (PathBuf::from("routes.rs"), 23, 3),
-            Definition {
-                location: Location::point(PathBuf::from("routes.rs"), 23, 1),
-                is_self: false,
-            },
+            definition(Location::point(PathBuf::from("routes.rs"), 23, 1), false),
         );
         definitions.insert(
             (PathBuf::from("routes.rs"), 25, 9),
-            Definition {
-                location: Location::point(PathBuf::from("routes.rs"), 25, 9),
-                is_self: true,
-            },
+            definition(Location::point(PathBuf::from("routes.rs"), 25, 9), true),
         );
         AnchorStub {
             symbols_by_file,
@@ -1181,10 +1160,7 @@ mod tests {
             symbols_by_file: HashMap::from([(lib.clone(), vec![block.clone()])]),
             definitions: HashMap::from([(
                 (lib.clone(), 3, 6),
-                Definition {
-                    location: declared.clone(),
-                    is_self: false,
-                },
+                definition(declared.clone(), false),
             )]),
             references: HashMap::from([(
                 (lib.clone(), 3, 6),
