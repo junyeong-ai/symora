@@ -43,7 +43,7 @@ No two declarations of a file share a name position: the index keeps one row per
 
 ## Import edges come from the parse tree
 
-`pack`'s import-resolution contract is in `.claude/rules/import-resolution.md`.
+`pack`'s import-resolution contract is in `.claude/rules/import-resolution.md`, and its JavaScript and TypeScript part in `.claude/rules/import-resolution-js.md`.
 
 ## Service abstractions: LSP and Store
 
