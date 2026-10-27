@@ -908,7 +908,13 @@ fn declares_types(manifest: &serde_json::Value) -> bool {
 
 /// The `package.json` at a path, `None` where it is missing or no JSON.
 fn package_json(path: &Path) -> Option<serde_json::Value> {
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    json(&std::fs::read_to_string(path).ok()?)
+}
+
+/// A `package.json`'s text read as JSON, a UTF-8 byte order mark it starts
+/// with removed, as Node 26.12.1 and tsc 5.9.3, 6.0.3 and 7.0.2 read it.
+fn json(text: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text)).ok()
 }
 
 /// Whether a name ends with an extension and holds more than it.
@@ -1061,9 +1067,7 @@ impl Manifests {
         let package_jsons: Vec<(Vec<String>, serde_json::Value)> =
             manifests_above(root, nodes, is_javascript, "package.json")
                 .into_iter()
-                .filter_map(|(directory, text)| {
-                    Some((directory, serde_json::from_str(&text).ok()?))
-                })
+                .filter_map(|(directory, text)| Some((directory, json(&text)?)))
                 .collect();
         let package_scopes = package_jsons
             .iter()
@@ -1715,8 +1719,7 @@ impl TsReader<'_> {
     /// The `package.json` in the directory at `directory`, where it holds
     /// one that is JSON.
     fn package_manifest(&self, directory: &[String]) -> Option<serde_json::Value> {
-        let text = std::fs::read_to_string(project_file(self.root, directory).join("package.json"));
-        serde_json::from_str(&text.ok()?).ok()
+        package_json(&project_file(self.root, directory).join("package.json"))
     }
 
     fn is_file(&self, path: &[String]) -> bool {
@@ -1940,10 +1943,7 @@ fn workspace_members(
             member.push(name);
             if listed.lists(&member.join("/")) {
                 let path = [workspace, member.as_slice()].concat();
-                let manifest =
-                    std::fs::read_to_string(project_file(root, &path).join("package.json"))
-                        .ok()
-                        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+                let manifest = package_json(&project_file(root, &path).join("package.json"));
                 if let Some(name) = manifest
                     .as_ref()
                     .and_then(|manifest| manifest.get("name")?.as_str())
@@ -2408,8 +2408,7 @@ impl TypeScriptVersions {
             .then(|| {
                 let manifest = project_file(&self.root, directory)
                     .join("node_modules/typescript/package.json");
-                let manifest: serde_json::Value =
-                    serde_json::from_str(&std::fs::read_to_string(manifest).ok()?).ok()?;
+                let manifest = package_json(&manifest)?;
                 let version = manifest.get("version")?.as_str()?;
                 Some(version.split('.').next()?.parse::<u64>().ok())
             })
@@ -2450,8 +2449,7 @@ impl TypeScriptVersions {
 /// (`npm:@typescript/typescript6@^6.0.2`) read as the range it gives. `None`
 /// where it declares none; an empty string where its catalog holds none.
 fn declared_typescript(root: &Path, directory: &[String]) -> Option<String> {
-    let text = std::fs::read_to_string(project_file(root, directory).join("package.json")).ok()?;
-    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let manifest = package_json(&project_file(root, directory).join("package.json"))?;
     let range = [
         "dependencies",
         "devDependencies",

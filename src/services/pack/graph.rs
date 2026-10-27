@@ -9534,6 +9534,56 @@ mod tests {
         );
     }
 
+    /// A `package.json` starting with a UTF-8 byte order mark is read
+    /// without it, as Node 26.12.1 and tsc 5.9.3, 6.0.3 and 7.0.2 read one
+    /// under `node16`: a workspace root's lists its packages (`w`), a
+    /// package's `exports` maps its name, and a package scope's `imports`
+    /// map a `#` specifier and its `"type"` makes an import an ES one, which
+    /// adds no extension (`./d`).
+    #[test]
+    fn a_package_json_starting_with_a_byte_order_mark_is_read_without_it() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let nodes = vec![
+            ts(
+                0,
+                "packages/app/src/m.ts",
+                "import \"w\";\nimport \"#cfg\";\nimport \"./d\";\n",
+            ),
+            ts(1, "packages/app/src/cfg.ts", ""),
+            ts(2, "packages/app/src/d.ts", ""),
+            ts(3, "packages/w/src/index.ts", ""),
+        ];
+        let manifests = linked_manifests_of(
+            &[
+                (
+                    "package.json",
+                    "\u{feff}{\"workspaces\": [\"packages/*\"], \"devDependencies\": \
+                     {\"typescript\": \"5.9.3\"}}",
+                ),
+                (
+                    "packages/app/package.json",
+                    "\u{feff}{\"name\": \"app\", \"type\": \"module\", \"imports\": \
+                     {\"#cfg\": \"./src/cfg.js\"}}",
+                ),
+                (
+                    "packages/app/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"node16\", \"moduleResolution\": \
+                     \"node16\"}}",
+                ),
+                (
+                    "packages/w/package.json",
+                    "\u{feff}{\"name\": \"w\", \"exports\": {\".\": \"./src/index.ts\"}}",
+                ),
+            ],
+            &[("node_modules/w", "packages/w")],
+            &nodes,
+        );
+        assert_eq!(
+            edges_under(&nodes, 0, &manifests),
+            ["packages/w/src/index.ts", "packages/app/src/cfg.ts"]
+        );
+    }
+
     /// A package's `exports` maps by conditions, read in their written order
     /// as TypeScript 6 matches them: `types`, `default` and the configured
     /// `customConditions` always, `import` under `bundler` or for an ES
