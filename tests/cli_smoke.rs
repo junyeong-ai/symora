@@ -1339,6 +1339,68 @@ fn a_body_line_the_grammar_reads_addresses_its_method() {
     assert_eq!(preview["lines"]["end"], 4, "{preview}");
 }
 
+/// A symbol edit is refused before it writes when its source would not do
+/// what the edit names: a blank definition would delete the declaration
+/// without the report of dangling references `edit delete` makes, and an
+/// empty insertion changes nothing. A blank line is still something to
+/// insert.
+#[test]
+fn a_symbol_edit_without_code_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "def total(a):\n    return a + 1\n";
+    std::fs::write(dir.path().join("shop.py"), source).unwrap();
+    let config_dir = dir.path().join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright\"\n",
+    )
+    .unwrap();
+    let edit = |operation: &str, flag: &str, code: &str| {
+        run_in(
+            dir.path(),
+            &[
+                "edit",
+                operation,
+                "shop.py",
+                "--symbol",
+                "total",
+                flag,
+                code,
+                "--dry-run",
+            ],
+        )
+    };
+
+    for (operation, flag, code) in [
+        ("replace-body", "--body", ""),
+        ("replace-body", "--body", " \n\t"),
+        ("insert-before", "--code", ""),
+        ("insert-after", "--code", ""),
+    ] {
+        let out = edit(operation, flag, code);
+        assert!(
+            !out.status.success(),
+            "{operation} {code:?} unexpectedly succeeded"
+        );
+        let response = common::parse_response(&out.stdout).unwrap();
+        assert_eq!(response["error"]["code"], "invalid_argument", "{response}");
+        if operation == "replace-body" {
+            assert!(
+                response["error"]["hint"]
+                    .as_str()
+                    .is_some_and(|hint| hint.contains("edit delete")),
+                "{response}"
+            );
+        }
+    }
+    assert!(edit("insert-before", "--code", "\n").status.success());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("shop.py")).unwrap(),
+        source
+    );
+}
+
 /// The grammar's answer carries a member's container in its `name_path`, and
 /// `edit --symbol` resolves the path `symbols` printed, as it does against a
 /// server's tree.

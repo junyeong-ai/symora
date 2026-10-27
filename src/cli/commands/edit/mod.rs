@@ -235,6 +235,7 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
 }
 
 async fn run(command: EditCommand, app: &App) -> Result<()> {
+    ensure_source(&command)?;
     let dry_run = match &command {
         EditCommand::ReplaceBody { dry_run, .. }
         | EditCommand::InsertBefore { dry_run, .. }
@@ -388,6 +389,31 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             index,
             dry_run,
         } => pattern_edit(app, &file, &pattern, &lang, &text, &index, dry_run).await,
+    }
+}
+
+/// Refuse source that would not do what the edit names. A definition
+/// replaced with blank lines is a delete, which `edit delete` makes while
+/// reporting the references it leaves dangling, and inserting an empty
+/// string changes nothing.
+fn ensure_source(command: &EditCommand) -> Result<()> {
+    match command {
+        EditCommand::ReplaceBody { body, .. } if body.trim().is_empty() => {
+            anyhow::bail!(
+                crate::cli::OutputError::invalid("The replacement definition is blank").with_hint(
+                    "To remove the declaration, run `symora edit delete`, which reports the \
+                     references its removal leaves dangling",
+                )
+            )
+        }
+        EditCommand::InsertBefore { code, .. } | EditCommand::InsertAfter { code, .. }
+            if code.is_empty() =>
+        {
+            anyhow::bail!(crate::cli::OutputError::invalid(
+                "The code to insert is empty"
+            ))
+        }
+        _ => Ok(()),
     }
 }
 
