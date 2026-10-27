@@ -78,7 +78,7 @@ jobs:
         run: cargo hack check --rust-version --all-targets --locked
 
   lang-fixtures:
-    name: Real language server (pyright fixtures)
+    name: Real language servers (pyright, rust-analyzer)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -90,6 +90,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
+          components: rust-analyzer
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -112,5 +113,5 @@ jobs:
         run: uv sync --frozen
         working-directory: tests/fixtures/python/monorepo
 
-      - name: Run language-fixture tests
-        run: cargo nextest run --test lang_fixtures --run-ignored ignored-only
+      - name: Run real-server tests
+        run: cargo nextest run --test lang_fixtures --test parity --run-ignored ignored-only
