@@ -263,8 +263,13 @@ enum Resolution {
 
 /// What resolving a file's references needs to know about where the file
 /// sits, worked out once for the file rather than once per reference.
+#[derive(Clone)]
 struct Importer<'a> {
     node: &'a Node,
+    /// The directory a non-relative specifier is looked up in `node_modules`
+    /// from: the file's own, but its package's for a target naming a
+    /// package that an `imports` map holds (`ProjectIndex::package_target`).
+    directory: &'a [String],
     /// The TypeScript configuration a JavaScript or TypeScript file is
     /// compiled under (`Manifests::ts_owner`).
     ts_config: Option<&'a TsConfig>,
@@ -430,6 +435,7 @@ impl<'a> Importer<'a> {
             (TsOwner::None | TsOwner::Uncompiled(_), None) => {
                 return Self {
                     node,
+                    directory: &node.directory,
                     ts_config,
                     ts_owners: Vec::new(),
                     ts_uncompiled,
@@ -458,6 +464,7 @@ impl<'a> Importer<'a> {
         }
         Self {
             node,
+            directory: &node.directory,
             ts_config,
             ts_owners: match owner {
                 TsOwner::Undetermined(owners) => owners,
@@ -1840,7 +1847,7 @@ impl ProjectIndex<'_> {
         // A declaration pack does not read may stand for it, which tsc
         // takes over whatever the rest of the lookup names.
         let mut outside = false;
-        let directory = Some(importer.node.directory.as_slice());
+        let directory = Some(importer.directory);
         // A `node_modules` package forms an edge only as a workspace's does.
         let packaged = || {
             self.workspace_package(specifier, importer, reading, form)
@@ -1937,7 +1944,7 @@ impl ProjectIndex<'_> {
     ) -> Option<TypeRooted> {
         let add = lookup != PathLookup::Esm;
         let declared = self.type_root_declaration(specifier, importer, add)?;
-        let directory = Some(importer.node.directory.as_slice());
+        let directory = Some(importer.directory);
         let packaged =
             self.node_modules_finds(directory, specifier, lookup, extensions, None, false);
         let undetermined = || Resolution::TypeRootUndetermined(specifier.to_string());
@@ -2042,10 +2049,10 @@ impl ProjectIndex<'_> {
         if roots.is_empty() {
             return None;
         }
-        let directory = &importer.node.directory;
+        let directory = importer.directory;
         let key = (
             config.map(std::ptr::from_ref),
-            directory.clone(),
+            directory.to_vec(),
             specifier.to_string(),
             add,
         );
@@ -2671,14 +2678,18 @@ impl ProjectIndex<'_> {
     /// What a target naming a package, which an `imports` map may hold,
     /// names, `*` replaced by what a pattern key's matched: the file the
     /// importer's own lookup of that specifier takes
-    /// (`lookup_bare_specifier`), as tsc resolves it from the package's
-    /// directory above the importer (`#dep`, `#self`); else none outside
-    /// the project where a `node_modules` package takes it, and where none
-    /// does, nothing, so that TypeScript reads the next condition or entry.
-    /// A target that is itself a `#` specifier is left undetermined.
+    /// (`lookup_bare_specifier`) from the directory of the package holding
+    /// the map, as tsc 5.9.3, 6.0.3 and 7.0.2, Node 26.12.1 and esbuild
+    /// 0.28.2 resolve it, undetermined for Node and the bundlers where the
+    /// lookup from the importer's directory, which webpack's
+    /// enhanced-resolve 5.24.5 makes, names another; else none outside the
+    /// project where a `node_modules` package takes it, and where none does,
+    /// nothing, so that TypeScript reads the next condition or entry. A
+    /// target that is itself a `#` specifier is left undetermined.
     fn package_target(
         &self,
         name: &str,
+        package: &[String],
         importer: &Importer,
         lookup: Lookup,
         reading: Reading,
@@ -2690,10 +2701,21 @@ impl ProjectIndex<'_> {
         if specifier.starts_with('#') {
             return Exported::Undetermined;
         }
-        match self.lookup_bare_specifier(&specifier, importer, reading, lookup.form) {
+        let read =
+            |importer| self.lookup_bare_specifier(&specifier, importer, reading, lookup.form);
+        let from_package = &Importer {
+            directory: package,
+            ..importer.clone()
+        };
+        let found = read(from_package);
+        if reading.major.is_none() && read(importer) != found {
+            return Exported::Undetermined;
+        }
+        let importer = from_package;
+        match found {
             Resolution::Files(files) if !files.is_empty() => Exported::Files(files),
             Resolution::Files(_) => {
-                let at = Some(importer.node.directory.as_slice());
+                let at = Some(importer.directory);
                 let all = Extensions::All;
                 let installed = path_lookup(reading, lookup.form).and_then(|path| {
                     self.node_modules_finds(at, &specifier, path, all, None, false)
@@ -2831,7 +2853,7 @@ impl ProjectIndex<'_> {
         between: bool,
         pass: &dyn Fn(Extensions) -> Option<Resolution>,
     ) -> Option<Resolution> {
-        let at = Some(importer.node.directory.as_slice());
+        let at = Some(importer.directory);
         let elsewhere = |extensions, to_link| {
             let lookup = lookup.filter(|_| between)?;
             match self.node_modules_finds(at, specifier, lookup, extensions, Some(package), to_link)
@@ -2867,14 +2889,14 @@ impl ProjectIndex<'_> {
     ) -> Option<Resolution> {
         let root = self.manifests.root.as_ref()?;
         let name = split_components(split_package_name(specifier).0);
-        let first = project_file(root, &importer.node.directory)
+        let first = project_file(root, importer.directory)
             .ancestors()
             .map(|at| project_file(&at.join("node_modules"), &name))
             .find(|installed| installed.is_dir())?;
         if first.canonicalize().ok() == project_file(root, package).canonicalize().ok() {
             return None;
         }
-        let at = Some(importer.node.directory.as_slice());
+        let at = Some(importer.directory);
         let (lookup, javascript) = (PathLookup::Bundler, Extensions::JavaScript);
         Some(
             match self.node_modules_finds(at, specifier, lookup, javascript, Some(package), true) {
@@ -2957,7 +2979,9 @@ impl ProjectIndex<'_> {
                 if !name.starts_with("../") && !name.starts_with('/') =>
             {
                 match lookup.imports {
-                    Some(reading) => self.package_target(name, importer, lookup, reading),
+                    Some(reading) => {
+                        self.package_target(name, directory, importer, lookup, reading)
+                    }
                     None => Exported::Nothing,
                 }
             }
@@ -9661,6 +9685,90 @@ mod tests {
         assert_eq!(
             graph.undetermined_imports,
             BTreeSet::from(["k/c".to_string(), "w/o".to_string()])
+        );
+    }
+
+    /// A target naming a package that an `imports` map holds is looked up
+    /// from the directory of the package holding the map, as tsc 5.9.3,
+    /// 6.0.3 and 7.0.2 trace it under `bundler`, past a `node_modules`
+    /// between it and the importer to the link above it (`w`'s `#dd`), or
+    /// to the next condition where none holds the package (`#df`).
+    /// Node 26.12.1 and esbuild 0.28.2 look it up there too, and webpack's
+    /// enhanced-resolve 5.24.5 from the importer's directory, so where the
+    /// two lookups name different files, Node's and the bundlers' reading
+    /// is disclosed (`j`'s `#dd`).
+    #[test]
+    fn a_package_target_in_imports_is_looked_up_from_the_packages_directory() {
+        let nodes = vec![
+            node_in(
+                0,
+                "packages/w/src/main.ts",
+                "import \"#dd\";\nimport \"#df\";\n",
+                Language::TypeScript,
+            ),
+            node_in(
+                1,
+                "packages/j/src/main.js",
+                "import \"#dd\";\n",
+                Language::JavaScript,
+            ),
+            node_in(2, "packages/d/index.ts", "", Language::TypeScript),
+            node_in(3, "packages/d/index.js", "", Language::JavaScript),
+            node_in(4, "packages/w/src/f.ts", "", Language::TypeScript),
+        ];
+        let manifests = linked_manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"workspaces\": [\"packages/*\"], \"devDependencies\": {\"typescript\": \"5.9.3\"}}",
+                ),
+                (
+                    "packages/d/package.json",
+                    "{\"name\": \"d\", \"type\": \"module\", \"exports\": {\".\": \"./index.js\"}}",
+                ),
+                (
+                    "packages/w/package.json",
+                    "{\"name\": \"w\", \"type\": \"module\", \"imports\": {\"#dd\": \"d\", \
+                     \"#df\": {\"types\": \"e\", \"default\": \"./src/f.js\"}}}",
+                ),
+                (
+                    "packages/w/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"esnext\", \"moduleResolution\": \
+                     \"bundler\"}}",
+                ),
+                (
+                    "packages/w/src/node_modules/d/package.json",
+                    "{\"name\": \"d\", \"types\": \"./index.d.ts\", \"main\": \"./index.js\"}",
+                ),
+                ("packages/w/src/node_modules/d/index.d.ts", ""),
+                ("packages/w/src/node_modules/d/index.js", ""),
+                (
+                    "packages/w/src/node_modules/e/package.json",
+                    "{\"name\": \"e\", \"types\": \"./index.d.ts\"}",
+                ),
+                ("packages/w/src/node_modules/e/index.d.ts", ""),
+                (
+                    "packages/j/package.json",
+                    "{\"name\": \"j\", \"type\": \"module\", \"imports\": {\"#dd\": \"d\"}}",
+                ),
+                (
+                    "packages/j/src/node_modules/d/package.json",
+                    "{\"name\": \"d\", \"main\": \"./index.js\"}",
+                ),
+                ("packages/j/src/node_modules/d/index.js", ""),
+            ],
+            &[("node_modules/d", "packages/d")],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        assert_eq!(
+            edges_under(&nodes, 0, &manifests),
+            ["packages/d/index.ts", "packages/w/src/f.ts"]
+        );
+        assert!(edges_under(&nodes, 1, &manifests).is_empty());
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["#dd".to_string()])
         );
     }
 
