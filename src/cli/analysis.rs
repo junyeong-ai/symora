@@ -195,8 +195,12 @@ pub async fn anchor_at(
     // sits on. A self-definition off any header keeps one more fact a
     // missing definition lacks: the position DOES declare something — a
     // binding queried at its own declaration (a parameter, a local) — and
-    // is disclosed as that binding, never as "not a symbol".
-    let definition = lsp.goto_definition(&input.file, line, column).await?.data;
+    // is disclosed as that binding, never as "not a symbol". A server still
+    // loading its workspace defines nothing it has not read yet, so where
+    // its readiness wait ran out, a missing definition resolves nothing.
+    let answer = lsp.goto_definition(&input.file, line, column).await?;
+    let loading = answer.indexing == Some(IndexingDegradation::TimedOut);
+    let definition = answer.data;
     let self_declaration = definition
         .as_ref()
         .filter(|definition| definition.is_self)
@@ -212,6 +216,7 @@ pub async fn anchor_at(
             }
             SymbolResolution::NotFound => match self_declaration {
                 Some(location) => Anchor::binding(input, &location),
+                None if loading => Anchor::unavailable(input),
                 None => Anchor::raw(input, AnchorResolution::NotASymbol),
             },
         });
@@ -648,6 +653,8 @@ mod tests {
         symbols_by_file: HashMap<PathBuf, Vec<Symbol>>,
         definitions: HashMap<(PathBuf, u32, u32), Definition>,
         references: HashMap<(PathBuf, u32, u32), Vec<Location>>,
+        /// The indexing state the definitions are answered under.
+        indexing: Option<IndexingDegradation>,
     }
 
     fn func(file: &str, name: &str, line: u32, name_col: u32, end_line: u32) -> Symbol {
@@ -702,10 +709,11 @@ mod tests {
             line: u32,
             column: u32,
         ) -> Result<Indexed<Option<Definition>>, LspError> {
-            Ok(Indexed::complete(
+            Ok(Indexed::new(
                 self.definitions
                     .get(&(file.to_path_buf(), line, column))
                     .cloned(),
+                self.indexing,
             ))
         }
 
@@ -936,6 +944,7 @@ mod tests {
             symbols_by_file,
             definitions,
             references: HashMap::new(),
+            indexing: None,
         }
     }
 
@@ -1098,6 +1107,31 @@ mod tests {
         assert_eq!(anchor.resolution, AnchorResolution::Binding);
     }
 
+    /// A server still loading its workspace defines nothing it has not read,
+    /// so where its readiness wait ran out a position it defines nothing at
+    /// is unavailable, not "not a symbol". A server that reports no loading
+    /// state answers definitions from what it has read of the file.
+    #[tokio::test]
+    async fn a_position_a_loading_server_defines_nothing_at_is_unavailable() {
+        for (indexing, resolution) in [
+            (IndexingDegradation::TimedOut, AnchorResolution::Unavailable),
+            (
+                IndexingDegradation::Unconfirmed,
+                AnchorResolution::NotASymbol,
+            ),
+        ] {
+            let stub = AnchorStub {
+                indexing: Some(indexing),
+                ..project()
+            };
+            let input = at("routes.rs", 35, 1);
+            let anchor = resolve_anchor(&stub, &input, FindSymbolsOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(anchor.resolution, resolution, "{indexing:?}");
+        }
+    }
+
     /// A column the language server resolves to nothing addresses nothing:
     /// the anchor stays where it was given and is not a declaration.
     #[tokio::test]
@@ -1213,6 +1247,7 @@ mod tests {
                 (lib.clone(), 3, 6),
                 vec![declared, Location::point(lib.clone(), 3, 6)],
             )]),
+            indexing: None,
         };
 
         let analysis = LocationAnalysis::for_symbol(&stub, &lib, block, Path::new(""))
@@ -1248,6 +1283,7 @@ mod tests {
             symbols_by_file: HashMap::new(),
             definitions: HashMap::new(),
             references: HashMap::from([((file.clone(), 1, 10), references)]),
+            indexing: None,
         };
         let anchor = || Anchor::binding(&at(path, 2, 7), &definition);
 

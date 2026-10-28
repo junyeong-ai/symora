@@ -25,7 +25,8 @@ pub struct TargetOutput {
     /// The unresolved-anchor disclosure, omitted when the target resolved: a
     /// placeholder carries `"binding"` (a declaration the symbol tree does
     /// not list — the placeholder sits at it), `"not_a_symbol"` (the position
-    /// was checked and denotes nothing), or `"unavailable"` (a read failed).
+    /// was checked and denotes nothing), or `"unavailable"` (a read failed, or
+    /// the server was still loading its workspace).
     /// One shared `*_status` vocabulary across every surface (see
     /// `AnchorResolution::as_status`), so a placeholder is never mistaken for
     /// a resolved symbol and a read failure is never reported as "not a

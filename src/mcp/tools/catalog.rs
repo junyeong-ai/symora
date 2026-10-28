@@ -376,7 +376,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                      \"binding\" (a declaration the symbol tree does not list, such as a local or \
                      a parameter; the set is exactly its), \
                      \"not_a_symbol\" (read OK, denotes nothing) or \"unavailable\" (a read \
-                     failed); for the last two an empty set is not authoritative (depth>1 only)",
+                     failed, or the server was still loading its workspace); for the last two an \
+                     empty set is not authoritative (depth>1 only)",
                 ),
             ],
         )),

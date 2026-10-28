@@ -368,8 +368,8 @@ pub enum SymbolResolution<'a> {
 /// kept distinct for that reason: `Resolved` and `Binding` are anchored at a
 /// declaration — the reference set is exact — and differ only in whether the
 /// symbol tree lists it; `NotASymbol` was checked and denotes nothing;
-/// `Unavailable` could not be checked (a read failed), so neither "is" nor
-/// "is not a symbol" may be claimed. Collapsing the last two would let a mere
+/// `Unavailable` could not be checked (a read failed, or the server had not
+/// loaded its workspace), so neither "is" nor "is not a symbol" may be claimed. Collapsing the last two would let a mere
 /// read failure be reported as a false "not a symbol".
 ///
 /// This is the single source of the anchor-resolution disclosure: every surface
@@ -391,8 +391,9 @@ pub enum AnchorResolution {
     /// Symbols were read but none is addressed by this position, and the
     /// language server resolves nothing there.
     NotASymbol,
-    /// A read failed, so the position could not be resolved; whether it is a
-    /// symbol is unknown.
+    /// A read failed, or the language server was still loading its workspace,
+    /// so the position could not be resolved; whether it is a symbol is
+    /// unknown.
     Unavailable,
 }
 
