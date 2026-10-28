@@ -1,7 +1,7 @@
 ---
 name: symora
 metadata:
-  version: 0.36.1
+  version: 0.36.2
 description: Provides symbol discovery, semantic navigation, static impact analysis, and symbol-aware edits through the symora CLI. Use when locating code, tracing references or callers, reviewing changes, or editing or renaming a known declaration.
 allowed-tools: Bash(symora search *), Bash(symora symbols *), Bash(symora map *), Bash(symora pack *), Bash(symora def *), Bash(symora refs *), Bash(symora typedef *), Bash(symora implementations *), Bash(symora callers *), Bash(symora callees *), Bash(symora supertypes *), Bash(symora subtypes *), Bash(symora hover *), Bash(symora context *), Bash(symora impact *), Bash(symora diff-impact *), Bash(symora diagnostics *), Bash(symora edit *), Bash(symora rename *), Bash(symora actions *), Bash(symora doctor *), Bash(symora daemon restart --project*)
 ---
