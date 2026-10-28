@@ -627,27 +627,9 @@ impl LspClient {
         method: &str,
         params: Option<Value>,
     ) -> Result<T, LspError> {
-        let answer = crate::infra::deadline::run(
-            self.config.request_timeout(),
-            self.request_inner(method, params, None),
-        )
-        .await?;
-        Ok(answer.expect("a request without an answer deadline is answered or fails"))
-    }
-
-    /// Send a request and wait for its answer until `answer_by`: `None` when
-    /// none came by then, and the request is cancelled. The request itself
-    /// is sent whatever the time, since a send cut short midway would leave
-    /// the server holding a document it was never told the rest of.
-    pub async fn request_answered_by<T: serde::de::DeserializeOwned>(
-        &self,
-        method: &str,
-        params: Option<Value>,
-        answer_by: tokio::time::Instant,
-    ) -> Result<Option<T>, LspError> {
         crate::infra::deadline::run(
             self.config.request_timeout(),
-            self.request_inner(method, params, Some(answer_by)),
+            self.request_inner(method, params),
         )
         .await
     }
@@ -656,8 +638,7 @@ impl LspClient {
         &self,
         method: &str,
         params: Option<Value>,
-        answer_by: Option<tokio::time::Instant>,
-    ) -> Result<Option<T>, LspError> {
+    ) -> Result<T, LspError> {
         self.usage
             .lock()
             .expect("client usage lock poisoned")
@@ -722,18 +703,11 @@ impl LspClient {
             write_request(stdin_guard, &request, self.config.request_timeout()).await?;
         }
 
-        let response = match answer_by {
-            Some(answer_by) => match tokio::time::timeout_at(answer_by, rx).await {
-                Ok(response) => response,
-                Err(_) => return Ok(None),
-            },
-            None => rx.await,
-        };
-        match response {
+        match rx.await {
             Ok(response) => match response.into_result() {
-                Ok(result) => serde_json::from_value(result)
-                    .map(Some)
-                    .map_err(|e| LspError::Protocol(e.to_string())),
+                Ok(result) => {
+                    serde_json::from_value(result).map_err(|e| LspError::Protocol(e.to_string()))
+                }
                 Err(err) if err.code == super::protocol::error_codes::SERVER_TERMINATED => {
                     Err(LspError::ServerTerminated {
                         language: self.language,

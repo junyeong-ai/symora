@@ -28,8 +28,8 @@ pub enum DiagnosticPull {
     /// The server's diagnostics for the content it holds for the document.
     Answered(Vec<LspDiagnostic>),
     /// No answer for now: the server reports its workspace loading or not
-    /// healthy, cancelled the pull to be asked again, or did not answer in
-    /// time.
+    /// healthy, cancelled the pull to be asked again, or did not answer
+    /// before the request timed out.
     Pending,
     /// The server answers for the document without analyzing it: it lies
     /// outside every project the server analyzes.
@@ -207,9 +207,10 @@ impl Filter {
 }
 
 impl LspClient {
-    /// Pull `uri`'s diagnostics from every provider serving it, waiting for
-    /// answers until `answer_by`. The server answers for the content it
-    /// holds, so the document is synced first.
+    /// Pull `uri`'s diagnostics from every provider serving it. The server
+    /// answers for the content it holds, so the document is synced first, and
+    /// once it has read that content, so each answer is awaited as any
+    /// request's is.
     ///
     /// A server that reports workspace status answers a pull with an empty
     /// report while it loads, and while its crate graph misses a target it
@@ -219,11 +220,7 @@ impl LspClient {
     /// analyze, a dependency's source or a file outside its workspace, so an
     /// empty answer from a server that names a document's project counts
     /// only for a document in one.
-    pub async fn pull_diagnostics(
-        &self,
-        uri: &str,
-        answer_by: tokio::time::Instant,
-    ) -> Result<DiagnosticPull, LspError> {
+    pub async fn pull_diagnostics(&self, uri: &str) -> Result<DiagnosticPull, LspError> {
         let path = uri_to_path(uri);
         let (identifiers, names_projects) = {
             let providers = self.pull_providers.lock().expect("pull providers poisoned");
@@ -247,24 +244,18 @@ impl LspClient {
                 params["identifier"] = Value::String(identifier);
             }
             match self
-                .request_answered_by::<DocumentDiagnosticReport>(
-                    DIAGNOSTIC_METHOD,
-                    Some(params),
-                    answer_by,
-                )
+                .request::<DocumentDiagnosticReport>(DIAGNOSTIC_METHOD, Some(params))
                 .await
             {
-                Ok(Some(DocumentDiagnosticReport::Full { items: answered })) => {
-                    items.extend(answered)
-                }
-                Ok(Some(DocumentDiagnosticReport::Unchanged)) => {
+                Ok(DocumentDiagnosticReport::Full { items: answered }) => items.extend(answered),
+                Ok(DocumentDiagnosticReport::Unchanged) => {
                     return Err(LspError::Protocol(
                         "an unchanged diagnostic report answered a pull that named no previous \
                          result"
                             .to_string(),
                     ));
                 }
-                Ok(None) => return Ok(DiagnosticPull::Pending),
+                Err(LspError::Timeout(_)) => return Ok(DiagnosticPull::Pending),
                 Err(error) if error.error_code() == error_codes::SERVER_CANCELLED => {
                     return Ok(DiagnosticPull::Pending);
                 }
@@ -276,13 +267,14 @@ impl LspClient {
             return Ok(DiagnosticPull::Pending);
         }
         if items.is_empty() && names_projects {
-            let project = self
-                .request_answered_by::<Option<Value>>(PROJECT_METHOD, Some(document), answer_by)
-                .await?;
-            match project {
-                None => return Ok(DiagnosticPull::Pending),
-                Some(None) => return Ok(DiagnosticPull::Unanalyzed),
-                Some(Some(_)) => {}
+            match self
+                .request::<Option<Value>>(PROJECT_METHOD, Some(document))
+                .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(DiagnosticPull::Unanalyzed),
+                Err(LspError::Timeout(_)) => return Ok(DiagnosticPull::Pending),
+                Err(error) => return Err(error),
             }
         }
         Ok(DiagnosticPull::Answered(items))
