@@ -205,7 +205,7 @@ async fn read_fresh_diagnostics(
 
     let deadline = Instant::now() + budget;
     loop {
-        match client.pull_diagnostics(uri, deadline).await? {
+        match client.pull_diagnostics(uri).await? {
             DiagnosticPull::Answered(items) => return Ok(Some(items)),
             DiagnosticPull::Unanalyzed => return Ok(None),
             DiagnosticPull::Pending => {}
@@ -292,6 +292,22 @@ mod tests {
         assert_eq!(
             read(&client, &file, "ok\nerror\n", budget).await,
             Some(vec![1])
+        );
+        client.shutdown().await.unwrap();
+    }
+
+    /// A pull is a request the server answers once it has read the content,
+    /// so its answer counts whenever it comes: the window bounds only waiting
+    /// on what the server sends of its own accord.
+    #[tokio::test]
+    async fn a_pull_answered_past_the_window_counts() {
+        let root = tempfile::tempdir().unwrap();
+        let client = pull_server(root.path(), "registered").await;
+        let file = root.path().join("a.py");
+        let short = Duration::from_millis(100);
+        assert_eq!(
+            read(&client, &file, "error\nslow\n", short).await,
+            Some(vec![0])
         );
         client.shutdown().await.unwrap();
     }

@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 
 
 def send(message):
@@ -24,6 +25,7 @@ def status(quiescent, health="ok"):
 #     document reading `reload` has its next pull answered empty across a
 #     busy spell, one reading `cancel` its next pull cancelled, and one
 #     reading `library` is in no project.
+# A document reading `slow` has its pulls answered half a second late.
 mode = sys.argv[1]
 analyzed = False
 texts = {}
@@ -72,6 +74,8 @@ while True:
     elif method == "textDocument/diagnostic":
         uri = params["textDocument"]["uri"]
         lines = texts.get(uri, [])
+        if "slow" in lines:
+            time.sleep(0.5)
         if "cancel" in pending.get(uri, []):
             pending[uri].remove("cancel")
             send({"jsonrpc": "2.0", "id": message["id"], "error": {
