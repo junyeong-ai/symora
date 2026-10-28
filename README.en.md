@@ -438,7 +438,7 @@ pythonPath = "/path/to/project/.venv/bin/python"
 extraPaths = ["packages/core/src"]
 ```
 
-Prepare the project's environment or native server configuration first. These paths are explicit examples; Symora does not infer package paths. A project config's `[lsp.servers.<language>]` table replaces the user config's table for that language entirely.
+Prepare the project's environment or native server configuration first. These paths are explicit examples. The only paths Symora adds itself are the directories inside the project that the project venv's `.pth` files put on the import path: the source roots of the project's own editable installs. pyright reads a module it first reaches through site-packages as a third-party import and leaves out its errors and warnings even once the file is open, so Symora passes these directories as `extraPaths` for pyright to read them as project code. An `extraPaths` given in `settings` applies instead. A project config's `[lsp.servers.<language>]` table replaces the user config's table for that language entirely.
 
 `symora doctor python` reports the interpreter setting a fresh server will receive in `python_interpreter`: explicit `settings`, a discovered `project_environment`, or `server_default` when selection is left to the server. `serves` only confirms the LSP handshake; neither field verifies imports or reference completeness. A retained daemon session needs `symora daemon restart --project` to pick up changed settings or a newly prepared environment.
 
