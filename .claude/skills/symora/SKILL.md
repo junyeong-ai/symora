@@ -46,7 +46,7 @@ Lists carry `count`, `showing`, and `items`. These markers qualify the answer:
 | `coverage_gaps` | Named languages were not fully searched; use the indicated source or remedy. |
 | `stale` / currency hints | The index is a snapshot; refresh before current enumeration. New files can require refresh even without stale returned rows. |
 | `indexing` | `unconfirmed`: the server's workspace readiness was not confirmed throughout the query. Only a server that reports workspace status (rust-analyzer) confirms it, so other servers' answers carry `unconfirmed` and retrying does not clear it. `timed_out`: the readiness wait ended before the server reported status; retry once it is warm. Neither proves absence. |
-| `refs_status` / `callers_status` | `indexing_degraded`: the count or caller list is a lower bound. Any other value says why none was taken, in the `coverage_gaps` reasons: `timed_out` ran out of the `lsp.timeout_secs` budget, `unsupported` is a capability the server lacks, and `unavailable` failed or was not asked. |
+| `refs_status` / a `diff-impact` row's `callers_status` | `indexing_degraded`: the count or caller list is a lower bound. Any other value says why none was taken, in the `coverage_gaps` reasons: `timed_out` ran out of the `lsp.timeout_secs` budget, `unsupported` is a capability the server lacks, and `unavailable` failed or was not asked. |
 | `degraded_column` | Verify the source position before editing. |
 | `body_omitted` | `token_budget` or `response_size`: read the complete source at the returned location, or adjust that budget. |
 
