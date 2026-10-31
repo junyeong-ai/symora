@@ -449,13 +449,15 @@ async fn analyze_hunks(
             None => {}
             Some(Preimage::Unparsed) => analysis.unmeasured.push(file.clone()),
             Some(Preimage::Unavailable) => {
-                for _ in &removing {
+                for hunk in &removing {
                     if !analysis.has_room() {
                         break;
                     }
-                    analysis
-                        .changes
-                        .push(unresolved_deletion(DeletionResolution::PreimageUnavailable));
+                    analysis.changes.push(unresolved_deletion(
+                        DeletionResolution::PreimageUnavailable,
+                        hunk,
+                        root,
+                    ));
                 }
             }
             Some(Preimage::Parsed(before)) => {
@@ -488,9 +490,11 @@ async fn analyze_hunks(
                         })
                         .unwrap_or_default();
                     if enclosing.is_empty() && declared.is_empty() {
-                        analysis
-                            .changes
-                            .push(unresolved_deletion(DeletionResolution::NoSymbolInRange));
+                        analysis.changes.push(unresolved_deletion(
+                            DeletionResolution::NoSymbolInRange,
+                            hunk,
+                            root,
+                        ));
                     }
                     modified_by_removal.extend(enclosing);
                 }
@@ -921,12 +925,21 @@ fn deleted_row(symbol: &Symbol, old_file: &Path, root: &Path) -> ChangedSymbolIm
 }
 
 /// A removal whose declarations were not identified, disclosed rather than
-/// dropped.
-fn unresolved_deletion(resolution: DeletionResolution) -> ChangedSymbolImpact {
+/// dropped, at the first line it removed from the base's version of the file.
+fn unresolved_deletion(
+    resolution: DeletionResolution,
+    hunk: &DiffHunk,
+    root: &Path,
+) -> ChangedSymbolImpact {
     ChangedSymbolImpact {
         name: None,
         kind: None,
-        location: None,
+        location: Some(LocationOutput::from_path(
+            &hunk.old_file,
+            hunk.old_start,
+            1,
+            root,
+        )),
         change_type: ChangeType::Deleted,
         refs: None,
         test_refs: None,
@@ -1050,26 +1063,31 @@ mod tests {
         assert!(v.get("prod_refs").is_none());
     }
 
+    /// An unidentified removal names no declaration, and is placed where its
+    /// lines were removed from the base's version of the file, never at a
+    /// live neighbour.
     #[test]
-    fn deleted_preimage_unavailable_row_omits_identity() {
-        let row = ChangedSymbolImpact {
-            name: None,
-            kind: None,
-            location: None,
+    fn an_unidentified_removal_is_placed_at_its_first_removed_line() {
+        let root = PathBuf::from("/repo");
+        let hunk = DiffHunk {
+            file: root.join("new.py"),
+            old_file: root.join("old.py"),
+            start_line: 3,
+            line_count: 0,
+            old_start: 7,
+            old_count: 2,
             change_type: ChangeType::Deleted,
-            refs: None,
-            test_refs: None,
-            prod_refs: None,
-            refs_status: None,
-            callers: vec![],
-            callers_status: None,
-            deletion: Some(DeletionResolution::PreimageUnavailable),
         };
-        let v = serde_json::to_value(row).unwrap();
-        assert_eq!(v["deletion"], "preimage_unavailable");
-        // Never a guessed name or a live neighbour's location.
-        assert!(v.get("name").is_none());
-        assert!(v.get("location").is_none());
+        for resolution in [
+            DeletionResolution::NoSymbolInRange,
+            DeletionResolution::PreimageUnavailable,
+        ] {
+            let v = serde_json::to_value(unresolved_deletion(resolution, &hunk, &root)).unwrap();
+            assert_eq!(v["deletion"], serde_json::to_value(resolution).unwrap());
+            assert!(v.get("name").is_none(), "{v}");
+            assert_eq!(v["location"]["file"], "old.py", "{v}");
+            assert_eq!(v["location"]["line"], 7, "{v}");
+        }
     }
 
     #[test]
