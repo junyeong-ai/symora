@@ -6,11 +6,12 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::analysis::LocationAnalysis;
-use crate::cli::response::disclosure::{LowerBound, name_some};
-use crate::cli::response::{CallHierarchyOutput, LocationOutput};
+use crate::cli::response::disclosure::{CoverageReason, LowerBound, name_some};
+use crate::cli::response::{
+    CallHierarchyOutput, INDEXING_DEGRADED, LocationOutput, ReferenceCount,
+};
 use crate::cli::utils::{members_at_deletion, members_at_line, shell_arg};
-use crate::cli::{SymbolBackend, declared_in};
+use crate::cli::{FileSymbols, SymbolBackend, declared_in};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
 use crate::services::symbols::{SymbolExtractor, TypeHeaders};
@@ -53,10 +54,9 @@ pub struct DiffImpactOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_references: Option<usize>,
     /// The strongest `refs_status` among the changes, which makes
-    /// `total_references` a lower bound: "unavailable" where a symbol's
-    /// lookup failed, so its references are not in the total, or
-    /// "indexing_degraded" where a count was taken under degraded analysis.
-    /// Omitted when every measured count is authoritative.
+    /// `total_references` a lower bound: a reason a row's count was not taken,
+    /// the failures first, else "indexing_degraded" where a count was taken
+    /// under degraded analysis. Omitted when every count is authoritative.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refs_status: Option<&'static str>,
     pub coverage: DiffCoverage,
@@ -120,16 +120,18 @@ pub struct ChangedSymbolImpact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prod_refs: Option<usize>,
     /// Present only when an Added/Modified symbol's reference counts are not
-    /// authoritative: "unavailable" (the reference query failed, so `refs` are
-    /// absent because UNKNOWN, not zero) or "indexing_degraded" (the query ran
-    /// under a warming index, so the counts are a lower bound). The same
-    /// `*_status` disclosure idiom as `callers_status`, so a reference-count
-    /// limitation is at least as disclosed as a partial (callers-only) one.
+    /// authoritative: "indexing_degraded" (the query ran under degraded
+    /// workspace analysis, so the counts are a lower bound), or why none was
+    /// taken, in the `coverage_gaps` reasons — "timed_out", "unsupported",
+    /// "server_not_installed", "not_consulted", or "unavailable" (the query
+    /// failed, or was not asked where the server reads no position as the
+    /// declaration) — with the counts absent rather than zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refs_status: Option<&'static str>,
-    /// Present only when callers were requested but the list is not authoritative:
-    /// "unavailable" (the incoming-call query failed) or "indexing_degraded" (it
-    /// ran under degraded workspace indexing, so the list is a lower bound). An
+    /// Present only when callers were requested but the list is not
+    /// authoritative: "indexing_degraded" (a lower bound), the reason the
+    /// incoming-call query failed, as `refs_status` names one, or
+    /// "unavailable" where no reference count was taken to ask it from. An
     /// empty `callers` then means "unknown", not a verified "no callers".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callers_status: Option<&'static str>,
@@ -265,6 +267,13 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         // The cause of `incomplete` leads the hints.
         hints.insert(0, LowerBound::AnalysisCapped(args.max_symbols).hint());
     }
+    let timed_out = Some(CoverageReason::TimedOut.as_str());
+    if changes
+        .iter()
+        .any(|c| c.refs_status == timed_out || c.callers_status == timed_out)
+    {
+        hints.push(LowerBound::AnalysisTimedOut(app.config().lsp.timeout_secs).hint());
+    }
 
     // Coverage is measured only over rows that have reference counts
     // (Added/Modified). Deleted rows carry no refs — counting them as
@@ -272,9 +281,17 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     // references to test.
     let measurable = changes.iter().filter(|c| c.refs.is_some()).count();
     let total_refs = (measurable > 0).then(|| changes.iter().filter_map(|c| c.refs).sum());
-    let refs_status = ["unavailable", "indexing_degraded"]
-        .into_iter()
-        .find(|status| changes.iter().any(|c| c.refs_status == Some(*status)));
+    let refs_status = [
+        CoverageReason::Unavailable,
+        CoverageReason::TimedOut,
+        CoverageReason::ServerNotInstalled,
+        CoverageReason::NotConsulted,
+        CoverageReason::Unsupported,
+    ]
+    .map(CoverageReason::as_str)
+    .into_iter()
+    .chain([INDEXING_DEGRADED])
+    .find(|status| changes.iter().any(|c| c.refs_status == Some(*status)));
     let with_tests = changes
         .iter()
         .filter(|c| c.test_refs.is_some_and(|t| t > 0))
@@ -405,13 +422,14 @@ async fn analyze_hunks(
         } else {
             None
         };
-        let current_symbols: Option<&[Symbol]> = match &served {
+        let declarations: Option<(&FileSymbols, &[Symbol])> = match &served {
             Some(Ok(read)) if read.backend == SymbolBackend::Ast => {
-                on_disk.as_ref().map(|now| now.members.as_slice())
+                on_disk.as_ref().map(|now| (read, now.members.as_slice()))
             }
-            Some(Ok(read)) => Some(read.symbols.as_slice()),
+            Some(Ok(read)) => Some((read, read.symbols.as_slice())),
             _ => None,
         };
+        let current_symbols = declarations.map(|(_, symbols)| symbols);
         let no_headers = TypeHeaders::default();
         let headers_now = on_disk.as_ref().map_or(&no_headers, |now| &now.headers);
 
@@ -558,22 +576,25 @@ async fn analyze_hunks(
                         ));
                     }
                 }
-                for sym in modified_by_removal {
-                    if !seen.insert((sym.location.line, sym.location.column)) {
-                        continue;
+                if let Some((answer, _)) = declarations {
+                    for sym in modified_by_removal {
+                        if !seen.insert((sym.location.line, sym.location.column)) {
+                            continue;
+                        }
+                        if !analysis.has_room() {
+                            break;
+                        }
+                        let impact = analyze_symbol_impact(
+                            app,
+                            answer,
+                            file,
+                            sym,
+                            ChangeType::Modified,
+                            include_callers,
+                        )
+                        .await;
+                        analysis.changes.push(impact);
                     }
-                    if !analysis.has_room() {
-                        break;
-                    }
-                    let impact = analyze_symbol_impact(
-                        app,
-                        file,
-                        sym.clone(),
-                        ChangeType::Modified,
-                        include_callers,
-                    )
-                    .await;
-                    analysis.changes.push(impact);
                 }
             }
         }
@@ -587,7 +608,7 @@ async fn analyze_hunks(
         if live_hunks.is_empty() {
             continue;
         }
-        let Some(symbols) = current_symbols else {
+        let Some((answer, symbols)) = declarations else {
             // Added/Modified hunks exist but no current symbols. If the file is
             // present, find_symbols errored — disclose it as an unmeasured file
             // (a lower bound) instead of silently dropping its changes.
@@ -625,7 +646,7 @@ async fn analyze_hunks(
                 );
 
                 let impact =
-                    analyze_symbol_impact(app, file, sym.clone(), change_type, include_callers)
+                    analyze_symbol_impact(app, answer, file, sym, change_type, include_callers)
                         .await;
 
                 analysis.changes.push(impact);
@@ -636,77 +657,65 @@ async fn analyze_hunks(
     analysis
 }
 
+/// A live changed symbol's row: its references asked where the language
+/// server reads it, as `symbols --refs` asks them, and its callers asked at
+/// that same position.
 async fn analyze_symbol_impact(
     app: &App,
+    answer: &FileSymbols,
     file: &Path,
-    sym: Symbol,
+    sym: &Symbol,
     change_type: ChangeType,
     include_callers: bool,
 ) -> ChangedSymbolImpact {
     let lsp = app.lsp.as_ref();
     let root = app.output.root();
-    let name = sym.name.clone();
-    let kind = sym.kind.to_string();
-    let line = sym.location.line;
-    let column = sym.location.column;
+    let outcome = answer.references_of(lsp, file, sym, root).await;
+    let count = ReferenceCount::of(&outcome, app.test_scope());
 
-    let analysis = match LocationAnalysis::for_symbol(lsp, file, sym, root).await {
-        Ok(a) => a,
-        Err(_) => {
-            // Measurement failed (LSP error/unavailable) — emit absent refs,
-            // never a fabricated `0` that reads as a verified "no references".
-            // Coverage already excludes rows whose refs are `None`.
-            return ChangedSymbolImpact {
-                name: Some(name),
-                kind: Some(kind),
-                location: Some(LocationOutput::from_path(file, line, column, root)),
-                change_type,
-                refs: None,
-                test_refs: None,
-                prod_refs: None,
-                refs_status: Some("unavailable"),
-                callers: vec![],
-                callers_status: None,
-                deletion: None,
-            };
-        }
-    };
-
-    let classified = analysis.classify(app.test_scope());
-
-    // A failed incoming-call query, or one run under degraded indexing, must not
-    // pass as a verified caller set: disclose it so an empty list is read as
-    // "unknown"/"lower bound", never an authoritative "no callers".
-    let (callers, callers_status) = if include_callers {
-        match lsp.incoming_calls(file, line, column).await {
-            Ok(calls) => {
-                let status = calls.indexing.is_some().then_some("indexing_degraded");
-                let items = calls
-                    .data
-                    .iter()
-                    .take(app.config().lsp.calls_limit)
-                    .map(|c| CallHierarchyOutput::from_item(c, root))
-                    .collect();
-                (items, status)
+    let (callers, callers_status) = match (&outcome, include_callers) {
+        (_, false) => (vec![], None),
+        (Ok(Some(analysis)), true) => {
+            let anchor = analysis.anchor();
+            match lsp
+                .incoming_calls(&anchor.file, anchor.line, anchor.column)
+                .await
+            {
+                Ok(calls) => (
+                    calls
+                        .data
+                        .iter()
+                        .take(app.config().lsp.calls_limit)
+                        .map(|c| CallHierarchyOutput::from_item(c, root))
+                        .collect(),
+                    calls.indexing.map(|_| INDEXING_DEGRADED),
+                ),
+                Err(error) => (vec![], Some(CoverageReason::of(&error).as_str())),
             }
-            Err(_) => (vec![], Some("unavailable")),
         }
-    } else {
-        (vec![], None)
+        (_, true) => (vec![], Some(CoverageReason::Unavailable.as_str())),
     };
 
+    let (refs, test_refs, prod_refs) = match count {
+        ReferenceCount::Measured {
+            total, test, prod, ..
+        } => (Some(total), Some(test), Some(prod)),
+        ReferenceCount::Missing(_) => (None, None, None),
+    };
     ChangedSymbolImpact {
-        name: Some(name),
-        kind: Some(kind),
-        location: Some(LocationOutput::from_path(file, line, column, root)),
+        name: Some(sym.name.clone()),
+        kind: Some(sym.kind.to_string()),
+        location: Some(LocationOutput::from_path(
+            file,
+            sym.location.line,
+            sym.location.column,
+            root,
+        )),
         change_type,
-        refs: Some(classified.total),
-        test_refs: Some(classified.test),
-        prod_refs: Some(classified.prod),
-        // A reference count from a query run under degraded indexing is a lower
-        // bound, not a verified total — disclose it exactly as callers_status
-        // does for the incoming-call query above.
-        refs_status: analysis.indexing().is_some().then_some("indexing_degraded"),
+        refs,
+        test_refs,
+        prod_refs,
+        refs_status: count.status(),
         callers,
         callers_status,
         deletion: None,

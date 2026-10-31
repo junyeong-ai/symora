@@ -1165,7 +1165,7 @@ impl Widget {
         "references have no source that derives from the tree alone: {refused}"
     );
 
-    // A count that could not be taken is absent and says so, never a zero.
+    // A count that could not be taken is absent and says why, never a zero.
     let counted = json_ok(
         dir.path(),
         &["symbols", "main.rs", "--refs", "--deterministic"],
@@ -1173,7 +1173,7 @@ impl Widget {
     let items = counted["items"].as_array().expect("items");
     assert!(!items.is_empty(), "{counted}");
     for item in items {
-        assert_eq!(item["refs_status"], "unavailable", "{counted}");
+        assert_eq!(item["refs_status"], "not_consulted", "{counted}");
         assert!(item.get("refs").is_none(), "{counted}");
     }
     assert!(counted.get("hints").is_none(), "{counted}");
@@ -2309,7 +2309,7 @@ fn a_cap_reached_on_removed_declarations_says_its_counts_are_a_lower_bound() {
     // `--deterministic` counts no reference, so there is no total to state,
     // only the reason none was taken.
     assert!(whole.get("total_references").is_none(), "{whole}");
-    assert_eq!(whole["refs_status"], "unavailable", "{whole}");
+    assert_eq!(whole["refs_status"], "not_consulted", "{whole}");
 }
 
 /// A diff's changed symbols are read through the same reader every other
