@@ -252,6 +252,11 @@ pub enum LowerBound {
     /// a failed analysis because raising the cap reaches them, where a failure
     /// is what retrying is for.
     AnalysisCapped(usize),
+    /// The command's language-server budget (`lsp.timeout_secs`, in seconds)
+    /// ran out before every count was taken, so the rows marked `timed_out`
+    /// carry none. Kept apart from the cap because a larger budget, not a
+    /// larger cap, reaches them.
+    AnalysisTimedOut(u64),
     /// A language server answered these languages for the whole workspace and
     /// the answer was confined to the requested paths afterwards, so matches
     /// inside them that a capped answer held back are not counted.
@@ -303,6 +308,11 @@ impl LowerBound {
                 "Analysis stopped at {symbols} symbol(s) before running out of candidates, so \
                  those past the cap are missing from the counts; raise --max-symbols to reach \
                  them"
+            ),
+            Self::AnalysisTimedOut(secs) => format!(
+                "The language-server budget (lsp.timeout_secs = {secs}) ran out before every \
+                 count was taken, so rows marked timed_out carry none; raise timeout_secs under \
+                 [lsp] in .symora/config.toml to take them"
             ),
             Self::LiveAnswerNarrowed {
                 languages,
@@ -357,7 +367,8 @@ impl LowerBound {
             | Self::LiveWideningCapped
             | Self::IndexPageCapped
             | Self::LiveFileNotDescribed
-            | Self::AnalysisCapped(_) => None,
+            | Self::AnalysisCapped(_)
+            | Self::AnalysisTimedOut(_) => None,
         }
     }
 }

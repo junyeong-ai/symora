@@ -5,9 +5,12 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use super::disclosure::CoverageReason;
 use super::{LocationOutput, Section};
 use crate::cli::LocationAnalysis;
+use crate::error::LspError;
 use crate::models::symbol::Symbol;
+use crate::services::test_scope::TestScope;
 
 /// Target symbol info (unified across `impact`, `context`, etc.).
 #[derive(Debug, Serialize)]
@@ -118,6 +121,54 @@ pub struct RefsOutput {
     /// for `impact`/`context`.
     #[serde(flatten)]
     pub references: Section<LocationOutput>,
+}
+
+/// The `*_status` of a count taken under degraded workspace indexing, which
+/// makes it a lower bound.
+pub const INDEXING_DEGRADED: &str = "indexing_degraded";
+
+/// A listed declaration's reference counts, as a `symbols --refs` or
+/// `diff-impact` row carries them, or why none was taken.
+pub enum ReferenceCount {
+    Measured {
+        total: usize,
+        test: usize,
+        prod: usize,
+        degraded: bool,
+    },
+    Missing(CoverageReason),
+}
+
+impl ReferenceCount {
+    /// What [`FileSymbols::references_of`](crate::cli::FileSymbols::references_of)
+    /// came to: a declaration the server reads at no position was not asked
+    /// about, which leaves its count `unavailable` as a failed query does.
+    pub fn of(
+        outcome: &Result<Option<LocationAnalysis>, LspError>,
+        test_scope: &TestScope,
+    ) -> Self {
+        match outcome {
+            Ok(Some(analysis)) => {
+                let classified = analysis.classify(test_scope);
+                Self::Measured {
+                    total: classified.total,
+                    test: classified.test,
+                    prod: classified.prod,
+                    degraded: analysis.indexing().is_some(),
+                }
+            }
+            Ok(None) => Self::Missing(CoverageReason::Unavailable),
+            Err(error) => Self::Missing(CoverageReason::of(error)),
+        }
+    }
+
+    /// The row's `refs_status`, absent from an authoritative count.
+    pub fn status(&self) -> Option<&'static str> {
+        match self {
+            Self::Measured { degraded, .. } => degraded.then_some(INDEXING_DEGRADED),
+            Self::Missing(reason) => Some(reason.as_str()),
+        }
+    }
 }
 
 /// Reference statistics (counts, no judgements).

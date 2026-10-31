@@ -19,8 +19,8 @@ mod lsp;
 mod symbol;
 
 pub use analysis::{
-    AffectedFileOutput, ImpactOutput, RefOutput, RefsOutput, TargetOutput, TestCoverageOutput,
-    TestOutput,
+    AffectedFileOutput, INDEXING_DEGRADED, ImpactOutput, RefOutput, ReferenceCount, RefsOutput,
+    TargetOutput, TestCoverageOutput, TestOutput,
 };
 pub use editing::{
     ActionOutput, ApplyActionOutput, CallerFileDiagnostics, CallerVerification, EditDiagnostics,

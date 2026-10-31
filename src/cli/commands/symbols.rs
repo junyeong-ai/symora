@@ -6,9 +6,9 @@ use clap::Args;
 use futures::StreamExt;
 
 use crate::app::App;
-use crate::cli::analysis::LocationAnalysis;
 use crate::cli::commands::common::parse_symbol_kind;
-use crate::cli::response::{Section, SymbolOutput, SymbolSource};
+use crate::cli::response::disclosure::{CoverageReason, LowerBound};
+use crate::cli::response::{ReferenceCount, Section, SymbolOutput, SymbolSource};
 use crate::cli::{FileSymbols, OutputError, resolve_project_file};
 use crate::constants::defaults::SYMBOL_REFS_CONCURRENCY;
 use crate::models::lsp::FindSymbolsOptions;
@@ -135,7 +135,14 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                 })
                 .collect();
 
-            let hints = Vec::from_iter(unreferenced_hint(&items));
+            let mut hints = Vec::from_iter(unreferenced_hint(&items));
+            if counts
+                .iter()
+                .flat_map(HashMap::values)
+                .any(|count| matches!(count, ReferenceCount::Missing(CoverageReason::TimedOut)))
+            {
+                hints.push(LowerBound::AnalysisTimedOut(app.config().lsp.timeout_secs).hint());
+            }
             let body_paths = SymbolOutput::body_paths(&items);
             ctx.print_source(
                 FileSymbolsOutput {
@@ -151,20 +158,9 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
     Ok(())
 }
 
-/// What a reference query said about one declaration.
-enum Counted {
-    Measured {
-        total: usize,
-        test: usize,
-        prod: usize,
-        degraded: bool,
-    },
-    Unavailable,
-}
-
 /// Each counted declaration, keyed by where its name is: two declarations of
 /// one file never share that position.
-type ReferenceCounts = HashMap<(u32, u32), Counted>;
+type ReferenceCounts = HashMap<(u32, u32), ReferenceCount>;
 
 /// The declarations a listing counts references for: every listed one, and
 /// beneath one that holds members, those members. What anything else holds —
@@ -192,25 +188,10 @@ async fn count_references(
     futures::stream::iter(targets.into_iter().cloned())
         .map(|symbol: Symbol| async move {
             let key = (symbol.location.line, symbol.location.column);
-            let Ok(Some(served)) = answer.served_as(app.lsp.as_ref(), file, &symbol).await else {
-                return (key, Counted::Unavailable);
-            };
-            let served = served.clone();
-            let analysis =
-                LocationAnalysis::for_symbol(app.lsp.as_ref(), file, served, app.root()).await;
-            let counted = match analysis {
-                Ok(analysis) => {
-                    let classified = analysis.classify(app.test_scope());
-                    Counted::Measured {
-                        total: classified.total,
-                        test: classified.test,
-                        prod: classified.prod,
-                        degraded: analysis.indexing().is_some(),
-                    }
-                }
-                Err(_) => Counted::Unavailable,
-            };
-            (key, counted)
+            let outcome = answer
+                .references_of(app.lsp.as_ref(), file, &symbol, app.root())
+                .await;
+            (key, ReferenceCount::of(&outcome, app.test_scope()))
         })
         .buffered(SYMBOL_REFS_CONCURRENCY)
         .collect()
@@ -218,20 +199,16 @@ async fn count_references(
 }
 
 fn with_reference_counts(mut item: SymbolOutput, counts: &ReferenceCounts) -> SymbolOutput {
-    match counts.get(&(item.location.line, item.location.column)) {
-        Some(Counted::Measured {
-            total,
-            test,
-            prod,
-            degraded,
-        }) => {
+    if let Some(count) = counts.get(&(item.location.line, item.location.column)) {
+        if let ReferenceCount::Measured {
+            total, test, prod, ..
+        } = count
+        {
             item.refs = Some(*total);
             item.test_refs = Some(*test);
             item.prod_refs = Some(*prod);
-            item.refs_status = degraded.then_some("indexing_degraded");
         }
-        Some(Counted::Unavailable) => item.refs_status = Some("unavailable"),
-        None => {}
+        item.refs_status = count.status();
     }
     item.children = item.children.map(|children| {
         children

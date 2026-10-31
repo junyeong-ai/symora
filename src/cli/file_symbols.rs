@@ -3,6 +3,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::app::App;
+use crate::cli::LocationAnalysis;
 use crate::cli::utils::{
     SymbolResolution, column_addressed_symbol, holds, line_addressed_symbol, placed_at,
     symbols_declared_on_line,
@@ -88,6 +89,24 @@ impl FileSymbols {
                     )
             })
             .then_some(symbol))
+    }
+
+    /// The references of `symbol`, one of these declarations, asked where
+    /// the language server reads it ([`Self::served_as`]); `None` where it
+    /// reads no position as that declaration, so nothing was asked.
+    pub async fn references_of(
+        &self,
+        lsp: &dyn LspService,
+        file: &Path,
+        symbol: &Symbol,
+        root: &Path,
+    ) -> Result<Option<LocationAnalysis>, LspError> {
+        let Some(served) = self.served_as(lsp, file, symbol).await? else {
+            return Ok(None);
+        };
+        LocationAnalysis::for_symbol(lsp, file, served.clone(), root)
+            .await
+            .map(Some)
     }
 }
 

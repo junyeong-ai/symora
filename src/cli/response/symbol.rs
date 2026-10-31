@@ -25,11 +25,13 @@ pub struct SymbolOutput {
     pub test_refs: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prod_refs: Option<usize>,
-    /// Present when the counts are not authoritative: `unavailable` (the
-    /// reference query failed, or was not asked because the language
-    /// server reads no position as the declaration, so they are absent
-    /// rather than zero) or
-    /// `indexing_degraded` (they are a lower bound).
+    /// Present when the counts are not authoritative: `indexing_degraded`
+    /// (they are a lower bound), or why none was taken, in the
+    /// `coverage_gaps` reasons — `timed_out`, `unsupported`,
+    /// `server_not_installed`, `not_consulted`, or `unavailable` (the query
+    /// failed, or was not asked because the language server reads no
+    /// position as the declaration) — with the counts absent rather than
+    /// zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refs_status: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
