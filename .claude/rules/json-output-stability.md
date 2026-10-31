@@ -70,7 +70,7 @@ Navigation location objects carry file, line, and column. Location analysis echo
 
 `declared_symbols` on a packed file counts its AST-derived signatures and is present when the per-file cap or token budget omitted some. `context` shares `body_tokens` across target, callees, and types in that order. `body_omitted` names `token_budget` or `response_size` when that budget omitted a requested body. `bodies_included` counts complete attached bodies; an omitted body can mean exhausted budget, an unresolvable location, or a declaration without a body.
 
-`diff-impact` discloses unmeasured files, candidate caps and, measuring the working tree, the untracked files no diff holds. Deletions read declarations from the base revision; changed body lines belong to their enclosing declaration. A staged analysis cannot use working-tree symbols over unstaged line changes as though they described the git staging area.
+`diff-impact` discloses unmeasured files, candidate caps and, measuring the working tree, the untracked files no diff holds. Deletions read declarations from the base revision; a removal whose declarations are not identified is placed at the first line it removed from the base's version of the file. Changed body lines belong to their enclosing declaration. A staged analysis cannot use working-tree symbols over unstaged line changes as though they described the git staging area.
 
 ## Index state
 
