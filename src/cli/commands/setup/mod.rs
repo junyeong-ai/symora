@@ -79,7 +79,7 @@ pub async fn execute(args: SetupArgs, app: &App) -> Result<()> {
             app.output.print_success(body);
         }
         Some(SetupCommand::Deps(deps_args)) => {
-            let outcome = run_deps(deps_args, args.yes, &server_configs)?;
+            let outcome = run_deps(deps_args, args.yes, &server_configs, app.root())?;
             let body = SetupOutput {
                 status: "ok".to_string(),
                 skill: None,
@@ -112,7 +112,7 @@ pub async fn execute(args: SetupArgs, app: &App) -> Result<()> {
 
             if !args.skip_deps {
                 let deps_args = DepsArgs { group: args.deps };
-                deps_outcome = Some(run_deps(deps_args, args.yes, &server_configs)?);
+                deps_outcome = Some(run_deps(deps_args, args.yes, &server_configs, app.root())?);
             }
 
             let body = SetupOutput {

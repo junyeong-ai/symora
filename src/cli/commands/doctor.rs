@@ -145,7 +145,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
 
     // Narrow before probing: a single-language report must not pay for
     // spawning every other language's server.
-    let all_servers: Vec<_> = check_all_servers(servers::merged(&config.lsp.servers))
+    let all_servers: Vec<_> = check_all_servers(servers::merged(&config.lsp.servers), app.root())
         .into_iter()
         .filter(|s| requested.is_none_or(|language| s.language == language))
         .collect();
