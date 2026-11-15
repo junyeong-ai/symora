@@ -893,6 +893,83 @@ fn a_daemon_socket_path_too_long_to_bind_leaves_nothing_to_stop_or_start() {
     }
 }
 
+/// Stops every daemon `exe` started, wherever it listens: `daemon stop` finds
+/// only the one at the socket its caller resolves.
+struct ServeProcesses(PathBuf);
+
+impl Drop for ServeProcesses {
+    fn drop(&mut self) {
+        let _ = Command::new("pkill")
+            .arg("-f")
+            .arg(format!("{} daemon serve", self.0.display()))
+            .status();
+    }
+}
+
+/// A daemon resolves the paths it shares with its callers in a directory of
+/// its own, so a relative HOME or XDG_CONFIG_HOME would hand the two
+/// different sockets or configurations. Each such environment runs in
+/// process, as the direct run answers, without creating a daemon directory,
+/// and the lifecycle commands say which path stood in the way.
+#[test]
+fn an_environment_naming_its_paths_relatively_runs_in_process() {
+    let root = tempfile::tempdir().unwrap();
+    let exe = root.path().join("symora");
+    copy_binary(&exe);
+    let _serving = ServeProcesses(exe.clone());
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("lib.rs"), "pub fn alpha() {}\n").unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+
+    for (home_var, config_var, role) in [
+        (Path::new("h"), Path::new("h"), "socket path"),
+        (home.as_path(), Path::new("x"), "configuration directory"),
+    ] {
+        let run = |args: &[&str]| {
+            let out = Command::new(&exe)
+                .args(args)
+                .current_dir(&project)
+                .env("HOME", home_var)
+                .env("XDG_CONFIG_HOME", config_var)
+                .env_remove("SYMORA_NO_DAEMON")
+                .output()
+                .unwrap();
+            let value: serde_json::Value =
+                serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+                    panic!(
+                        "{role} {args:?}: {e}: {}{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    )
+                });
+            (out.status.success(), value)
+        };
+
+        let (succeeded, value) = run(&["--format", "compact", "search", "content", "alpha"]);
+        assert!(succeeded, "{role}: {value}");
+        assert_eq!(value["count"], 1, "{role}: {value}");
+
+        let (succeeded, status) = run(&["daemon", "status"]);
+        assert!(succeeded, "{role}: {status}");
+        assert!(status.get("error").is_none(), "{role}: {status}");
+        assert_eq!(status["running"], false, "{role}: {status}");
+        let message = status["message"].as_str().unwrap();
+        assert!(message.contains(&format!("its {role} ")), "{status}");
+        assert!(message.contains("is a relative path"), "{status}");
+
+        let (succeeded, start) = run(&["daemon", "start"]);
+        assert!(!succeeded, "{role}: {start}");
+        assert_eq!(start["error"]["code"], "precondition_failed", "{start}");
+        let hint = start["error"]["hint"].as_str().unwrap();
+        assert!(hint.contains("are absolute paths"), "{start}");
+        assert!(hint.contains("runs in process"), "{start}");
+    }
+    assert!(!project.join("h").exists());
+    assert!(!home.join(".symora").exists());
+}
+
 /// A sandbox that forbids the daemon's directory still gets answers: the
 /// process runs in process instead of failing every command on the startup
 /// lock it cannot open.

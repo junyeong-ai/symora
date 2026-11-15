@@ -104,6 +104,54 @@ impl std::fmt::Display for SocketPathTooLong {
     }
 }
 
+/// Why no daemon can serve this installation. Every command then runs in
+/// process, answering as a daemon would without reusing language servers
+/// between invocations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unaddressable {
+    SocketPathTooLong(SocketPathTooLong),
+    /// A path the daemon and its callers each derive from the environment
+    /// is relative. Each resolves it in its own working directory, and a
+    /// daemon runs in its installation's, so the two would name different
+    /// files: a socket no caller reaches, or a configuration other than the
+    /// one a direct run reads.
+    RelativePath {
+        role: &'static str,
+        path: PathBuf,
+    },
+}
+
+impl Unaddressable {
+    /// What lets a daemon run.
+    pub fn remedy(&self) -> String {
+        match self {
+            Self::SocketPathTooLong(too_long) => format!(
+                "A daemon runs under a HOME at least {} bytes shorter.",
+                too_long.excess()
+            ),
+            Self::RelativePath { .. } => {
+                "A daemon runs once HOME, and XDG_CONFIG_HOME where it is set, are absolute \
+                 paths."
+                    .to_string()
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Unaddressable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SocketPathTooLong(too_long) => too_long.fmt(f),
+            Self::RelativePath { role, path } => write!(
+                f,
+                "its {role} `{}` is a relative path, which a daemon would resolve in a \
+                 directory other than its callers'",
+                path.display()
+            ),
+        }
+    }
+}
+
 /// Daemon client for CLI commands
 pub struct DaemonClient {
     config: DaemonRuntimeConfig,
@@ -179,15 +227,16 @@ impl DaemonClient {
     }
 
     /// Whether this process can reach a daemon: address its socket, whose path
-    /// the platform bounds (104 bytes on macOS, 108 on Linux), and open the
-    /// startup lock every path that starts or replaces a daemon takes. A home
-    /// too deep for the socket's path, or a sandbox that forbids the daemon
-    /// directory, leaves the caller running in process — the same answers,
-    /// since daemon and direct execution agree, without warm reuse across
-    /// invocations.
+    /// the platform bounds (104 bytes on macOS, 108 on Linux) and the daemon
+    /// must resolve as its callers do, and open the startup lock every path
+    /// that starts or replaces a daemon takes. A home too deep for the
+    /// socket's path, an environment naming its paths relatively, or a
+    /// sandbox that forbids the daemon directory leaves the caller running in
+    /// process — the same answers, since daemon and direct execution agree,
+    /// without warm reuse across invocations.
     pub fn can_start_daemon(&self) -> bool {
-        if let Some(too_long) = self.socket_path_too_long() {
-            tracing::info!("daemon unavailable ({too_long}); running in process");
+        if let Some(reason) = self.unaddressable() {
+            tracing::info!("daemon unavailable ({reason}); running in process");
             return false;
         }
         let lock = &self.config.lock_path;
@@ -213,10 +262,24 @@ impl DaemonClient {
         }
     }
 
-    /// Whether this installation's socket path is too long to address, so
-    /// that no daemon can be running for it and none can be started.
-    pub fn socket_path_too_long(&self) -> Option<SocketPathTooLong> {
-        SocketPathTooLong::check(&self.config.socket_path)
+    /// Why no daemon can be running for this installation and none can be
+    /// started, when that is so.
+    pub fn unaddressable(&self) -> Option<Unaddressable> {
+        let socket = &self.config.socket_path;
+        let config = crate::services::dist::paths::config_dir();
+        if socket.is_relative() {
+            return Some(Unaddressable::RelativePath {
+                role: "socket path",
+                path: socket.clone(),
+            });
+        }
+        if config.is_relative() {
+            return Some(Unaddressable::RelativePath {
+                role: "configuration directory",
+                path: config,
+            });
+        }
+        SocketPathTooLong::check(socket).map(Unaddressable::SocketPathTooLong)
     }
 
     async fn start_daemon_with_lock(&self) -> Result<DaemonStart, LspError> {
@@ -265,22 +328,36 @@ impl DaemonClient {
         let exe = std::env::current_exe()
             .map_err(|e| LspError::ServerStart(format!("Failed to get executable path: {}", e)))?;
 
-        // A process group of its own keeps what a terminal signals the job
-        // that started it, Ctrl-C or a hangup, off a daemon that outlives it.
-        let child = Command::new(&exe)
-            .current_dir(&self.project_root)
-            .arg("daemon")
-            .arg("serve")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
+        let child = self
+            .daemon_command(&exe)
             .spawn()
             .map_err(|e| LspError::ServerStart(format!("Failed to spawn daemon: {}", e)))?;
 
         drop(child);
         tracing::info!("Daemon process spawned");
         Ok(())
+    }
+
+    fn daemon_command(&self, exe: &Path) -> Command {
+        let mut command = Command::new(exe);
+        command
+            // The daemon serves every project of this installation, so it
+            // runs in the installation's own directory rather than in one
+            // project's: a working directory marks a directory as in use,
+            // and one inherited from the first caller would keep that
+            // project's tree from being removed for as long as the daemon
+            // serves the others.
+            .current_dir(self.config.runtime_dir())
+            .arg("daemon")
+            .arg("serve")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // A process group of its own keeps what a terminal signals the
+            // job that started it, Ctrl-C or a hangup, off a daemon that
+            // outlives it.
+            .process_group(0);
+        command
     }
 
     async fn wait_for_daemon(&self, max_wait: Duration) -> Result<(), LspError> {
@@ -819,6 +896,50 @@ mod tests {
             }
         }
         assert!(SocketPathTooLong::check(Path::new("/s")).is_none());
+    }
+
+    fn client(runtime: &Path, project: &Path) -> DaemonClient {
+        DaemonClient {
+            config: DaemonRuntimeConfig {
+                socket_path: runtime.join("daemon.sock"),
+                pid_path: runtime.join("daemon.pid"),
+                lock_path: runtime.join("daemon.lock"),
+                bind_lock_path: runtime.join("daemon.bind.lock"),
+                idle_timeout: Duration::from_secs(60),
+                max_concurrent: 1,
+            },
+            lsp_config: Default::default(),
+            project_root: project.to_path_buf(),
+            next_request_id: AtomicU64::new(1),
+        }
+    }
+
+    /// The daemon a project's command starts serves every project of the
+    /// installation, so it runs in the installation's directory, never in
+    /// the project's.
+    #[test]
+    fn the_daemon_runs_in_its_installation_directory() {
+        let client = client(Path::new("/home/u/.symora"), Path::new("/work/tree"));
+        let command = client.daemon_command(Path::new("/bin/symora"));
+        assert_eq!(
+            command.as_std().get_current_dir(),
+            Some(Path::new("/home/u/.symora"))
+        );
+    }
+
+    /// A relative socket path resolves in the daemon's directory to another
+    /// socket than the one its caller connects to, so no daemon serves it.
+    #[test]
+    fn a_relative_socket_path_is_unaddressable() {
+        let client = client(Path::new("h/.symora"), Path::new("/work/tree"));
+        assert!(matches!(
+            client.unaddressable(),
+            Some(Unaddressable::RelativePath {
+                role: "socket path",
+                ..
+            })
+        ));
+        assert!(!client.can_start_daemon());
     }
 
     #[test]

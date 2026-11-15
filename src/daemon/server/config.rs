@@ -38,6 +38,14 @@ impl DaemonRuntimeConfig {
         })
     }
 
+    /// The directory holding this installation's runtime files. The startup
+    /// lock is one of them, so a process holding that lock knows it exists.
+    pub fn runtime_dir(&self) -> &Path {
+        self.lock_path
+            .parent()
+            .expect("the startup lock is a file inside the runtime directory")
+    }
+
     fn load_settings() -> crate::models::config::DaemonConfig {
         load_global_config_sync()
             .map(|c| c.daemon)
