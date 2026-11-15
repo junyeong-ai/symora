@@ -615,7 +615,7 @@ mod tests {
     use crate::error::LspError;
     use crate::models::lsp::{
         ApplyActionResult, CodeAction, HoverInfo, Indexed, PrepareRenameResult, RenameResult,
-        ServerStatus, TypeHierarchyItem,
+        TypeHierarchyItem,
     };
     use crate::models::symbol::{Language, Location, SymbolKind};
 
@@ -866,12 +866,6 @@ mod tests {
             _file: &Path,
             _action: &CodeAction,
         ) -> Result<ApplyActionResult, LspError> {
-            unreachable!()
-        }
-        async fn is_available(&self, _language: Language) -> bool {
-            unreachable!()
-        }
-        async fn server_status(&self, _language: Language) -> ServerStatus {
             unreachable!()
         }
     }

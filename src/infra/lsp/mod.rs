@@ -18,5 +18,5 @@ pub use client::{
     note_workspace_content_changed,
 };
 pub use health::HealthMonitor;
-pub use manager::{LspManager, ServerStatusDetail};
+pub use manager::LspManager;
 pub use servers::ServerConfig;

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -33,11 +33,13 @@ pub async fn serves_workspace(
 /// Per-language failure bookkeeping for one monitor run. `consecutive` counts
 /// unhealthy checks toward the next restart; `restarts` counts restart cycles
 /// that have NOT yet led to recovery and is what bounds the storm — only a
-/// genuine recovery clears it.
+/// genuine recovery clears it. `abandoned` holds the languages whose
+/// give-up has been logged, so it is logged once rather than on every tick.
 #[derive(Default)]
 struct FailureTracker {
     consecutive: HashMap<Language, u32>,
     restarts: HashMap<Language, u32>,
+    abandoned: HashSet<Language>,
 }
 
 pub struct HealthMonitor {
@@ -45,8 +47,8 @@ pub struct HealthMonitor {
     check_interval: Duration,
     failure_threshold: u32,
     /// After this many restart cycles without recovery, auto-restart is
-    /// abandoned and the server is marked `CriticalFailure` — bounding the
-    /// restart storm a permanently-broken server would otherwise sustain.
+    /// abandoned — bounding the restart storm a permanently-broken server
+    /// would otherwise sustain.
     max_restart_attempts: u32,
     shutdown: Arc<AtomicBool>,
 }
@@ -84,13 +86,13 @@ impl HealthMonitor {
         let unhealthy = self.manager.unhealthy_servers().await;
         let running = self.manager.running_languages().await;
 
-        // Recovery: a healthy server clears all of its failure bookkeeping and
-        // any prior give-up verdict.
+        // Recovery: a healthy server clears all of its failure bookkeeping,
+        // a prior give-up included.
         for lang in &running {
             if !unhealthy.contains(lang) {
                 tracker.consecutive.remove(lang);
                 tracker.restarts.remove(lang);
-                self.manager.clear_critical_failure(*lang).await;
+                tracker.abandoned.remove(lang);
             }
         }
 
@@ -107,17 +109,16 @@ impl HealthMonitor {
 
             let attempts = tracker.restarts.entry(lang).or_insert(0);
             if *attempts >= self.max_restart_attempts {
-                // Give up: stop restarting and disclose why — but only mark and
-                // log once, so a permanently-broken server neither restarts nor
-                // floods the log on every subsequent tick.
-                if self.manager.critical_failure_reason(lang).await.is_none() {
+                // Give up: stop restarting and say why — but only once, so a
+                // permanently-broken server neither restarts nor floods the log
+                // on every subsequent tick.
+                if tracker.abandoned.insert(lang) {
                     let reason = format!(
                         "language server stayed unhealthy after {} restart attempts; \
                          auto-restart abandoned — run `symora daemon restart --project` after fixing it",
                         attempts
                     );
                     tracing::error!("{:?} language server giving up: {}", lang, reason);
-                    self.manager.mark_critical_failure(lang, reason).await;
                 }
                 tracker.consecutive.remove(&lang);
                 continue;
@@ -141,14 +142,13 @@ impl HealthMonitor {
                 // `unhealthy_servers` next tick, and would silently vanish
                 // instead of ever reaching the give-up branch above. It already
                 // failed `failure_threshold` health checks, so a failed restart
-                // on top is a broken server, not a transient blip: disclose it
-                // now (once) as a critical failure. Recovery still clears it when
-                // a later start succeeds and the monitor sees it healthy.
-                if self.manager.critical_failure_reason(lang).await.is_none() {
+                // on top is a broken server, not a transient blip: say so now,
+                // once. Recovery still clears it when a later start succeeds and
+                // the monitor sees it healthy.
+                if tracker.abandoned.insert(lang) {
                     let reason =
                         format!("language server failed to start ({e}); auto-restart abandoned");
                     tracing::error!("{:?} language server giving up: {}", lang, reason);
-                    self.manager.mark_critical_failure(lang, reason).await;
                 }
             }
             tracker.consecutive.remove(&lang);

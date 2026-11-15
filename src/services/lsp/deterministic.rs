@@ -176,14 +176,6 @@ impl LspService for DeterministicLspService {
         declined()
     }
 
-    async fn is_available(&self, _language: Language) -> bool {
-        false
-    }
-
-    async fn server_status(&self, language: Language) -> ServerStatus {
-        self.inner.server_status(language).await
-    }
-
     async fn shutdown(&self) {
         self.inner.shutdown().await;
     }
@@ -281,11 +273,6 @@ mod tests {
         declined_by(
             "apply_code_action",
             s.apply_code_action(f, &action).await.map(|_| ()),
-        );
-
-        assert!(
-            !s.is_available(Language::Rust).await,
-            "a confined run must not advertise a server it will refuse to ask"
         );
     }
 }

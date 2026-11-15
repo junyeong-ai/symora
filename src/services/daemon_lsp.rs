@@ -14,7 +14,7 @@ use crate::error::LspError;
 use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity, DiagnosticTag, DiagnosticsReport};
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, Definition, FindSymbolsOptions, HoverInfo,
-    Indexed, Position, PrepareRenameResult, Range, RenameResult, ServerStatus, TypeHierarchyItem,
+    Indexed, Position, PrepareRenameResult, Range, RenameResult, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 use crate::services::lsp::LspService;
@@ -328,46 +328,6 @@ impl LspService for DaemonLspService {
         Ok(ApplyActionResult {
             changes: response.changes.into_iter().map(Into::into).collect(),
         })
-    }
-
-    async fn is_available(&self, language: Language) -> bool {
-        match self.client.language_status(&language.to_string()).await {
-            Ok(v) => v
-                .get("available")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            Err(_) => false,
-        }
-    }
-
-    async fn server_status(&self, language: Language) -> ServerStatus {
-        match self.client.language_status(&language.to_string()).await {
-            Ok(v) => {
-                let status = v
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("stopped");
-                match status {
-                    "running" => ServerStatus::Running,
-                    "not_installed" => ServerStatus::NotInstalled {
-                        hint: v
-                            .get("install_hint")
-                            .and_then(|v| v.as_str())
-                            .map(String::from),
-                    },
-                    "not_supported" => ServerStatus::NotSupported,
-                    "critical_failure" => ServerStatus::CriticalFailure {
-                        reason: v
-                            .get("reason")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("server repeatedly failed to start")
-                            .to_string(),
-                    },
-                    _ => ServerStatus::Stopped,
-                }
-            }
-            Err(_) => ServerStatus::Stopped,
-        }
     }
 
     /// Forward the post-edit note to the daemon, where the caches and

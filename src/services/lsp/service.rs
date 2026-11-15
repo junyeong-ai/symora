@@ -12,12 +12,12 @@ use crate::infra::lsp::{HealthMonitor, LspClient, LspManager};
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, Definition, FindSymbolsOptions, HoverInfo,
-    Indexed, IndexingDegradation, PrepareRenameResult, RenameResult, ServerStatus,
-    TypeHierarchyItem, path_to_uri,
+    Indexed, IndexingDegradation, PrepareRenameResult, RenameResult, TypeHierarchyItem,
+    path_to_uri,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
-use super::{editor, hierarchy, info, lifecycle, navigation, rename, symbols};
+use super::{editor, hierarchy, info, navigation, rename, symbols};
 
 pub struct DefaultLspService {
     pub(super) manager: Arc<LspManager>,
@@ -255,14 +255,6 @@ impl LspService for DefaultLspService {
         action: &CodeAction,
     ) -> Result<ApplyActionResult, LspError> {
         editor::apply_code_action(self, file, action).await
-    }
-
-    async fn is_available(&self, language: Language) -> bool {
-        lifecycle::is_available(self, language).await
-    }
-
-    async fn server_status(&self, language: Language) -> ServerStatus {
-        lifecycle::server_status(self, language).await
     }
 
     async fn shutdown(&self) {

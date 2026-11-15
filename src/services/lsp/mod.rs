@@ -19,11 +19,10 @@ use std::path::Path;
 use async_trait::async_trait;
 
 use crate::error::LspError;
-use crate::infra::lsp::ServerStatusDetail;
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, Definition, FindSymbolsOptions, HoverInfo,
-    Indexed, PrepareRenameResult, RenameResult, ServerStatus, TypeHierarchyItem,
+    Indexed, PrepareRenameResult, RenameResult, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -147,10 +146,6 @@ pub trait LspService: Send + Sync {
         action: &CodeAction,
     ) -> Result<ApplyActionResult, LspError>;
 
-    async fn is_available(&self, language: Language) -> bool;
-
-    async fn server_status(&self, language: Language) -> ServerStatus;
-
     /// Symora itself just wrote these files. Both implementations bring
     /// the language layer in line with the new bytes — invalidate per-file
     /// symbol caches, advance the workspace-content generation so cached
@@ -166,22 +161,6 @@ pub trait LspService: Send + Sync {
     /// each within the bound `LspClient::shutdown` keeps. A daemon's servers
     /// are the daemon's to stop.
     async fn shutdown(&self) {}
-}
-
-impl From<ServerStatusDetail> for ServerStatus {
-    fn from(status: ServerStatusDetail) -> Self {
-        match status {
-            ServerStatusDetail::Running { .. } => ServerStatus::Running,
-            ServerStatusDetail::Stopped { .. } => ServerStatus::Stopped,
-            ServerStatusDetail::NotInstalled { install_hint, .. } => ServerStatus::NotInstalled {
-                hint: Some(install_hint),
-            },
-            ServerStatusDetail::NotSupported => ServerStatus::NotSupported,
-            ServerStatusDetail::CriticalFailure { reason, .. } => {
-                ServerStatus::CriticalFailure { reason }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -201,19 +180,5 @@ mod tests {
     fn test_uri_to_path() {
         let path = uri_to_path("file:///test/file.rs");
         assert_eq!(path, PathBuf::from("/test/file.rs"));
-    }
-
-    #[test]
-    fn critical_failure_detail_maps_to_status_carrying_its_reason() {
-        let detail = ServerStatusDetail::CriticalFailure {
-            name: "rust-analyzer".to_string(),
-            reason: "stayed unhealthy after 3 restart attempts".to_string(),
-        };
-        match ServerStatus::from(detail) {
-            ServerStatus::CriticalFailure { reason } => {
-                assert_eq!(reason, "stayed unhealthy after 3 restart attempts");
-            }
-            other => panic!("expected CriticalFailure, got {other:?}"),
-        }
     }
 }

@@ -96,9 +96,9 @@ impl ServerConfig {
 
     /// Resolve `command` to an absolute, spawnable executable path.
     ///
-    /// One deterministic search shared by spawn, `server_status`, and
-    /// `doctor`, so "reported installed" and "actually spawnable" can
-    /// never disagree. Search order:
+    /// One deterministic search shared by spawn, `doctor` and `setup deps`,
+    /// so "reported installed" and "actually spawnable" can never
+    /// disagree. Search order:
     ///
     /// 1. `command` as an absolute path (taken as-is when it exists).
     /// 2. Every directory on the inherited `PATH`, a relative one taken under

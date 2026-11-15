@@ -269,36 +269,6 @@ impl FindSymbolsOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ServerStatus {
-    Running,
-    Stopped,
-    NotInstalled {
-        hint: Option<String>,
-    },
-    NotSupported,
-    /// The server repeatedly failed to start/stay healthy and auto-restart was
-    /// abandoned — a terminal, honest "this server is broken, here is why",
-    /// distinct from a slow-but-recoverable `Stopped`. Recovery is a daemon
-    /// restart or a config fix.
-    CriticalFailure {
-        reason: String,
-    },
-}
-
-impl std::fmt::Display for ServerStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Running => write!(f, "running"),
-            Self::Stopped => write!(f, "stopped"),
-            Self::NotInstalled { .. } => write!(f, "not installed"),
-            Self::NotSupported => write!(f, "not supported"),
-            Self::CriticalFailure { reason } => write!(f, "critical failure: {reason}"),
-        }
-    }
-}
-
 pub fn path_to_uri(path: &Path) -> String {
     let abs_path = if path.is_absolute() {
         path.to_path_buf()
