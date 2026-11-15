@@ -228,8 +228,19 @@ mod tests {
     /// else can satisfy this.
     #[tokio::test]
     async fn confinement_holds_on_both_sides_of_the_mode_boundary() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = crate::services::dist::paths::test_home::TestHome::new(home.path());
         for use_daemon in [false, true] {
             let dir = tempfile::tempdir().expect("tempdir");
+            #[cfg(unix)]
+            if use_daemon {
+                assert!(
+                    crate::daemon::DaemonClient::new(dir.path())
+                        .unwrap()
+                        .can_start_daemon(),
+                    "no daemon could serve this home, so the run would wire in process"
+                );
+            }
             let app = App::new_at(
                 dir.path().to_path_buf(),
                 OutputOptions::default(),
