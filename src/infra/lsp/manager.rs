@@ -335,7 +335,7 @@ impl LspManager {
 
         // Resolution is the only install gate: an executable we can
         // resolve is "installed", and spawning it is the truth test.
-        let launch = config.launch()?;
+        let launch = config.launch(&self.root)?;
 
         let offers_file_watching = match self.file_watch {
             FileWatch::Off => true,
@@ -514,7 +514,7 @@ impl LspManager {
     pub fn is_available(&self, language: Language) -> bool {
         self.configs
             .get(&language)
-            .map(|c| c.is_installed())
+            .map(|c| c.is_installed(&self.root))
             .unwrap_or(false)
     }
 
@@ -538,7 +538,7 @@ impl LspManager {
             None => return ServerStatusDetail::NotSupported,
         };
 
-        let install = match config.resolve() {
+        let install = match config.resolve(&self.root) {
             Err(LspError::ServerNotInstalled {
                 name, install_hint, ..
             }) => Some((name, install_hint)),
@@ -547,7 +547,7 @@ impl LspManager {
         let critical = self.critical_failure_reason(language).await;
         let is_running = self.is_running(language).await;
         Self::resolve_status(config.display_name, install, critical, is_running, || {
-            config.probe_version()
+            config.probe_version(&self.root)
         })
     }
 
@@ -1204,7 +1204,11 @@ exec sleep 600
             assert_eq!(std::fs::read_to_string(fake.received()).unwrap(), expected);
             client.shutdown().await.unwrap();
             std::fs::remove_file(fake.received()).unwrap();
-            let launch = manager.config(Language::Go).unwrap().launch().unwrap();
+            let launch = manager
+                .config(Language::Go)
+                .unwrap()
+                .launch(fake.dir.path())
+                .unwrap();
             assert!(
                 crate::infra::lsp::health::serves_workspace(
                     Language::Go,
@@ -1232,7 +1236,9 @@ exec sleep 600
                 server,
             )]));
             assert_eq!(
-                servers[&Language::Go].probe_version().as_deref(),
+                servers[&Language::Go]
+                    .probe_version(fake.dir.path())
+                    .as_deref(),
                 Some("--max-old-space-size=2048")
             );
         }

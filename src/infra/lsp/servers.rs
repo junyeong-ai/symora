@@ -82,9 +82,9 @@ pub struct ServerLaunch {
 }
 
 impl ServerConfig {
-    pub fn launch(&self) -> Result<ServerLaunch, LspError> {
+    pub fn launch(&self, root: &Path) -> Result<ServerLaunch, LspError> {
         Ok(ServerLaunch {
-            command: self.resolve()?,
+            command: self.resolve(root)?,
             args: self.args.clone(),
             env: self.env.clone(),
         })
@@ -101,7 +101,11 @@ impl ServerConfig {
     /// never disagree. Search order:
     ///
     /// 1. `command` as an absolute path (taken as-is when it exists).
-    /// 2. Every directory on the inherited `PATH`.
+    /// 2. Every directory on the inherited `PATH`, a relative one taken under
+    ///    `root`. A relative entry names a directory under the working
+    ///    directory, which is the project root for a direct run; the daemon
+    ///    serves every project from a directory of its own, so the root
+    ///    stands in for it there and both find the same executable.
     /// 3. Fixed, version-free well-known install directories — this is
     ///    what keeps npm/cargo-installed servers reachable when the
     ///    process inherited a thin GUI-session `PATH`. Deliberately no
@@ -111,8 +115,8 @@ impl ServerConfig {
     ///
     /// Failure is loud: the error names every directory searched, and its
     /// hint the install instruction.
-    pub fn resolve(&self) -> Result<PathBuf, LspError> {
-        resolve_command(&self.command).map_err(|searched| LspError::ServerNotInstalled {
+    pub fn resolve(&self, root: &Path) -> Result<PathBuf, LspError> {
+        resolve_command(&self.command, root).map_err(|searched| LspError::ServerNotInstalled {
             name: self.display_name.to_string(),
             searched: searched.iter().map(|d| d.display().to_string()).collect(),
             install_hint: match self.source {
@@ -122,8 +126,8 @@ impl ServerConfig {
         })
     }
 
-    pub fn is_installed(&self) -> bool {
-        self.resolve().is_ok()
+    pub fn is_installed(&self, root: &Path) -> bool {
+        self.resolve(root).is_ok()
     }
 
     /// Version string for `doctor` reports.
@@ -133,15 +137,15 @@ impl ServerConfig {
     /// the `pyright` CLI instead) with a hard timeout — an LSP stdio
     /// entrypoint handed an unknown flag can block on stdin, and a
     /// diagnostic must never hang the report.
-    pub fn probe_version(&self) -> Option<String> {
+    pub fn probe_version(&self, root: &Path) -> Option<String> {
         let probe = self.version_command.unwrap_or(self.command.as_str());
-        let path = resolve_command(probe).ok()?;
+        let path = resolve_command(probe, root).ok()?;
         let launch = ServerLaunch {
             command: path,
             args: vec![self.version_arg.to_string()],
             env: self.env.clone(),
         };
-        let output = run_with_timeout(&launch, Duration::from_secs(2))?;
+        let output = run_with_timeout(&launch, root, Duration::from_secs(2))?;
         if !output.status.success() {
             // A failed probe blanks the version column; it must never
             // surface an error line as if it were a version string.
@@ -184,7 +188,7 @@ impl ServerConfig {
 
 /// Resolve a command name to an absolute executable path, or return the
 /// full list of directories searched (for the loud failure hint).
-fn resolve_command(command: &str) -> Result<PathBuf, Vec<PathBuf>> {
+fn resolve_command(command: &str, root: &Path) -> Result<PathBuf, Vec<PathBuf>> {
     let as_path = Path::new(command);
     if as_path.is_absolute() {
         return if is_executable_file(as_path) {
@@ -198,16 +202,27 @@ fn resolve_command(command: &str) -> Result<PathBuf, Vec<PathBuf>> {
         };
     }
 
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+    let dirs = search_path(std::env::var_os("PATH"), well_known_dirs(), root);
+    search_dirs(command, &dirs)
+}
+
+/// The directories a command is looked for in: `PATH`'s, then the
+/// well-known ones it lacks, each relative one taken under `root`.
+fn search_path(
+    path: Option<std::ffi::OsString>,
+    well_known: Vec<PathBuf>,
+    root: &Path,
+) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = path
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();
-    for well_known in well_known_dirs() {
-        if !dirs.contains(&well_known) {
-            dirs.push(well_known);
+    for dir in well_known {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
         }
     }
-
-    search_dirs(command, &dirs)
+    // `join` keeps an absolute directory as it is.
+    dirs.into_iter().map(|dir| root.join(dir)).collect()
 }
 
 fn search_dirs(command: &str, dirs: &[PathBuf]) -> Result<PathBuf, Vec<PathBuf>> {
@@ -296,10 +311,17 @@ fn override_not_found_hint(command: &str) -> String {
 }
 
 /// `Command::output()` with a hard deadline; kills the child on timeout.
-fn run_with_timeout(launch: &ServerLaunch, timeout: Duration) -> Option<std::process::Output> {
+/// It runs in `root`, as the server it describes does: a version manager's
+/// shim picks the version from the directory it runs in.
+fn run_with_timeout(
+    launch: &ServerLaunch,
+    root: &Path,
+    timeout: Duration,
+) -> Option<std::process::Output> {
     let mut child = Command::new(&launch.command)
         .args(&launch.args)
         .envs(&launch.env)
+        .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1198,14 +1220,17 @@ pub struct ServerHealth {
 }
 
 /// Check health of every server in the given table
-pub fn check_all_servers(configs: HashMap<Language, ServerConfig>) -> Vec<ServerHealth> {
+pub fn check_all_servers(
+    configs: HashMap<Language, ServerConfig>,
+    root: &Path,
+) -> Vec<ServerHealth> {
     let mut results = Vec::new();
 
     for (language, config) in configs {
-        let launch = config.launch().ok();
+        let launch = config.launch(root).ok();
         let installed = launch.is_some();
         let version = if installed {
-            config.probe_version()
+            config.probe_version(root)
         } else {
             None
         };
@@ -1268,11 +1293,31 @@ mod tests {
         assert_eq!(err, dirs);
     }
 
+    /// A relative `PATH` entry is found under the project root, whatever
+    /// directory the resolving process runs in: the daemon's is no project's.
+    #[test]
+    fn relative_path_entries_are_searched_under_the_project_root() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("node_modules/.bin")).unwrap();
+        let bin = fake_executable(&root.path().join("node_modules/.bin"), "local-ls");
+        let path = std::env::join_paths(["node_modules/.bin", "/usr/bin"]).unwrap();
+        let dirs = search_path(Some(path), vec!["/opt/bin".into()], root.path());
+        assert_eq!(
+            dirs,
+            [
+                root.path().join("node_modules/.bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/opt/bin"),
+            ]
+        );
+        assert_eq!(search_dirs("local-ls", &dirs).unwrap(), bin);
+    }
+
     #[test]
     fn resolve_command_accepts_existing_absolute_path() {
         let dir = tempfile::tempdir().unwrap();
         let bin = fake_executable(dir.path(), "abs-ls");
-        let found = resolve_command(bin.to_str().unwrap()).unwrap();
+        let found = resolve_command(bin.to_str().unwrap(), Path::new("/")).unwrap();
         assert_eq!(found, bin);
     }
 
@@ -1298,11 +1343,11 @@ mod tests {
             tier: ServerTier::Fast,
             source: ServerSource::Builtin,
         };
-        assert!(config.is_installed());
-        assert!(config.resolve().is_ok());
+        assert!(config.is_installed(dir.path()));
+        assert!(config.resolve(dir.path()).is_ok());
         // The version probe legitimately fails — that only blanks the
         // doctor version column, it does not mark the server missing.
-        assert_eq!(config.probe_version(), None);
+        assert_eq!(config.probe_version(dir.path()), None);
     }
 
     /// Where the command was looked for is what the message states, and the
@@ -1325,7 +1370,7 @@ mod tests {
             tier: ServerTier::Fast,
             source: ServerSource::Builtin,
         };
-        let err = config.resolve().unwrap_err();
+        let err = config.resolve(Path::new("/")).unwrap_err();
         assert_eq!(
             err.to_string(),
             "Server not installed: fake-ls. Searched: /nowhere/a"
@@ -1356,7 +1401,7 @@ mod tests {
             tier: ServerTier::Fast,
             source: ServerSource::Config,
         };
-        let err = config.resolve().unwrap_err();
+        let err = config.resolve(Path::new("/")).unwrap_err();
         let LspError::ServerNotInstalled { install_hint, .. } = err else {
             panic!("expected ServerNotInstalled");
         };

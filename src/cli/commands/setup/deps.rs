@@ -3,6 +3,7 @@
 //! `symora doctor` (`infra/lsp/servers.rs`); both should stay aligned.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::Result;
 use clap::{Args, ValueEnum};
@@ -94,6 +95,7 @@ pub fn run_deps(
     args: DepsArgs,
     assume_yes: bool,
     server_configs: &HashMap<Language, ServerConfig>,
+    root: &Path,
 ) -> Result<DepsOutcome> {
     section("setup deps");
 
@@ -122,27 +124,31 @@ pub fn run_deps(
         match slot {
             Slot::Ripgrep => items.push(install_ripgrep()),
             Slot::Core => {
-                items.push(install_rust_analyzer(&server_configs[&Language::Rust]));
+                items.push(install_rust_analyzer(
+                    &server_configs[&Language::Rust],
+                    root,
+                ));
                 items.push(install_typescript_lsp(
                     &server_configs[&Language::TypeScript],
+                    root,
                 ));
-                items.push(install_pyright(&server_configs[&Language::Python]));
-                items.push(install_gopls(&server_configs[&Language::Go]));
+                items.push(install_pyright(&server_configs[&Language::Python], root));
+                items.push(install_gopls(&server_configs[&Language::Go], root));
             }
             Slot::Jvm => {
-                items.push(install_jdtls(&server_configs[&Language::Java]));
-                items.push(install_kotlin_lsp(&server_configs[&Language::Kotlin]));
+                items.push(install_jdtls(&server_configs[&Language::Java], root));
+                items.push(install_kotlin_lsp(&server_configs[&Language::Kotlin], root));
             }
             Slot::Web => {
-                items.push(install_vue_lsp(&server_configs[&Language::Vue]));
-                items.push(install_intelephense(&server_configs[&Language::PHP]));
-                items.push(install_yaml_lsp(&server_configs[&Language::Yaml]));
-                items.push(install_ruby_lsp(&server_configs[&Language::Ruby]));
+                items.push(install_vue_lsp(&server_configs[&Language::Vue], root));
+                items.push(install_intelephense(&server_configs[&Language::PHP], root));
+                items.push(install_yaml_lsp(&server_configs[&Language::Yaml], root));
+                items.push(install_ruby_lsp(&server_configs[&Language::Ruby], root));
             }
             Slot::Systems => {
-                items.push(install_clangd(&server_configs[&Language::Cpp]));
-                items.push(install_zls(&server_configs[&Language::Zig]));
-                items.push(install_csharp_lsp(&server_configs[&Language::CSharp]));
+                items.push(install_clangd(&server_configs[&Language::Cpp], root));
+                items.push(install_zls(&server_configs[&Language::Zig], root));
+                items.push(install_csharp_lsp(&server_configs[&Language::CSharp], root));
             }
         }
     }
@@ -182,8 +188,8 @@ fn choose_group_interactive(assume_yes: bool) -> DepsGroup {
 /// Pre-install gate evaluated against the same merged table the spawn path
 /// uses, so AlreadyInstalled always means "symora can spawn it".
 /// None = proceed with the platform install commands.
-fn check_server(config: &ServerConfig) -> Option<DepResult> {
-    if config.is_installed() {
+fn check_server(config: &ServerConfig, root: &Path) -> Option<DepResult> {
+    if config.is_installed(root) {
         step(
             Step::Skip,
             format!("{}: already installed", config.display_name),
@@ -236,9 +242,14 @@ fn run_install(name: &'static str, program: &str, args: &[&str]) -> DepResult {
 /// though symora still cannot use it — a plausible-but-wrong status (invariant
 /// 4). Re-probing the same resolution the spawn path uses turns a
 /// not-yet-resolvable server into an honest `Failed` with a recovery hint.
-fn run_install_server(config: &ServerConfig, program: &str, args: &[&str]) -> DepResult {
+fn run_install_server(
+    config: &ServerConfig,
+    root: &Path,
+    program: &str,
+    args: &[&str],
+) -> DepResult {
     let result = run_install(config.display_name, program, args);
-    if result.status != DepStatus::Installed || config.is_installed() {
+    if result.status != DepStatus::Installed || config.is_installed(root) {
         return result;
     }
     step(
@@ -334,8 +345,8 @@ fn verify_on_path(result: DepResult, program: &str) -> DepResult {
     }
 }
 
-fn install_rust_analyzer(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_rust_analyzer(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     if !have("rustup") {
@@ -344,11 +355,16 @@ fn install_rust_analyzer(config: &ServerConfig) -> DepResult {
             "install rustup first — see https://rustup.rs",
         );
     }
-    run_install_server(config, "rustup", &["component", "add", "rust-analyzer"])
+    run_install_server(
+        config,
+        root,
+        "rustup",
+        &["component", "add", "rust-analyzer"],
+    )
 }
 
-fn install_typescript_lsp(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_typescript_lsp(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     if !have("npm") {
@@ -356,23 +372,24 @@ fn install_typescript_lsp(config: &ServerConfig) -> DepResult {
     }
     run_install_server(
         config,
+        root,
         "npm",
         &["install", "-g", "typescript", "typescript-language-server"],
     )
 }
 
-fn install_pyright(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_pyright(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     if !have("npm") {
         return manual("pyright", "install Node.js + npm");
     }
-    run_install_server(config, "npm", &["install", "-g", "pyright"])
+    run_install_server(config, root, "npm", &["install", "-g", "pyright"])
 }
 
-fn install_gopls(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_gopls(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     if !have("go") {
@@ -380,31 +397,35 @@ fn install_gopls(config: &ServerConfig) -> DepResult {
     }
     run_install_server(
         config,
+        root,
         "go",
         &["install", "golang.org/x/tools/gopls@latest"],
     )
 }
 
-fn install_jdtls(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_jdtls(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     match Platform::current() {
         Platform::MacOS if have("brew") => {
-            run_install_server(config, "brew", &["install", "jdtls"])
+            run_install_server(config, root, "brew", &["install", "jdtls"])
         }
         _ => manual("jdtls", "see https://download.eclipse.org/jdtls/snapshots/"),
     }
 }
 
-fn install_kotlin_lsp(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_kotlin_lsp(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     match Platform::current() {
-        Platform::MacOS if have("brew") => {
-            run_install_server(config, "brew", &["install", "JetBrains/utils/kotlin-lsp"])
-        }
+        Platform::MacOS if have("brew") => run_install_server(
+            config,
+            root,
+            "brew",
+            &["install", "JetBrains/utils/kotlin-lsp"],
+        ),
         _ => manual(
             "kotlin-lsp",
             "see https://github.com/JetBrains/kotlin-lsp/releases",
@@ -412,47 +433,63 @@ fn install_kotlin_lsp(config: &ServerConfig) -> DepResult {
     }
 }
 
-fn install_vue_lsp(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_vue_lsp(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     if !have("npm") {
         return manual("vue-language-server", "install Node.js + npm");
     }
-    run_install_server(config, "npm", &["install", "-g", "@vue/language-server"])
+    run_install_server(
+        config,
+        root,
+        "npm",
+        &["install", "-g", "@vue/language-server"],
+    )
 }
 
-fn install_intelephense(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_intelephense(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     if !have("npm") {
         return manual("intelephense", "install Node.js + npm");
     }
-    run_install_server(config, "npm", &["install", "-g", "intelephense"])
+    run_install_server(config, root, "npm", &["install", "-g", "intelephense"])
 }
 
-fn install_yaml_lsp(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_yaml_lsp(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     if !have("npm") {
         return manual("yaml-language-server", "install Node.js + npm");
     }
-    run_install_server(config, "npm", &["install", "-g", "yaml-language-server"])
+    run_install_server(
+        config,
+        root,
+        "npm",
+        &["install", "-g", "yaml-language-server"],
+    )
 }
 
-fn install_clangd(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_clangd(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     match Platform::current() {
-        Platform::MacOS if have("brew") => run_install_server(config, "brew", &["install", "llvm"]),
-        Platform::Linux if have("apt-get") => {
-            run_install_server(config, "sudo", &["apt-get", "install", "-y", "clangd"])
+        Platform::MacOS if have("brew") => {
+            run_install_server(config, root, "brew", &["install", "llvm"])
         }
+        Platform::Linux if have("apt-get") => run_install_server(
+            config,
+            root,
+            "sudo",
+            &["apt-get", "install", "-y", "clangd"],
+        ),
         Platform::Linux if have("dnf") => run_install_server(
             config,
+            root,
             "sudo",
             &["dnf", "install", "-y", "clang-tools-extra"],
         ),
@@ -460,28 +497,30 @@ fn install_clangd(config: &ServerConfig) -> DepResult {
     }
 }
 
-fn install_zls(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_zls(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     match Platform::current() {
-        Platform::MacOS if have("brew") => run_install_server(config, "brew", &["install", "zls"]),
+        Platform::MacOS if have("brew") => {
+            run_install_server(config, root, "brew", &["install", "zls"])
+        }
         _ => manual("zls", "see https://github.com/zigtools/zls/releases"),
     }
 }
 
-fn install_ruby_lsp(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_ruby_lsp(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     if !have("gem") {
         return manual("ruby-lsp", "install Ruby first (it provides `gem`)");
     }
-    run_install_server(config, "gem", &["install", "ruby-lsp"])
+    run_install_server(config, root, "gem", &["install", "ruby-lsp"])
 }
 
-fn install_csharp_lsp(config: &ServerConfig) -> DepResult {
-    if let Some(r) = check_server(config) {
+fn install_csharp_lsp(config: &ServerConfig, root: &Path) -> DepResult {
+    if let Some(r) = check_server(config, root) {
         return r;
     }
     if !have("dotnet") {
@@ -490,7 +529,12 @@ fn install_csharp_lsp(config: &ServerConfig) -> DepResult {
             "install the .NET SDK first (it provides `dotnet`)",
         );
     }
-    run_install_server(config, "dotnet", &["tool", "install", "-g", "csharp-ls"])
+    run_install_server(
+        config,
+        root,
+        "dotnet",
+        &["tool", "install", "-g", "csharp-ls"],
+    )
 }
 
 #[cfg(test)]
@@ -520,7 +564,7 @@ mod tests {
     #[test]
     fn check_server_none_for_missing_builtin() {
         let config = server("/nonexistent/fake-ls".to_string(), ServerSource::Builtin);
-        assert!(check_server(&config).is_none());
+        assert!(check_server(&config, Path::new("/")).is_none());
     }
 
     #[test]
@@ -534,14 +578,14 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let config = server(path.to_string_lossy().into_owned(), ServerSource::Builtin);
-        let result = check_server(&config).unwrap();
+        let result = check_server(&config, Path::new("/")).unwrap();
         assert_eq!(result.status, DepStatus::AlreadyInstalled);
     }
 
     #[test]
     fn check_server_blocks_install_when_override_missing() {
         let config = server("/nonexistent/fake-ls".to_string(), ServerSource::Config);
-        let result = check_server(&config).unwrap();
+        let result = check_server(&config, Path::new("/")).unwrap();
         assert_eq!(result.status, DepStatus::Manual);
         assert!(result.note.unwrap().contains("lsp.servers"));
     }
@@ -552,7 +596,7 @@ mod tests {
         // cannot resolve the server — an honest Failed, never a plausible
         // Installed that the spawn path would then contradict.
         let config = server("/nonexistent/fake-ls".to_string(), ServerSource::Builtin);
-        let result = run_install_server(&config, "true", &[]);
+        let result = run_install_server(&config, Path::new("/"), "true", &[]);
         assert_eq!(result.status, DepStatus::Failed);
         assert!(result.note.unwrap().contains("cannot resolve"));
     }
