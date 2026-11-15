@@ -548,7 +548,7 @@ print_post_install() {
     log ""
     log "Next:"
     log "  ${BINARY_NAME} setup            # install Claude Code skill + LSP servers"
-    log "  ${BINARY_NAME} init             # initialize this project"
+    log "  ${BINARY_NAME} doctor           # check which language servers serve here"
     log "  ${BINARY_NAME} self update      # upgrade in place"
     log "  ${BINARY_NAME} self uninstall   # remove every trace"
     log ""
