@@ -40,6 +40,8 @@ PATH="$PWD/tests/fixtures/python/monorepo/node_modules/.bin:$PATH" \
 
 A test that reaches a daemon runs its own copy of the binary. A daemon is per installation (executable path), so without a private copy a daemon that a manual run of the same build left behind, started under another environment, would answer the test.
 
+A unit test sees none of the developer's user-level state: `services::dist::paths` gives each test thread a home under `/dev/null`, where no configuration exists and nothing can be created. A unit test that writes where a run writes in the user's home holds a `test_home::TestHome` over a temporary directory.
+
 For behavior changes, also exercise the affected commands against this repo (`cargo build` then `./target/debug/symora …`) and at least one external repo. Don't bake local-only repository assumptions into tests or docs.
 
 Two ways a test here passes without testing anything, both worth checking for by injecting the defect and watching it fail. A test that skips itself when the environment cannot produce the condition — most of them, since permission bits do not constrain root — must decide that by probing the environment directly (`read_dir` on the blocked path, `pyright --version`), never by reading the output under test; a guard that consults the answer takes a defect for the environment and passes in silence. And an assertion that a field is ABSENT must first establish the command succeeded (`json_ok`), because an `{"error": ...}` response is missing every field and satisfies it just as well.
