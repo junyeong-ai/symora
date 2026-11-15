@@ -420,8 +420,6 @@ mod tests {
     async fn cleanup_stops_unused_servers_in_a_leased_project() {
         use crate::infra::lsp::manager::tests::server_lifetime::FakeServer;
         use crate::infra::lsp::watch::FileWatch;
-        use crate::models::lsp::ServerStatus;
-        use crate::models::symbol::Language;
         use crate::services::lsp::{DefaultLspService, LspService};
 
         let fake = FakeServer::new();
@@ -463,20 +461,16 @@ mod tests {
                 .unwrap()
                 .is_err()
         );
-        assert!(matches!(
-            ctx.lsp.server_status(Language::Go).await,
-            ServerStatus::Running
-        ));
+        assert!(
+            fake.serving(),
+            "the hover started no server for cleanup to stop"
+        );
         tokio::time::timeout(Duration::from_secs(15), server.cleanup_idle_servers())
             .await
             .unwrap();
         assert!(Arc::ptr_eq(
             server.projects.read().await.get(root).unwrap(),
             &lease
-        ));
-        assert!(matches!(
-            ctx.lsp.server_status(Language::Go).await,
-            ServerStatus::Stopped
         ));
         fake.assert_all_gone().await;
     }

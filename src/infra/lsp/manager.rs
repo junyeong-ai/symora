@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use futures::future::join_all;
-use tokio::sync::{OnceCell, RwLock, mpsc, watch};
+use tokio::sync::{OnceCell, mpsc, watch};
 
 use super::client::LspClient;
 use super::servers::{self, ServerConfig};
@@ -138,11 +138,6 @@ pub struct LspManager {
     /// together share one start: two walks of the tree would compete for the
     /// same watch budget.
     watcher: OnceCell<Mutex<WorkspaceWatcher>>,
-    /// Languages the health monitor abandoned auto-restart on, with the
-    /// reason. `server_status` reports these as `CriticalFailure` so a broken
-    /// server is an honest terminal state, not a perpetual `Stopped`. Cleared
-    /// when the health monitor next observes the language healthy.
-    critical_failures: RwLock<HashMap<Language, String>>,
 }
 
 impl LspManager {
@@ -158,31 +153,11 @@ impl LspManager {
             configs: servers::merged(&runtime_config.servers),
             runtime_config,
             watcher: OnceCell::new(),
-            critical_failures: RwLock::new(HashMap::new()),
         }
     }
 
     fn pool(&self) -> MutexGuard<'_, HashMap<Language, ClientState>> {
         self.clients.lock().expect("client pool lock poisoned")
-    }
-
-    /// Record that auto-restart was abandoned for a language. Called by the
-    /// health monitor after repeated startup failures.
-    pub async fn mark_critical_failure(&self, language: Language, reason: String) {
-        self.critical_failures
-            .write()
-            .await
-            .insert(language, reason);
-    }
-
-    /// Clear a critical-failure mark — the health monitor observed the language
-    /// healthy again (the sole recovery point).
-    pub async fn clear_critical_failure(&self, language: Language) {
-        self.critical_failures.write().await.remove(&language);
-    }
-
-    pub async fn critical_failure_reason(&self, language: Language) -> Option<String> {
-        self.critical_failures.read().await.get(&language).cloned()
     }
 
     /// The pooled client for a language, starting one when there is none.
@@ -511,80 +486,10 @@ impl LspManager {
         .await
     }
 
-    pub fn is_available(&self, language: Language) -> bool {
-        self.configs
-            .get(&language)
-            .map(|c| c.is_installed(&self.root))
-            .unwrap_or(false)
-    }
-
     /// Read-only peek at a pooled client — never starts one. Status
     /// queries must not have the side effect of booting a server.
     pub fn peek_client(&self, language: Language) -> Option<Arc<LspClient>> {
         self.pool().get(&language).and_then(|state| state.client())
-    }
-
-    pub async fn is_running(&self, language: Language) -> bool {
-        if let Some(client) = self.peek_client(language) {
-            client.is_running().await
-        } else {
-            false
-        }
-    }
-
-    pub async fn server_status(&self, language: Language) -> ServerStatusDetail {
-        let config = match self.configs.get(&language) {
-            Some(c) => c,
-            None => return ServerStatusDetail::NotSupported,
-        };
-
-        let install = match config.resolve(&self.root) {
-            Err(LspError::ServerNotInstalled {
-                name, install_hint, ..
-            }) => Some((name, install_hint)),
-            _ => None,
-        };
-        let critical = self.critical_failure_reason(language).await;
-        let is_running = self.is_running(language).await;
-        Self::resolve_status(config.display_name, install, critical, is_running, || {
-            config.probe_version(&self.root)
-        })
-    }
-
-    /// Precedence for [`Self::server_status`], factored out so it is exercised
-    /// without a live server. `NotInstalled` (cannot run) outranks a given-up
-    /// `CriticalFailure` verdict, which outranks bare liveness — a pooled but
-    /// UNHEALTHY server is alive yet broken, so the verdict must NOT be masked as
-    /// `Running`. The health monitor is the sole clearer of that verdict (on
-    /// observing the language running AND healthy), so a recovered server returns
-    /// to `Running` within one monitor tick — never force-cleared here on
-    /// liveness alone. Then liveness, then stopped.
-    fn resolve_status(
-        name: &str,
-        install: Option<(String, String)>,
-        critical: Option<String>,
-        is_running: bool,
-        version: impl FnOnce() -> Option<String>,
-    ) -> ServerStatusDetail {
-        if let Some((name, install_hint)) = install {
-            return ServerStatusDetail::NotInstalled { name, install_hint };
-        }
-        if let Some(reason) = critical {
-            return ServerStatusDetail::CriticalFailure {
-                name: name.to_string(),
-                reason,
-            };
-        }
-        if is_running {
-            return ServerStatusDetail::Running {
-                name: name.to_string(),
-                version: version(),
-            };
-        }
-        ServerStatusDetail::Stopped {
-            name: name.to_string(),
-            version: version(),
-        }
     }
 
     pub fn supported_languages(&self) -> Vec<Language> {
@@ -689,57 +594,6 @@ async fn forward_file_changes(
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum ServerStatusDetail {
-    Running {
-        name: String,
-        version: Option<String>,
-    },
-    Stopped {
-        name: String,
-        version: Option<String>,
-    },
-    NotInstalled {
-        name: String,
-        install_hint: String,
-    },
-    NotSupported,
-    /// The health monitor abandoned auto-restart after repeated startup
-    /// failures — surfaced honestly instead of a perpetual `Stopped`/`timed_out`.
-    CriticalFailure {
-        name: String,
-        reason: String,
-    },
-}
-
-impl std::fmt::Display for ServerStatusDetail {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ServerStatusDetail::Running { name, version } => {
-                if let Some(v) = version {
-                    write!(f, "{} {} (running)", name, v)
-                } else {
-                    write!(f, "{} (running)", name)
-                }
-            }
-            ServerStatusDetail::Stopped { name, version } => {
-                if let Some(v) = version {
-                    write!(f, "{} {} (stopped)", name, v)
-                } else {
-                    write!(f, "{} (stopped)", name)
-                }
-            }
-            ServerStatusDetail::NotInstalled { name, install_hint } => {
-                write!(f, "{} (not installed)\n  → Install: {}", name, install_hint)
-            }
-            ServerStatusDetail::NotSupported => write!(f, "Not supported"),
-            ServerStatusDetail::CriticalFailure { name, reason } => {
-                write!(f, "{name} (critical failure: {reason})")
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -801,47 +655,6 @@ pub(crate) mod tests {
         );
         assert!(!python.is_running().await);
         assert!(!go.is_running().await);
-    }
-
-    #[test]
-    fn server_status_precedence_critical_failure_outranks_liveness() {
-        use ServerStatusDetail::*;
-        // The give-up verdict must win over a bare liveness check: a pooled but
-        // UNHEALTHY server is alive yet broken, so it is CriticalFailure, never
-        // masked as Running. (This precedence regressed once — pin it.)
-        assert!(matches!(
-            LspManager::resolve_status(
-                "rust-analyzer",
-                None,
-                Some("gave up".to_string()),
-                true,
-                || None
-            ),
-            CriticalFailure { .. }
-        ));
-        // NotInstalled cannot run, so it outranks everything else.
-        assert!(matches!(
-            LspManager::resolve_status(
-                "rust-analyzer",
-                Some((
-                    "rust-analyzer".to_string(),
-                    "rustup component add".to_string()
-                )),
-                Some("gave up".to_string()),
-                true,
-                || None,
-            ),
-            NotInstalled { .. }
-        ));
-        // With no verdict: liveness decides Running vs Stopped.
-        assert!(matches!(
-            LspManager::resolve_status("rust-analyzer", None, None, true, || None),
-            Running { .. }
-        ));
-        assert!(matches!(
-            LspManager::resolve_status("rust-analyzer", None, None, false, || None),
-            Stopped { .. }
-        ));
     }
 
     #[test]
@@ -911,37 +724,6 @@ pub(crate) mod tests {
             Some(ClientState::Initializing(_))
         ));
         drop(starting);
-    }
-
-    #[tokio::test]
-    async fn critical_failure_registry_marks_and_clears() {
-        let manager = manager_with_cap(4);
-        assert!(
-            manager
-                .critical_failure_reason(Language::Rust)
-                .await
-                .is_none()
-        );
-
-        manager
-            .mark_critical_failure(Language::Rust, "init crashed 3×".to_string())
-            .await;
-        assert_eq!(
-            manager
-                .critical_failure_reason(Language::Rust)
-                .await
-                .as_deref(),
-            Some("init crashed 3×"),
-        );
-
-        // A clean restart / recovery clears the verdict — it is not permanent.
-        manager.clear_critical_failure(Language::Rust).await;
-        assert!(
-            manager
-                .critical_failure_reason(Language::Rust)
-                .await
-                .is_none()
-        );
     }
 
     /// A stand-in language server that records its pid and, like a real
@@ -1141,6 +923,11 @@ exec sleep 600
                 !Self::stat(pid).is_empty()
             }
 
+            /// Whether a server this fake started is still running.
+            pub(crate) fn serving(&self) -> bool {
+                self.pids().into_iter().any(Self::alive)
+            }
+
             async fn kill(pid: u32) {
                 std::process::Command::new("kill")
                     .args(["-9", &pid.to_string()])
@@ -1299,7 +1086,6 @@ exec sleep 600
             assert_eq!(manager.cleanup_idle(Duration::from_millis(30)).await, 0);
             let stamp = client.usage().last_used;
             manager.peek_client(Language::Go).unwrap();
-            manager.server_status(Language::Go).await;
             client
                 .notify("workspace/didChangeWatchedFiles", None)
                 .await
@@ -1656,24 +1442,5 @@ exec sleep 600
             drop(manager);
             fake.assert_all_gone().await;
         }
-    }
-
-    #[test]
-    fn test_server_status_display() {
-        let status = ServerStatusDetail::Running {
-            name: "rust-analyzer".to_string(),
-            version: Some("2024-12-01".to_string()),
-        };
-        let display = status.to_string();
-        assert!(display.contains("running"));
-        assert!(display.contains("2024-12-01"));
-
-        let status = ServerStatusDetail::NotInstalled {
-            name: "pyright".to_string(),
-            install_hint: "npm install -g pyright".to_string(),
-        };
-        let display = status.to_string();
-        assert!(display.contains("not installed"));
-        assert!(display.contains("npm"));
     }
 }

@@ -8,6 +8,6 @@ pub use config::SymoraConfig;
 pub use diagnostic::Diagnostic;
 pub use lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeActionKind, FileChangeWithEdits,
-    HoverInfo, Position, Range, RenameResult, ServerStatus, TextEdit, WorkspaceEdit,
+    HoverInfo, Position, Range, RenameResult, TextEdit, WorkspaceEdit,
 };
 pub use symbol::{Language, Location, Symbol, SymbolKind};

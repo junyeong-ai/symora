@@ -2,8 +2,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::service::DefaultLspService;
-use crate::models::lsp::ServerStatus;
-use crate::models::symbol::Language;
 
 impl DefaultLspService {
     pub(crate) fn has_pending_start(&self) -> bool {
@@ -29,12 +27,4 @@ impl DefaultLspService {
     pub async fn cleanup_expired_caches(&self) -> usize {
         self.symbol_cache.cleanup_expired().await
     }
-}
-
-pub(super) async fn is_available(service: &DefaultLspService, language: Language) -> bool {
-    service.manager.is_available(language)
-}
-
-pub(super) async fn server_status(service: &DefaultLspService, language: Language) -> ServerStatus {
-    service.manager.server_status(language).await.into()
 }

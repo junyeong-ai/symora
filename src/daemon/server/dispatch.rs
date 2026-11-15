@@ -214,7 +214,6 @@ async fn dispatch_project(
         methods::APPLY_CODE_ACTION => handlers::handle_apply_action(params, &ctx).await,
 
         // Language status
-        methods::LANGUAGE_STATUS => handlers::handle_language_status(params, &ctx).await,
 
         // Post-edit notes
         methods::NOTE_FILES_EDITED => handlers::handle_note_files_edited(params, &ctx).await,
@@ -350,7 +349,6 @@ mod tests {
             methods::SHUTDOWN,
             methods::REFRESH_FILES,
             methods::NOTE_FILES_EDITED,
-            methods::LANGUAGE_STATUS,
             methods::SEARCH_SYMBOLS,
             methods::SEARCH_CONTENT,
             methods::INDEX_BUILD,

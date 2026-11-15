@@ -188,7 +188,6 @@ pub mod methods {
 
     pub const REFRESH_FILES: &str = "refresh_files";
     pub const NOTE_FILES_EDITED: &str = "note_files_edited";
-    pub const LANGUAGE_STATUS: &str = "language_status";
 
     pub const SEARCH_SYMBOLS: &str = "search_symbols";
     pub const SEARCH_CONTENT: &str = "search_content";
@@ -217,8 +216,7 @@ pub mod methods {
             PREPARE_RENAME => Some("textDocument/prepareRename"),
             RENAME => Some("textDocument/rename"),
             PING | STATUS | SHUTDOWN | RESTART_PROJECT | REFRESH_FILES | NOTE_FILES_EDITED
-            | LANGUAGE_STATUS | INDEX_BUILD | INDEX_STATUS | INDEX_CLEAR | SEARCH_SYMBOLS
-            | SEARCH_CONTENT => None,
+            | INDEX_BUILD | INDEX_STATUS | INDEX_CLEAR | SEARCH_SYMBOLS | SEARCH_CONTENT => None,
             _ => None,
         }
     }

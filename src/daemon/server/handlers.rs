@@ -3,12 +3,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use crate::daemon::params::{
-    ApplyActionParams, FileParams, LanguageStatusParams, RenameParams, WorkspaceSymbolParams,
-};
+use crate::daemon::params::{ApplyActionParams, FileParams, RenameParams, WorkspaceSymbolParams};
 use crate::daemon::protocol::RpcError;
 use crate::daemon::wire::{self, RenameResponse, SymbolsResponse};
-use crate::models::lsp::{FindSymbolsOptions, ServerStatus};
+use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Language;
 use crate::services::lsp::LspService;
 use crate::services::store::StoreService;
@@ -177,55 +175,6 @@ pub(super) async fn handle_apply_action(
         changes: result.changes.iter().map(wire::FileChange::from).collect(),
     })
     .map_err(RpcError::from)
-}
-
-pub(super) async fn handle_language_status(
-    params: &serde_json::Value,
-    ctx: &ProjectContext,
-) -> Result<serde_json::Value, RpcError> {
-    let p: LanguageStatusParams = parse_params(params)?;
-
-    let language = Language::parse_or_default(&p.language);
-    let available = ctx.lsp.is_available(language).await;
-    let status = ctx.lsp.server_status(language).await;
-
-    let status_str = match &status {
-        ServerStatus::Running => "running",
-        ServerStatus::Stopped => "stopped",
-        ServerStatus::NotInstalled { .. } => "not_installed",
-        ServerStatus::NotSupported => "not_supported",
-        ServerStatus::CriticalFailure { .. } => "critical_failure",
-    };
-
-    let install_hint = match &status {
-        ServerStatus::NotInstalled { hint } => hint.clone(),
-        _ => None,
-    };
-
-    let reason = match &status {
-        ServerStatus::CriticalFailure { reason } => Some(reason.clone()),
-        _ => None,
-    };
-
-    // Omit the optionals when absent rather than emitting `null` filler: an
-    // install hint exists only for `not_installed`, a reason only for
-    // `critical_failure`. The client decodes both with `get`, so absence is the
-    // signal — matching the omit-when-absent contract the wire types follow.
-    let mut value = serde_json::json!({
-        "language": p.language,
-        "available": available,
-        "status": status_str,
-    });
-    let obj = value
-        .as_object_mut()
-        .expect("json! map is always an object");
-    if let Some(hint) = install_hint {
-        obj.insert("install_hint".to_string(), serde_json::Value::String(hint));
-    }
-    if let Some(reason) = reason {
-        obj.insert("reason".to_string(), serde_json::Value::String(reason));
-    }
-    Ok(value)
 }
 
 /// Bring the daemon's language layer in line with files the requesting

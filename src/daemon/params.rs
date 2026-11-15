@@ -78,11 +78,6 @@ pub(crate) struct EditedFilesParams {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct LanguageStatusParams {
-    pub language: String,
-}
-
-#[derive(Debug, Deserialize)]
 pub(crate) struct IndexBuildParams {
     #[serde(default)]
     pub force: bool,

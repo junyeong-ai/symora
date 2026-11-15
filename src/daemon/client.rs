@@ -29,7 +29,7 @@ pub(super) fn calculate_timeout(config: &LspRuntimeConfig, method: &str) -> Dura
         methods::INDEX_BUILD => return Duration::from_secs(600),
         methods::INDEX_CLEAR | methods::INDEX_STATUS => return Duration::from_secs(120),
         methods::SEARCH_SYMBOLS | methods::SEARCH_CONTENT => return Duration::from_secs(60),
-        methods::LANGUAGE_STATUS | methods::TREE_CURRENCY | methods::INDEXED_LANGUAGES => {
+        methods::TREE_CURRENCY | methods::INDEXED_LANGUAGES => {
             return config.request_timeout();
         }
         _ => {}
@@ -652,15 +652,6 @@ impl DaemonClient {
             "action": action
         });
         self.request_with_project(methods::APPLY_CODE_ACTION, params)
-            .await
-            .and_then(Self::extract_result)
-    }
-
-    pub async fn language_status(&self, language: &str) -> Result<serde_json::Value, LspError> {
-        let params = serde_json::json!({
-            "language": language
-        });
-        self.request_with_project(methods::LANGUAGE_STATUS, params)
             .await
             .and_then(Self::extract_result)
     }
