@@ -2,6 +2,8 @@
 
 The daemon serves CLI commands over a Unix socket so language-server sessions can be reused across invocations. A process that cannot address the daemon's socket — a home too deep for a Unix socket's path — or open its startup lock — a sandbox forbidding its directory — is wired in process instead (`DaemonClient::can_start_daemon`); invariant 3 is what makes that the same answer rather than a degraded one.
 
+The daemon serves every project of its installation, so it runs in the installation's runtime directory, never in a project's: a working directory marks a tree as in use. Nothing it does may depend on its own working directory. A path the environment states relatively resolves there, not where a direct run resolves it — a request's project root — so the daemon resolves such a path against the request's root (a relative `PATH` entry), or, for the paths it shares with every caller (`HOME`, `XDG_CONFIG_HOME`), does not run at all (`Unaddressable::RelativePath`).
+
 ## Wire types are serialization-stable
 
 Types in `wire.rs` (Symbol, Location, Diagnostic, …) are an external protocol. They:
