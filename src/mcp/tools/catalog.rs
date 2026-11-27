@@ -73,7 +73,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 );
                 schema["properties"]["path"] = serde_json::json!({
                     "type": "array", "items": {"type": "string"}, "minItems": 1,
-                    "description": "Project-relative files/directories whose declarations to search"
+                    "description": "Project-relative files/directories whose declarations to search; \
+                                    a hidden path is refused"
                 });
                 schema
             },
@@ -244,7 +245,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "refs",
                         "boolean",
                         "Add refs, test_refs and prod_refs to each counted declaration, with \
-                         refs_status when a count is a lower bound or none was taken",
+                         refs_status marking a lower bound (indexing_degraded) or why no count \
+                         was taken (timed_out when the lsp.timeout_secs budget ran out, \
+                         unsupported, unavailable)",
                     ),
                 ],
                 &["file"],
@@ -271,7 +274,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::read_only(
             "find_references",
             "References to the symbol at file:line[:column]. Check indexing before \
-             treating the count as complete; unconfirmed does not verify workspace readiness.",
+             treating the count as complete; unconfirmed does not verify workspace readiness. \
+             A Python __init__ or __new__ counts only the references to the method itself, \
+             since pyright reports Circle(…) as a reference to the class.",
             with_extra(
                 location_schema(),
                 &[
@@ -304,7 +309,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         )),
         ToolDefinition::read_only(
             "find_callers",
-            "Incoming-call hierarchy for a function at file:line[:column].",
+            "Incoming-call hierarchy for a function at file:line[:column]. Without the \
+             server's call hierarchy, callers are read off references (callers_status \
+             references_derived), not verified call edges, and a type or value reads \
+             not_callable and lists none. A Python __init__ or __new__ has no references of \
+             its own, since pyright reports Circle(…) as a reference to the class: its callers \
+             are read off the calls of its class and marked references_derived, a lower bound \
+             its hint names.",
             with_extra(
                 location_schema(),
                 &[
@@ -644,7 +655,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ])),
         ToolDefinition::read_only(
             "get_diff_impact",
-            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals; refs_status_counts and callers_status_counts count the rows of each status; test references are not execution coverage. Documentation and configuration files (Markdown, YAML, TOML, JSON) are listed in unmeasured_files rather than read by key. changes is a list with count, showing and truncated, and with callers, a changed function's, method's or constructor's callers is one too, read off the references its count was taken from (callers_status references_derived, not verified calls); another kind's row reads not_callable, and call_hierarchy asks the server instead. callers is absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind.",
+            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals: refs_status marks a lower bound (indexing_degraded) or why no count was taken (timed_out when the lsp.timeout_secs budget ran out, unsupported, unavailable), and refs_status_counts and callers_status_counts count the rows of each status, so a total is a lower bound by those rows alone; test references are not execution coverage. Documentation and configuration files (Markdown, YAML, TOML, JSON) are listed in unmeasured_files rather than read by key. changes is a list with count, showing and truncated, and with callers, a changed function's, method's or constructor's callers is one too, read off the references its count was taken from (callers_status references_derived, not verified calls): every callable whose code holds one, a use as a value counted like a call, an import outside a callable not at all; another kind's row reads not_callable, and call_hierarchy asks the server instead. callers is absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind.",
             schema_object(&[
                 ("revision", "string", "One base revision, not a revision range; default HEAD"),
                 ("staged", "boolean", "Compare staged changes instead of the working tree"),
@@ -659,7 +670,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     "call_hierarchy",
                     "boolean",
                     "Ask every changed symbol's callers of the server's call hierarchy \
-                     instead, a second workspace search per symbol; implies callers",
+                     instead, which it requires, a second workspace search per symbol; implies \
+                     callers",
                 ),
                 (
                     "max_symbols",
@@ -667,7 +679,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     &format!(
                         "Maximum added and modified symbols whose references are counted, \
                          and apart from them, deleted symbols listed, so a deletion never \
-                         takes a counted symbol's place; default {DIFF_IMPACT_MAX_SYMBOLS}, \
+                         takes a counted symbol's place; the files it stops in or before are \
+                         listed in unmeasured_files; default {DIFF_IMPACT_MAX_SYMBOLS}, \
                          0 means unlimited"
                     ),
                 ),
@@ -727,9 +740,16 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "LSP diagnostics (errors, warnings, hints) for one file. The \
                           verification step after an editing tool writes a file. A `status` \
                           field of unconfirmed or unsupported means the list is not \
-                          authoritative — empty then means unknown, not clean. When the list \
-                          floods, narrow it with severity (e.g. \"error\") instead of \
-                          reading every entry.",
+                          authoritative — empty then means unknown, not clean. A file an edit \
+                          did not change, such as a caller under verify_callers, can show its \
+                          list from before the edit, and no response says whether it does: \
+                          pyright and rust-analyzer compute the list when it is read, after \
+                          edits made through these tools but possibly before they hear of \
+                          another tool's; other servers report a caller's list only once they \
+                          check it again. rust-analyzer's list is its own analysis: \
+                          use-after-move, lifetime errors and clippy lints come only from cargo \
+                          check or cargo clippy. When the list floods, narrow it with severity \
+                          (e.g. \"error\") instead of reading every entry.",
             schema_object(
                 &[
                     ("file", "string", "Project-relative file path"),
@@ -786,8 +806,15 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "rename_symbol",
             "LSP rename for the symbol at file:line:column. Returns the affected \
                           file list and per-file edit count. Set dry_run=true to preview \
-                          without writing. Application requires confirmed workspace readiness \
-                          unless accept_unconfirmed is set after reviewing a preview. \
+                          without writing. Application requires confirmed workspace readiness. \
+                          Under indexing unconfirmed, compare each file's edit_count in a \
+                          dry_run with find_references for the target, which leaves out the \
+                          declaration the rename also edits, then apply with \
+                          accept_unconfirmed; the response keeps the marker, so check that no \
+                          reference kept the old name. timed_out permits previews only. Every \
+                          file is checked before any is written, but a write that fails \
+                          partway leaves earlier files modified; the error's hint names them, \
+                          so inspect those before retrying. \
                           ⚠ Mutates source files when dry_run is false.",
             with_required(
                 with_extra(
@@ -802,9 +829,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         (
                             "accept_unconfirmed",
                             "boolean",
-                            "Apply although the server cannot confirm workspace readiness \
-                             (indexing: unconfirmed); review a dry_run first. A timed-out \
-                             readiness wait is still refused (default false)",
+                            "Apply under indexing: unconfirmed, after the dry_run comparison \
+                             the description gives; timed_out is still refused (default false)",
                         ),
                     ],
                 ),
@@ -828,7 +854,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "apply_code_action",
             "Apply a code action by exact title at file:line:column. Use \
                           `list_code_actions` first to discover titles. Set dry_run=true to \
-                          preview. ⚠ Mutates source files when dry_run is false.",
+                          preview. Every file is checked before any is written, but a write \
+                          that fails partway leaves earlier files modified; the error's hint \
+                          names them, so inspect those before retrying. ⚠ Mutates source files \
+                          when dry_run is false.",
             with_required(
                 with_extra(
                     position_exact_location_schema(),
@@ -878,7 +907,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                             "verify_callers",
                             "boolean",
                             "Also attach diagnostics for the edited symbol's caller files, its \
-                             one-hop references (default false)",
+                             one-hop references, whose lists can predate the edit (default false)",
                         ),
                     ],
                 ),
@@ -909,7 +938,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                             "verify_callers",
                             "boolean",
                             "Also attach diagnostics for the edited symbol's caller files, its \
-                             one-hop references (default false)",
+                             one-hop references, whose lists can predate the edit (default false)",
                         ),
                     ],
                 ),
@@ -940,7 +969,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                             "verify_callers",
                             "boolean",
                             "Also attach diagnostics for the edited symbol's caller files, its \
-                             one-hop references (default false)",
+                             one-hop references, whose lists can predate the edit (default false)",
                         ),
                     ],
                 ),
@@ -963,7 +992,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "expect_no_references",
                         "boolean",
                         "Refuse the delete unless verified reference-free; refusals \
-                         return a precondition_failed error (default false)",
+                         return a precondition_failed error. Under indexing unconfirmed it \
+                         always refuses: check find_references yourself and delete without it \
+                         (default false)",
                     ),
                     (
                         "dry_run",

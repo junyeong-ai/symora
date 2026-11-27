@@ -26,6 +26,8 @@ Mutation is one fact stated two ways: the typed `annotations.read_only_hint` (co
 
 The SDK exposes a usage playbook through the protocol-appropriate metadata flow. Hosts that support server instructions place this playbook (`instructions.rs`) in the model's context. Backticks in that text are reserved for tool names; a test asserts every backtick-quoted token exists in the visible profile catalog, so renaming or removing a tool cannot leave the playbook stale. Mention new tools there when they change how an agent should sequence calls.
 
+Claude Code shows the model only the first 4,096 characters of server instructions, and with tool search on (its default) the instructions and tool names are all a session loads until a tool is searched for, which loads that tool's name, description and input schema. A test holds each profile's playbook within that limit. The playbook carries tool choice and what every result shares (positions, qualifiers, errors); a detail that concerns one tool goes in that tool's description or parameter, where it arrives with the tool. Claude Code does not pass an output schema to the model, since the Messages API's tool definition has no field for one: its descriptions serve clients that validate `structuredContent`, and what an agent needs to read a result goes in the tool's description as well.
+
 ## Location input convention
 
 Tools that accept a `file:line[:column]` target embed `LocationInput` via `#[serde(flatten)]` rather than redeclaring the fields (its `column` is optional). New location-taking tools follow the same pattern. The edit tools embed `EditTargetInput` instead (file plus exactly one of symbol or line); navigation/analysis tools keep `LocationInput`.
