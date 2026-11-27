@@ -2258,6 +2258,64 @@ fn a_capped_diff_analysis_says_its_counts_are_a_lower_bound() {
     );
 }
 
+/// A cap reached on a diff that changes configuration and code reports the
+/// changed code first, whichever path sorts first: taplo lists a `.toml`
+/// file's keys, which become rows of their own and in path order would fill
+/// the cap. The Python file is read by the grammar, its server configured
+/// away, so only taplo's presence decides whether the test can run.
+#[cfg(unix)]
+#[test]
+fn a_cap_reports_changed_code_before_changed_configuration() {
+    let taplo = Command::new("taplo")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !taplo {
+        eprintln!("skipped: taplo does not run here");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::create_dir(repo.join(".symora")).unwrap();
+    std::fs::write(
+        repo.join(".symora/config.toml"),
+        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright-langserver\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("a.toml"), "[deps]\nx = \"1\"\ny = \"1\"\n").unwrap();
+    std::fs::write(repo.join("b.py"), "def one():\n    pass\n").unwrap();
+    git(repo, &["add", "a.toml", "b.py"]);
+    git(repo, &["commit", "-qm", "init"]);
+    std::fs::write(repo.join("a.toml"), "[deps]\nx = \"2\"\ny = \"2\"\n").unwrap();
+    std::fs::write(repo.join("b.py"), "def one():\n    return 1\n").unwrap();
+
+    let analyse = |max: &str| json_ok(repo, &["diff-impact", "--max-symbols", max]);
+    let files = |page: &serde_json::Value| -> Vec<String> {
+        page["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .map(|row| row["location"]["file"].as_str().unwrap_or("").to_string())
+            .collect()
+    };
+    let whole = analyse("0");
+    let all = files(&whole);
+    assert!(
+        all.iter().filter(|file| *file == "a.toml").count() >= 2,
+        "taplo lists the changed keys, each a row: {whole}"
+    );
+    assert_eq!(all.first().map(String::as_str), Some("b.py"), "{whole}");
+
+    let capped = analyse("1");
+    assert_eq!(files(&capped), ["b.py"], "{capped}");
+    assert_eq!(capped["incomplete"].as_bool(), Some(true), "{capped}");
+}
+
 /// Rows for removed declarations come first and can fill the cap on their
 /// own, which leaves the declarations a rename replaced and the ones it
 /// added unanalysed, so the answer is a lower bound there too.

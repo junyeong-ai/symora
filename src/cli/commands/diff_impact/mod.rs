@@ -462,10 +462,15 @@ async fn analyze_hunks(
 /// Each changed symbol's row, in file order, bounded by `--max-symbols`.
 async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbols: usize) -> Plan {
     let root = app.output.root();
-    let mut file_hunks: BTreeMap<&PathBuf, Vec<&DiffHunk>> = BTreeMap::new();
+    let mut by_file: BTreeMap<&PathBuf, Vec<&DiffHunk>> = BTreeMap::new();
     for hunk in hunks {
-        file_hunks.entry(&hunk.file).or_default().push(hunk);
+        by_file.entry(&hunk.file).or_default().push(hunk);
     }
+    // Code is planned before configuration and prose (TOML, YAML, JSON,
+    // Markdown), each in path order, so a cap a large diff reaches is not
+    // spent on their keys and headings while changed code goes unreported.
+    let mut file_hunks: Vec<(&PathBuf, Vec<&DiffHunk>)> = by_file.into_iter().collect();
+    file_hunks.sort_by_key(|(file, _)| !Language::from_path(file).is_code());
 
     let mut analysis = Plan {
         rows: Vec::new(),
@@ -742,6 +747,8 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
     }
 
     analysis.answers = answers;
+    // Listed in path order, whichever order the files were planned in.
+    analysis.unmeasured.sort();
     analysis
 }
 
