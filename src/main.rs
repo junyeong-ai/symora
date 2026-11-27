@@ -244,7 +244,6 @@ fn edit_payload(command: &mut Commands) -> Option<&mut String> {
         EditCommand::ReplaceBody { body: value, .. }
         | EditCommand::InsertBefore { code: value, .. }
         | EditCommand::InsertAfter { code: value, .. }
-        | EditCommand::Replace { text: value, .. }
         | EditCommand::Pattern { text: value, .. } => Some(value),
         EditCommand::Delete { .. } => None,
     }

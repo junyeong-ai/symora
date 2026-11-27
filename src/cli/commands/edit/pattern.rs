@@ -38,18 +38,20 @@ pub(super) async fn pattern_edit(
     // file it never read.
     if !has_extension(&abs_path, language.extensions()) {
         let named = Language::from_path(&abs_path);
-        let hint = if supported_languages().contains(&named) {
-            format!("Its extension names {0}: pass `--lang {0}`", named.lsp_id())
-        } else {
-            "Replace a range with `symora edit replace` instead".to_string()
-        };
-        anyhow::bail!(
-            OutputError::invalid(format!(
-                "{file} has no {} extension, so an AST query does not read it",
-                language.lsp_id()
+        let error = OutputError::invalid(format!(
+            "{file} has no {} extension, so an AST query does not read it",
+            language.lsp_id()
+        ));
+        anyhow::bail!(if supported_languages().contains(&named) {
+            error.with_hint(format!(
+                "Its extension names {0}: pass `--lang {0}`",
+                named.lsp_id()
             ))
-            .with_hint(hint)
-        );
+        } else {
+            error.with_hint(
+                "Symora has no grammar for this file; edit it with your own editing tool",
+            )
+        });
     }
     let search = &app.config().search;
     let size = std::fs::metadata(&abs_path)?.len();
@@ -64,9 +66,7 @@ pub(super) async fn pattern_edit(
                     search.max_file_size_mb
                 ),
             )
-            .with_hint(
-                "Raise search.max_file_size_mb, or replace a range with `symora edit replace`"
-            )
+            .with_hint("Raise search.max_file_size_mb")
         );
     }
 

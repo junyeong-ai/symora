@@ -988,12 +988,12 @@ fn edit_output_symbol_applied() {
     "###);
 }
 
-/// Raw range edit: no symbol fields; dry runs carry `dry_run` and the
+/// AST pattern edit: no symbol fields; dry runs carry `dry_run` and the
 /// exact preview hunk.
 #[test]
-fn edit_output_range_dry_run() {
+fn edit_output_pattern_dry_run() {
     let out = EditOutput {
-        operation: "replace",
+        operation: "pattern",
         file: "src/main.rs".to_string(),
         target_symbol: None,
         target_kind: None,
@@ -1008,7 +1008,7 @@ fn edit_output_range_dry_run() {
     };
     assert_json_snapshot!(out, @r###"
     {
-      "operation": "replace",
+      "operation": "pattern",
       "file": "src/main.rs",
       "lines": {
         "start": 3,

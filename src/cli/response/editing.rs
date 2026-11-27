@@ -6,12 +6,12 @@ use super::lsp::DiagnosticOutput;
 use super::{LocationOutput, Section};
 
 /// The one output shape every `edit` subcommand emits. One splice, one
-/// record: symbol-targeted operations carry `target_*`; raw range and
-/// pattern operations omit them.
+/// record: symbol-targeted operations carry `target_*`; pattern
+/// operations omit them.
 #[derive(Debug, Serialize)]
 pub struct EditOutput {
     /// Which operation ran: `replace_body`, `insert_before`,
-    /// `insert_after`, `delete`, `replace`, or `pattern`.
+    /// `insert_after`, `delete`, or `pattern`.
     pub operation: &'static str,
     pub file: String,
     #[serde(skip_serializing_if = "Option::is_none")]

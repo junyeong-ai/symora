@@ -4,9 +4,9 @@
 //! Symbol-targeted subcommands (`replace-body`, `insert-before`,
 //! `insert-after`) operate on whole lines of the symbol's full
 //! declaration span — the body the agent supplies is taken verbatim,
-//! indentation included. `replace` and `pattern` are character-precise;
-//! all columns at this boundary are 1-indexed *character* counts (the
-//! AST layer's byte columns are converted before they reach the core).
+//! indentation included. `pattern` is character-precise; all columns at
+//! this boundary are 1-indexed *character* counts (the AST layer's byte
+//! columns are converted before they reach the core).
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,6 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 
 use crate::app::App;
-use crate::cli::ParsedLocation;
 use crate::cli::response::{LineRange, Section};
 use crate::cli::utils::shell_arg;
 use crate::models::lsp::IndexingDegradation;
@@ -28,7 +27,7 @@ mod workspace_edit;
 mod write;
 
 use pattern::pattern_edit;
-use splice::{FileDocument, LineSplice, char_splice, invalid_range, to_lines};
+use splice::{FileDocument, LineSplice, to_lines};
 use target::{Addressed, resolve_symbol, symbol_line_span};
 
 pub use workspace_edit::{AppliedFileChange, apply_workspace_edits};
@@ -45,7 +44,7 @@ pub enum EditCommand {
     /// Replace a symbol's entire definition — the whole lines `symbols
     /// --body` returns, from the decorator, attribute or doc-comment lines it
     /// opens with through its closing brace — pass the complete definition,
-    /// not just the inner code. For a raw character range use `replace`.
+    /// not just the inner code.
     ReplaceBody {
         /// Target: `file:line[:col]` (location) or file path (with --symbol)
         target: String,
@@ -165,39 +164,6 @@ pub enum EditCommand {
         with_diagnostics: bool,
     },
 
-    /// Replace a raw character range (no symbol resolution). For whole
-    /// symbols use `replace-body`.
-    Replace {
-        /// Start location (file:line[:column]; an omitted column means column 1)
-        start: String,
-
-        /// End location (file:line[:column]), exclusive. Defaults to the
-        /// end of the start line.
-        #[arg(short, long)]
-        end: Option<String>,
-
-        /// New text. Pass `-` to read from stdin.
-        #[arg(short, long)]
-        text: String,
-
-        /// Assert the live text spanned by the range equals this before
-        /// replacing. The edit is refused (no write) when it differs, so a
-        /// range read against a now-stale revision can't be clobbered.
-        /// `\r\n` and `\n` compare equal; every other character must match
-        /// exactly.
-        #[arg(long)]
-        expect: Option<String>,
-
-        /// Preview the change without writing to disk.
-        #[arg(long)]
-        dry_run: bool,
-
-        /// After an applied edit, pull LSP diagnostics for the file and
-        /// attach them to the output. Ignored on dry runs.
-        #[arg(long)]
-        with_diagnostics: bool,
-    },
-
     /// Replace code matching a tree-sitter AST pattern. For post-edit
     /// health checks run `symora diagnostics <file>` — pattern output is
     /// per-match, so file-level diagnostics are not attached inline.
@@ -241,7 +207,6 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
         | EditCommand::InsertBefore { dry_run, .. }
         | EditCommand::InsertAfter { dry_run, .. }
         | EditCommand::Delete { dry_run, .. }
-        | EditCommand::Replace { dry_run, .. }
         | EditCommand::Pattern { dry_run, .. } => *dry_run,
     };
     let _lock = (!dry_run).then(|| lock_edits(app.root())).transpose()?;
@@ -334,52 +299,6 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
                 expect_no_references,
             )
             .await
-        }
-        EditCommand::Replace {
-            start,
-            end,
-            text,
-            expect,
-            dry_run,
-            with_diagnostics,
-        } => {
-            let start_loc =
-                ParsedLocation::parse(&start)?.to_absolute_with_root(Some(app.root()))?;
-            let (end_line, end_col) = match end {
-                Some(e) => {
-                    let loc = ParsedLocation::parse(&e)?.to_absolute_with_root(Some(app.root()))?;
-                    if loc.file != start_loc.file {
-                        anyhow::bail!(invalid_range(format!(
-                            "End location is in a different file ({}) than start ({})",
-                            loc.file.display(),
-                            start_loc.file.display(),
-                        )));
-                    }
-                    (loc.line, Some(loc.column))
-                }
-                None => (start_loc.line, None),
-            };
-
-            let doc = FileDocument::load(&start_loc.file, dry_run)?;
-            let splice = char_splice(
-                &doc.lines,
-                start_loc.line,
-                start_loc.column,
-                end_line,
-                end_col,
-                &text,
-                expect.as_deref(),
-            )?;
-            let span = LineRange {
-                start: start_loc.line,
-                end: end_line,
-            };
-            let mut output = doc.commit(app, "replace", splice, span, None, dry_run)?;
-            output.diagnostics =
-                pull_diagnostics(app, &start_loc.file, dry_run, with_diagnostics).await;
-            app.output.print_success(output);
-            finish(app, &start_loc.file, dry_run).await;
-            Ok(())
         }
         EditCommand::Pattern {
             file,
@@ -480,7 +399,7 @@ async fn symbol_edit(
 /// symbol's declaration declares other names too (`declared_with`: `var a,
 /// b = f(…)`), its first line has non-whitespace before its declaration
 /// start, or its last line has non-whitespace after its declared end
-/// column, the operation is refused with a character-precise alternative —
+/// column, the operation is refused with the edits that can reach it —
 /// never a silent over-splice.
 fn ensure_exclusive_line_ownership(
     lines: &[String],
@@ -491,7 +410,9 @@ fn ensure_exclusive_line_ownership(
     let refused = |message: String| {
         anyhow::Error::new(
             crate::cli::OutputError::unsupported(message)
-                .with_hint("Use `edit replace` for character-precise control"),
+                .with_hint(
+                    "Rewrite it with `edit pattern`, which matches syntax rather than whole lines, or edit the text with your own editing tool",
+                ),
         )
     };
     let shared = |what: &str| {
@@ -539,10 +460,9 @@ fn ensure_exclusive_line_ownership(
 /// behind disk); if the file changed since, the span may now cover a different
 /// symbol entirely, and a delete/replace there is unrecoverable. A named
 /// symbol absent from its resolved NAME line is the unambiguous signal of
-/// that drift — fail closed and send the agent back to re-resolve, the same
-/// discipline `--expect` enforces for character-range edits. Anonymous or
-/// non-identifier names carry no such textual anchor, so they are left to the
-/// EOF and line-ownership guards rather than risk a false refusal.
+/// that drift — fail closed and send the agent back to re-resolve. Anonymous
+/// or non-identifier names carry no such textual anchor, so they are left to
+/// the EOF and line-ownership guards rather than risk a false refusal.
 fn ensure_anchor_not_stale(symbol: &Symbol, lines: &[String]) -> Result<()> {
     let name = symbol.name.trim();
     let is_identifier = !name.is_empty() && name.chars().all(is_identifier_char);
@@ -1006,8 +926,8 @@ async fn finish(app: &App, file: &Path, dry_run: bool) {
 }
 
 /// A computed or asserted edit range no longer matches the on-disk file —
-/// the analysis (LSP range, AST match, or an `--expect` assertion) ran
-/// against a different revision than the bytes on disk. Surfaced as
+/// the analysis (LSP range or AST match) ran against a different revision
+/// than the bytes on disk. Surfaced as
 /// `ErrorCode::Conflict` so an agent branches on it to re-read and retry
 /// instead of treating a recoverable staleness as an internal failure.
 fn stale_revision(message: String) -> anyhow::Error {

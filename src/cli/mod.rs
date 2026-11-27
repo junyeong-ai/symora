@@ -184,7 +184,7 @@ pub enum Commands {
     Map(MapArgs),
 
     // Edit
-    /// Source mutations: replace-body, insert-before/after, delete, replace, pattern
+    /// Source mutations: replace-body, insert-before/after, delete, pattern
     Edit(EditArgs),
     /// Rename symbol
     Rename(RenameArgs),

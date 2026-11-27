@@ -665,15 +665,25 @@ fn edit_reindexes_the_store_so_search_sees_the_new_content() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // `edit replace` resolves no symbols, so this exercises the write +
-    // refresh flow without a language server.
+    // `edit pattern` reads the file through its grammar alone, so this
+    // exercises the write + refresh flow without a language server.
     let out = run_in(
         dir.path(),
-        &["edit", "replace", "lib.rs:1:1", "--text", "fn beta() {}"],
+        &[
+            "edit",
+            "pattern",
+            "lib.rs",
+            "--pattern",
+            "(function_item) @item",
+            "--lang",
+            "rust",
+            "--text",
+            "fn beta() {}",
+        ],
     );
     assert!(
         out.status.success(),
-        "edit replace failed: {}",
+        "edit pattern failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 
@@ -1449,26 +1459,29 @@ fn pattern_refuses_a_file_its_query_would_not_read() {
             "deploy",
             "shellscript",
             "invalid_argument",
-            "symora edit replace",
+            Some("your own editing tool"),
         ),
-        ("lib.rs", "python", "invalid_argument", "--lang rust"),
+        ("lib.rs", "python", "invalid_argument", Some("--lang rust")),
         (
             "large.py",
             "python",
             "file_too_large",
-            "search.max_file_size_mb",
+            Some("search.max_file_size_mb"),
         ),
     ] {
         let out = run_in(dir.path(), &edit(file, lang));
         assert!(!out.status.success(), "{file} unexpectedly succeeded");
         let response: serde_json::Value = common::parse_response(&out.stdout).unwrap();
         assert_eq!(response["error"]["code"], code, "{response}");
-        assert!(
-            response["error"]["hint"]
-                .as_str()
-                .is_some_and(|text| text.contains(hint)),
-            "{response}"
-        );
+        match hint {
+            Some(hint) => assert!(
+                response["error"]["hint"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(hint)),
+                "{response}"
+            ),
+            None => assert!(response["error"].get("hint").is_none(), "{response}"),
+        }
     }
     let read = json_ok(dir.path(), &edit("Script.PY", "python"));
     assert_eq!(
@@ -6069,10 +6082,20 @@ fn typedef_lists_every_type_the_server_names() {
 #[test]
 fn stdin_edit_payload_is_interpreted_once() {
     let directory = tempfile::tempdir().unwrap();
-    let file = directory.path().join("a.txt");
+    let file = directory.path().join("a.py");
     std::fs::write(&file, "original\n").unwrap();
     let mut child = symora()
-        .args(["edit", "replace", "a.txt:1:1", "--text", "-"])
+        .args([
+            "edit",
+            "pattern",
+            "a.py",
+            "--pattern",
+            "(identifier) @name",
+            "--lang",
+            "python",
+            "--text",
+            "-",
+        ])
         .current_dir(directory.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
