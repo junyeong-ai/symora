@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::response::disclosure::{CoverageReason, LowerBound, name_some};
 use crate::cli::response::{
-    CallHierarchyOutput, INDEXING_DEGRADED, LocationOutput, ReferenceCount,
+    CallHierarchyOutput, INDEXING_DEGRADED, LocationOutput, ReferenceCount, Section,
 };
 use crate::cli::utils::{members_at_deletion, members_at_line, shell_arg};
 use crate::cli::{FileSymbols, SymbolBackend, declared_in};
@@ -134,8 +134,8 @@ pub struct ChangedSymbolImpact {
     /// Present only when callers were requested but the list is not
     /// authoritative: "indexing_degraded" (a lower bound), the reason the
     /// incoming-call query failed, as `refs_status` names one, or
-    /// "unavailable" where no reference count was taken to ask it from. An
-    /// empty `callers` then means "unknown", not a verified "no callers".
+    /// "unavailable" where no reference count was taken to ask it from, when
+    /// `callers` is absent: what calls the symbol is unknown, not "nothing".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callers_status: Option<&'static str>,
     /// Present only on Deleted rows: whether the deleted symbol was identified
@@ -143,8 +143,12 @@ pub struct ChangedSymbolImpact {
     /// a live-symbol measurement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deletion: Option<DeletionResolution>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub callers: Vec<CallHierarchyOutput>,
+    /// With `--callers`, the incoming calls the server answered, in the shared
+    /// list shape: `count` is every caller it named and `items` stops at
+    /// `lsp.calls_limit`. Absent without `--callers` and where no list was
+    /// obtained (`callers_status` says why).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callers: Option<Section<CallHierarchyOutput>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -770,7 +774,7 @@ async fn analyze_symbol_impact(
     let count = ReferenceCount::of(&outcome, app.test_scope());
 
     let (callers, callers_status) = match (&outcome, include_callers) {
-        (_, false) => (vec![], None),
+        (_, false) => (None, None),
         (Ok(Some(analysis)), true) => {
             let anchor = analysis.anchor();
             match lsp
@@ -778,18 +782,21 @@ async fn analyze_symbol_impact(
                 .await
             {
                 Ok(calls) => (
-                    calls
-                        .data
-                        .iter()
-                        .take(app.config().lsp.calls_limit)
-                        .map(|c| CallHierarchyOutput::from_item(c, root))
-                        .collect(),
+                    Some(Section::with_total(
+                        calls
+                            .data
+                            .iter()
+                            .take(app.config().lsp.calls_limit)
+                            .map(|c| CallHierarchyOutput::from_item(c, root))
+                            .collect(),
+                        calls.data.len(),
+                    )),
                     calls.indexing.map(|_| INDEXING_DEGRADED),
                 ),
-                Err(error) => (vec![], Some(CoverageReason::of(&error).as_str())),
+                Err(error) => (None, Some(CoverageReason::of(&error).as_str())),
             }
         }
-        (_, true) => (vec![], Some(CoverageReason::Unavailable.as_str())),
+        (_, true) => (None, Some(CoverageReason::Unavailable.as_str())),
     };
 
     let (refs, test_refs, prod_refs) = match count {
@@ -1005,7 +1012,7 @@ fn deleted_row(symbol: &Symbol, old_file: &Path, root: &Path) -> ChangedSymbolIm
         test_refs: None,
         prod_refs: None,
         refs_status: None,
-        callers: vec![],
+        callers: None,
         callers_status: None,
         deletion: Some(DeletionResolution::Resolved),
     }
@@ -1027,7 +1034,7 @@ fn unresolved_deletion(
         test_refs: None,
         prod_refs: None,
         refs_status: None,
-        callers: vec![],
+        callers: None,
         callers_status: None,
         deletion: Some(resolution),
     }
@@ -1133,7 +1140,7 @@ mod tests {
             test_refs: None,
             prod_refs: None,
             refs_status: None,
-            callers: vec![],
+            callers: None,
             callers_status: None,
             deletion: Some(DeletionResolution::Resolved),
         };
@@ -1187,7 +1194,7 @@ mod tests {
             test_refs: Some(1),
             prod_refs: Some(2),
             refs_status: None,
-            callers: vec![],
+            callers: None,
             callers_status: None,
             deletion: None,
         };
@@ -1195,5 +1202,38 @@ mod tests {
         assert_eq!(v["refs"], 3);
         assert_eq!(v["test_refs"], 1);
         assert!(v.get("deletion").is_none());
+    }
+
+    /// A row's callers are the shared list: the count the server named, the
+    /// items the calls limit kept, and `truncated` between them.
+    #[test]
+    fn a_rows_callers_are_a_section_cut_at_the_calls_limit() {
+        let caller = CallHierarchyOutput {
+            name: "use".to_string(),
+            kind: "function".to_string(),
+            location: loc(),
+            call_site: Some(loc()),
+            body: None,
+            body_omitted: None,
+        };
+        let row = ChangedSymbolImpact {
+            name: Some("compute".to_string()),
+            kind: Some("function".to_string()),
+            location: loc(),
+            change_type: ChangeType::Modified,
+            refs: Some(3),
+            test_refs: Some(0),
+            prod_refs: Some(3),
+            refs_status: None,
+            callers: Some(Section::with_total(vec![caller], 3)),
+            callers_status: None,
+            deletion: None,
+        };
+        let v = serde_json::to_value(row).unwrap();
+        assert_eq!(v["callers"]["count"], 3, "{v}");
+        assert_eq!(v["callers"]["showing"], 1, "{v}");
+        assert_eq!(v["callers"]["truncated"], true, "{v}");
+        assert_eq!(v["callers"]["items"][0]["name"], "use", "{v}");
+        assert_eq!(v["callers"]["items"][0]["call_site"]["line"], 10, "{v}");
     }
 }

@@ -582,7 +582,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::read_only(
             "get_diff_impact",
-            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals; test references are not execution coverage.",
+            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals; test references are not execution coverage. With callers, a row's callers is a list with count, showing and truncated, absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind.",
             schema_object(&[
                 ("revision", "string", "One base revision, not a revision range; default HEAD"),
                 ("staged", "boolean", "Compare staged changes instead of the working tree"),
