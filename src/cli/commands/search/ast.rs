@@ -11,7 +11,9 @@ use crate::infra::ast::{format_query_error, get_node_types, supported_languages}
 use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
 
-use crate::cli::response::disclosure::{LowerBound, as_paths, relative_paths, with_lower_bounds};
+use crate::cli::response::disclosure::{
+    Cap, LowerBound, as_paths, relative_paths, with_cap, with_lower_bounds,
+};
 
 use super::common::resolve_search_paths;
 
@@ -131,7 +133,7 @@ pub async fn execute_ast_search(
                 (!unread.is_empty()).then_some(LowerBound::ScanCouldNotReadPaths(unread)),
             );
             ctx.print_success(with_lower_bounds(
-                Section::with_total(items, total),
+                with_cap(Section::with_total(items, total), Cap::Option("--limit")),
                 &bounds,
             ));
         }

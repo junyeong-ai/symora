@@ -45,6 +45,9 @@ expression: out
           "count": 2,
           "showing": 1,
           "truncated": true,
+          "hints": [
+            "lsp.calls_limit cut this list at 1 of 2; raise calls_limit under [lsp] in .symora/config.toml to list them all"
+          ],
           "items": [
             {
               "name": "handle",

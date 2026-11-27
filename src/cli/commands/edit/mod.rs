@@ -14,6 +14,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 
 use crate::app::App;
+use crate::cli::response::disclosure::{Cap, with_cap};
 use crate::cli::response::{LineRange, Section};
 use crate::cli::utils::shell_arg;
 use crate::models::lsp::IndexingDegradation;
@@ -665,7 +666,10 @@ async fn check_dangling_references(
         )),
     );
     if total > DELETE_REFS_DISPLAY_LIMIT {
-        section = section.with_next_commands(vec![refs_command.clone()]);
+        section = with_cap(
+            section.with_next_commands(vec![refs_command.clone()]),
+            Cap::Fixed(format!("all of them: {refs_command}")),
+        );
     }
     ReferenceCheck::Checked {
         section,
@@ -913,8 +917,19 @@ async fn verify_caller_files(
     }))
     .await;
 
+    // The files past the cap are not named: they are among the files the
+    // edited declaration's references name, which its position before the
+    // edit may no longer address.
+    let rest = Cap::Fixed(
+        "the rest are among the files the edited declaration's references name; run \
+         diagnostics on each"
+            .to_string(),
+    );
     CallerVerification {
-        callers: Section::with_total(items, callers.total).with_indexing(callers.indexing),
+        callers: with_cap(
+            Section::with_total(items, callers.total).with_indexing(callers.indexing),
+            rest,
+        ),
         status: callers.status,
     }
 }

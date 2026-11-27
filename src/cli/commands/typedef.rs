@@ -3,6 +3,7 @@ use clap::Args;
 
 use crate::app::App;
 use crate::cli::LocationArg;
+use crate::cli::response::disclosure::{Cap, with_cap};
 use crate::cli::response::{LocationOutput, Section};
 
 #[derive(Args, Debug)]
@@ -39,7 +40,10 @@ pub async fn execute(args: TypedefArgs, app: &App) -> Result<()> {
                 .take(limit)
                 .map(|location| LocationOutput::from_location(location, ctx.root()))
                 .collect();
-            ctx.print_success(Section::with_total(items, total).with_indexing(result.indexing));
+            ctx.print_success(with_cap(
+                Section::with_total(items, total).with_indexing(result.indexing),
+                Cap::Option("--limit"),
+            ));
         }
         Err(e) => ctx.print_error(e),
     }

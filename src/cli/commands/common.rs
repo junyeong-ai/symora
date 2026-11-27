@@ -8,6 +8,7 @@ use crate::app::App;
 use crate::cli::analysis::{Anchor, anchor_at, anchor_on_line, resolve_anchor};
 use crate::cli::output::OutputContext;
 use crate::cli::response::Section;
+use crate::cli::response::disclosure::{Cap, with_cap};
 use crate::cli::utils::{
     AnchorResolution, SymbolResolution, ambiguity_hint, line_addressed_symbol, shell_arg,
 };
@@ -359,11 +360,12 @@ where
                 Reach::Inbound => anchor.inbound_hints(ctx.root(), subject),
                 Reach::Outbound => anchor.anchor_hints(ctx.root(), subject),
             };
-            ctx.print_success(
+            ctx.print_success(with_cap(
                 Section::with_total(output, total)
                     .with_hints(hints)
                     .with_indexing(result.indexing),
-            );
+                Cap::Option("--limit"),
+            ));
         }
         Err(e) => ctx.print_error(e),
     }

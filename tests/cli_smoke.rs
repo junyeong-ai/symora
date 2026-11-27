@@ -705,6 +705,62 @@ fn edit_reindexes_the_store_so_search_sees_the_new_content() {
     );
 }
 
+/// A list a command's own cap cut says which cap and how to see the rest;
+/// raising it as the hint says lists them all. `parse_response` holds every
+/// response the suite reads to the same: no truncated list without a hint.
+#[cfg(unix)]
+#[test]
+fn a_capped_list_names_the_cap_that_cut_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "fn one() {}\nfn two() {}\nfn three() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn four() {}\n").unwrap();
+    std::fs::create_dir_all(dir.path().join(".symora")).unwrap();
+    let run = |args: &[&str]| {
+        json_ok(
+            dir.path(),
+            &[&["--format", "compact", "--deterministic"], args].concat(),
+        )
+    };
+    let cases: [(&[&str], &str); 4] = [
+        (&["symbols", "main.rs"], ""),
+        (
+            &["search", "ast", "(function_item) @f", "--lang", "rust"],
+            "",
+        ),
+        (&["search", "content", "fn"], ""),
+        (&["map", "summary"], "/entrypoints"),
+    ];
+    for (args, list) in cases {
+        let whole = run(args);
+        let count = whole
+            .pointer(&format!("{list}/count"))
+            .unwrap()
+            .as_u64()
+            .unwrap();
+        assert!(count > 1, "{args:?}: {whole}");
+        let cut = run(&[args, &["--limit", "1"]].concat());
+        let section = cut.pointer(list).unwrap();
+        assert_eq!(section["truncated"], true, "{args:?}: {cut}");
+        let expected =
+            format!("--limit cut this list at 1 of {count}; pass --limit {count} to list them all");
+        assert!(
+            section["hints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hint| hint == &serde_json::Value::String(expected.clone())),
+            "{args:?}: {cut}"
+        );
+        let all = run(&[args, &["--limit", &count.to_string()]].concat());
+        let section = all.pointer(list).unwrap();
+        assert!(section.get("truncated").is_none(), "{args:?}: {all}");
+    }
+}
+
 /// A position past its file's end is refused, stating the file's extent,
 /// before any language server is asked: the configured server does not
 /// exist, so a command that reached it would answer `server_not_installed`.

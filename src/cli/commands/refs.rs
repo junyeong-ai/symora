@@ -4,6 +4,7 @@ use clap::Args;
 use crate::app::App;
 use crate::cli::LocationArg;
 use crate::cli::analysis::LocationAnalysis;
+use crate::cli::response::disclosure::{Cap, with_cap};
 use crate::cli::response::{LocationOutput, RefsOutput, Section, TargetOutput};
 use crate::cli::symbol_discovery::is_single_file_concentration;
 use crate::cli::utils::{read_line_at, read_lines_around, shell_arg};
@@ -109,11 +110,14 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
             hints.extend(analysis.anchor().inbound_hints(root, "references"));
             ctx.print_success(RefsOutput {
                 target,
-                references: Section::with_total(items, total)
-                    .with_hints(hints)
-                    .with_next_commands(next_commands)
-                    .with_indexing(indexing)
-                    .with_incomplete(incomplete),
+                references: with_cap(
+                    Section::with_total(items, total)
+                        .with_hints(hints)
+                        .with_next_commands(next_commands)
+                        .with_indexing(indexing)
+                        .with_incomplete(incomplete),
+                    Cap::Option("--limit"),
+                ),
             });
         }
         Err(e) => ctx.print_error(lsp_error_at(e, &ctx.relative_path(&loc.file))),

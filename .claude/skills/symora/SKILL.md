@@ -41,7 +41,7 @@ Lists carry `count`, `showing`, and `items`. These markers qualify the answer; e
 
 | Marker | Meaning and next action |
 |---|---|
-| `truncated` | Found items were omitted; narrow the query or follow the limit hint. |
+| `truncated` | Found items were omitted; the hint names the cap that cut the list and how to list the rest. Narrow the query or follow it. |
 | `incomplete` / `unread_paths` | Counts are lower bounds within the consulted sources; inspect the cause. |
 | `coverage_gaps` | Named languages were not fully searched; use the indicated source or remedy. |
 | `stale` / currency hints | The index is a snapshot; refresh before current enumeration. New files can require refresh even without stale returned rows. |

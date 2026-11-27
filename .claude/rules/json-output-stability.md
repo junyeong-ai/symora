@@ -26,7 +26,7 @@ Use `Section<T>` for enumerated sets whose length grows with the repository or f
 - `count`: total matches found in the consulted sources; a lower bound when qualified by `incomplete` or a coverage gap.
 - `showing`: number emitted in `items`.
 - `items`: whole result objects.
-- `truncated`: present and true when `showing < count`.
+- `truncated`: present and true when `showing < count`. The section's hints then say which cap cut it and how to see the rest, through `disclosure::with_cap`: the command's option raised to the count, the configuration key, or the command that lists the whole set; a list the size fitter cut carries the fitter's hint instead.
 
 In every object, the fields that qualify a list (`config_errors`, `error`, `truncated`, `stale`, `incomplete`, `indexing`, `coverage_gaps`, `unread_paths`, `unmeasured_files`, `bodies_included`, `body_omitted`, `*_status`, `*_status_counts`, `hints`, `next_commands`) precede the object's lists, so a reader that sees only the head of a response still has them. Declare output fields in that order; the output layer also emits each section's `items` last and leads with injected `config_errors`. `tests/common/mod.rs` checks every response the integration tests parse.
 

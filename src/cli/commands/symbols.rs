@@ -7,7 +7,7 @@ use futures::StreamExt;
 
 use crate::app::App;
 use crate::cli::commands::common::parse_symbol_kind;
-use crate::cli::response::disclosure::{CoverageReason, LowerBound};
+use crate::cli::response::disclosure::{Cap, CoverageReason, LowerBound, with_cap};
 use crate::cli::response::{ReferenceCount, Section, SymbolOutput, SymbolSource};
 use crate::cli::{FileSymbols, OutputError, resolve_project_file};
 use crate::constants::defaults::REFERENCE_COUNT_CONCURRENCY;
@@ -153,7 +153,10 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
             ctx.print_source(
                 FileSymbolsOutput {
                     backend: answer.backend,
-                    symbols: Section::with_total(items, total).with_hints(hints),
+                    symbols: with_cap(
+                        Section::with_total(items, total).with_hints(hints),
+                        Cap::Option("--limit"),
+                    ),
                 },
                 &body_paths,
             );

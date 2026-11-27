@@ -60,9 +60,40 @@ pub fn assert_qualifiers_lead(value: &serde_json::Value) {
     }
 }
 
-/// Parse a response and hold it to the qualifier-order contract.
+/// Every list shown short of its count says why in its own hints: the cap
+/// that cut it and how to see the rest. A list the size fitter cut is the
+/// exception, since the fitter's one hint, naming `output.max_response_chars`,
+/// lands on the response's largest list.
+pub fn assert_truncation_explained(value: &serde_json::Value) {
+    fn walk(value: &serde_json::Value, fitted: bool) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let truncated = map.get("truncated") == Some(&serde_json::Value::Bool(true))
+                    && map.get("count").is_some_and(serde_json::Value::is_u64);
+                let hinted = map
+                    .get("hints")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|hints| !hints.is_empty());
+                if truncated && !hinted && !fitted {
+                    panic!("a truncated list names no cause: {value}");
+                }
+                map.values().for_each(|child| walk(child, fitted));
+            }
+            serde_json::Value::Array(values) => values.iter().for_each(|child| walk(child, fitted)),
+            _ => {}
+        }
+    }
+    walk(
+        value,
+        value.to_string().contains("output.max_response_chars"),
+    );
+}
+
+/// Parse a response and hold it to the qualifier-order and truncation
+/// contracts.
 pub fn parse_response(stdout: &[u8]) -> serde_json::Result<serde_json::Value> {
     let value = serde_json::from_slice(stdout)?;
     assert_qualifiers_lead(&value);
+    assert_truncation_explained(&value);
     Ok(value)
 }

@@ -9,7 +9,9 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::analysis::{Constructions, callers_from_references};
 use crate::cli::errors::OutputError;
-use crate::cli::response::disclosure::{CoverageReason, DIFF_IN_PARTS, LowerBound, name_some};
+use crate::cli::response::disclosure::{
+    Cap, CoverageReason, DIFF_IN_PARTS, LowerBound, name_some, with_cap,
+};
 use crate::cli::response::{
     CallHierarchyOutput, INDEXING_DEGRADED, LocationOutput, NOT_CALLABLE, REFERENCES_DERIVED,
     ReferenceCount, Section, share,
@@ -702,13 +704,16 @@ async fn analyze_hunks(
                         callers.push(caller);
                     }
                 }
-                row.impact.callers = Some(Section::with_total(
-                    callers
-                        .iter()
-                        .take(limit)
-                        .map(|caller| CallHierarchyOutput::from_item(caller, root))
-                        .collect(),
-                    callers.len(),
+                row.impact.callers = Some(with_cap(
+                    Section::with_total(
+                        callers
+                            .iter()
+                            .take(limit)
+                            .map(|caller| CallHierarchyOutput::from_item(caller, root))
+                            .collect(),
+                        callers.len(),
+                    ),
+                    Cap::Config("lsp.calls_limit"),
                 ));
             }
             // A referencing file no reader could read leaves its
@@ -1049,14 +1054,17 @@ async fn analyze_symbol_impact(
                     (None, Some(REFERENCES_DERIVED))
                 }
                 Ok(calls) => (
-                    Some(Section::with_total(
-                        calls
-                            .data
-                            .iter()
-                            .take(app.config().lsp.calls_limit)
-                            .map(|c| CallHierarchyOutput::from_item(c, root))
-                            .collect(),
-                        calls.data.len(),
+                    Some(with_cap(
+                        Section::with_total(
+                            calls
+                                .data
+                                .iter()
+                                .take(app.config().lsp.calls_limit)
+                                .map(|c| CallHierarchyOutput::from_item(c, root))
+                                .collect(),
+                            calls.data.len(),
+                        ),
+                        Cap::Config("lsp.calls_limit"),
                     )),
                     calls.indexing.map(|_| INDEXING_DEGRADED),
                 ),

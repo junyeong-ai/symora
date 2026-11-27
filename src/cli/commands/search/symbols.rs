@@ -8,7 +8,7 @@ use crate::app::App;
 use crate::cli::OutputContext;
 use crate::cli::OutputError;
 use crate::cli::response::disclosure::{
-    DisclosureRoute, LiveLookup, LowerBound, SymbolRerun, Uncovered, WorkspaceSearchRoute,
+    Cap, DisclosureRoute, LiveLookup, LowerBound, SymbolRerun, Uncovered, WorkspaceSearchRoute,
     coverage_shortfall, index_currency_disclosure, index_holes_bound, index_unavailable_disclosure,
     literal_query, ordered_bounds, path_flags, relative_stale_files, unindexed_live_disclosure,
     with_coverage_disclosure, workspace_route_for,
@@ -815,8 +815,7 @@ fn finish_symbol_search(
     rank_symbol_results(&mut candidates, search.query, test_scope);
     candidates.truncate(search.limit);
 
-    let truncated = candidates.len() < count;
-    let hints = symbol_search_hints(search, truncated, candidates.len());
+    let hints = symbol_search_hints(search, count, candidates.len());
     let next_commands = symbol_search_next_commands(&candidates, search);
     Section::with_total(candidates, count)
         .with_hints(hints)
@@ -1606,9 +1605,10 @@ fn kind_matches(
 
 fn symbol_search_hints(
     search: &SymbolSearch<'_>,
-    truncated: bool,
+    count: usize,
     result_count: usize,
 ) -> Vec<String> {
+    let truncated = result_count < count;
     if result_count <= 1 && !truncated {
         return Vec::new();
     }
@@ -1620,7 +1620,7 @@ fn symbol_search_hints(
     // neither, so prescribing it would send an agent after results that
     // cannot arrive.
     if truncated && result_count >= search.limit {
-        hints.push("Narrow results with a longer query or increase --limit".to_string());
+        hints.push(Cap::Option("--limit").hint(result_count, count));
     }
     if !looks_like_symbol_path(search.query) {
         hints.push("Query a path such as Class/method or */update for precise matches".to_string());
@@ -1767,7 +1767,7 @@ mod tests {
 
     #[test]
     fn symbol_hints_are_empty_for_exact_single_result() {
-        let hints = symbol_search_hints(&search("SearchCommand/Content", 10), false, 1);
+        let hints = symbol_search_hints(&search("SearchCommand/Content", 10), 1, 1);
         assert!(hints.is_empty());
     }
 

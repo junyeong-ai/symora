@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::OutputError;
-use crate::cli::response::disclosure::{as_paths, relative_paths};
+use crate::cli::response::disclosure::{Cap, as_paths, relative_paths, with_cap};
 use crate::cli::response::{Section, SymbolOutput};
 use crate::cli::utils::shell_arg;
 use crate::constants::defaults;
@@ -160,14 +160,15 @@ struct FocusSymbolOutput {
     child_count: usize,
 }
 
-/// A list a limit cut, carrying the size of what it cut from. Truncating
-/// here and nowhere else keeps `count` describing the set the items were
-/// drawn from — a list that reports only what survived reads as the whole
-/// of a directory, of a project's entrypoints, or of a file's neighbours.
-fn limited<T>(mut items: Vec<T>, limit: usize) -> Section<T> {
+/// A list a limit cut, carrying the size of what it cut from and the cap
+/// that cut it. Truncating here and nowhere else keeps `count` describing
+/// the set the items were drawn from — a list that reports only what
+/// survived reads as the whole of a directory, of a project's entrypoints,
+/// or of a file's neighbours.
+fn limited<T>(mut items: Vec<T>, limit: usize, cap: Cap) -> Section<T> {
     let total = items.len();
     items.truncate(limit);
-    Section::with_total(items, total)
+    with_cap(Section::with_total(items, total), cap)
 }
 
 pub async fn execute(args: MapArgs, app: &App) -> Result<()> {
@@ -238,8 +239,12 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
             .then_with(|| a.path.cmp(&b.path))
     });
 
-    let top_directories = limited(directories, limit);
-    let entrypoints = limited(detect_entrypoints(&code_records), limit);
+    let top_directories = limited(directories, limit, Cap::Option("--limit"));
+    let entrypoints = limited(
+        detect_entrypoints(&code_records),
+        limit,
+        Cap::Option("--limit"),
+    );
     let next_commands = map_summary_next_commands(&entrypoints.items);
 
     let response = MapSummaryOutput {
@@ -297,10 +302,14 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
                     out.without_children()
                 })
                 .collect();
+            let every = Cap::Fixed(format!(
+                "every declaration: symora symbols -- {}",
+                shell_arg(&target.rel_path)
+            ));
             (
                 Some(answer.backend),
                 Some(focus_symbols),
-                Section::with_total(items, total),
+                with_cap(Section::with_total(items, total), every),
             )
         }
         Err(e) => (None, None, Section::error(e)),
@@ -325,7 +334,14 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
         unread_paths,
         focus_symbols,
         backend,
-        siblings: limited(siblings, 8),
+        siblings: limited(
+            siblings,
+            8,
+            Cap::Fixed(match target.parent.as_str() {
+                "" => "the rest are the other files at the project root".to_string(),
+                parent => format!("the rest are the other files in {parent}/"),
+            }),
+        ),
         counterpart_files,
         symbols,
         related_files,

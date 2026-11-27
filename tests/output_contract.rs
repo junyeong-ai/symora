@@ -22,6 +22,7 @@ use symora::cli::commands::diff_impact::{
     ChangeType, ChangedSymbolImpact, DeletionResolution, DiffCoverage, DiffImpactOutput,
 };
 use symora::cli::errors::{ErrorCode, OutputError};
+use symora::cli::response::disclosure::{Cap, with_cap};
 use symora::cli::response::{
     ActionOutput, AffectedFileOutput, ApplyActionOutput, CallHierarchyOutput, CoverageGap,
     DefinitionOutput, DiagnosticOutput, EditOutput, FileChangeOutput, HoverOutput, ImpactOutput,
@@ -797,9 +798,9 @@ fn diff_impact_output_with_status_counts_and_derived_callers() {
                 test_refs: Some(1),
                 prod_refs: Some(2),
                 callers_status: Some("references_derived"),
-                callers: Some(Section::with_total(
-                    vec![CallHierarchyOutput::from_item(&caller, &root())],
-                    2,
+                callers: Some(with_cap(
+                    Section::with_total(vec![CallHierarchyOutput::from_item(&caller, &root())], 2),
+                    Cap::Config("lsp.calls_limit"),
                 )),
                 ..row("process", "function", 12)
             },

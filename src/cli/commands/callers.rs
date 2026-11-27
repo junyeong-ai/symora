@@ -9,6 +9,7 @@ use crate::app::App;
 use crate::cli::LocationArg;
 use crate::cli::analysis::{callers_from_references, constructions_of};
 use crate::cli::declarations_of;
+use crate::cli::response::disclosure::{Cap, with_cap};
 use crate::cli::response::{CallHierarchyOutput, NOT_CALLABLE, REFERENCES_DERIVED, Section};
 use crate::error::LspError;
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
@@ -140,9 +141,12 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
         .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
         .collect();
     ctx.print_success(CallersOutput {
-        section: Section::with_total(items, total)
-            .with_hints(hints)
-            .with_indexing(indexing),
+        section: with_cap(
+            Section::with_total(items, total)
+                .with_hints(hints)
+                .with_indexing(indexing),
+            Cap::Option("--limit"),
+        ),
         callers_status: derived.then_some(REFERENCES_DERIVED),
     });
     Ok(())

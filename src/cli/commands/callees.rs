@@ -23,6 +23,7 @@ use crate::app::App;
 use crate::cli::analysis::Anchor;
 use crate::cli::call_graph::{self, Direction, NodeKey, WalkConfig, key_of};
 use crate::cli::commands::common::{Reach, anchor_of, execute_list};
+use crate::cli::response::disclosure::{Cap, with_cap};
 use crate::cli::response::{CallHierarchyOutput, LocationOutput, NOT_CALLABLE, Section};
 use crate::cli::utils::shell_arg;
 use crate::cli::{LocationArg, ParsedLocation};
@@ -230,10 +231,13 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
     let hints = anchor.anchor_hints(ctx.root(), "callees");
 
     ctx.print_success(CalleesReachOutput {
-        section: Section::with_total(items, total)
-            .with_hints(hints)
-            .with_indexing(walk.indexing)
-            .with_incomplete(walk.is_lower_bound()),
+        section: with_cap(
+            Section::with_total(items, total)
+                .with_hints(hints)
+                .with_indexing(walk.indexing)
+                .with_incomplete(walk.is_lower_bound()),
+            Cap::Option("--limit"),
+        ),
         depth: walk.depth_reached(),
         max_depth_reached: walk.max_depth_reached,
         callees_truncated: walk.truncated,

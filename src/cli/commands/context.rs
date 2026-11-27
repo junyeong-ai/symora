@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::analysis::{LocationAnalysis, callables_holding};
+use crate::cli::response::disclosure::{Cap, with_cap};
 use crate::cli::response::{
     BodyOmission, CallHierarchyOutput, LocationOutput, RefOutput, Section, TargetOutput,
     TestOutput, TypeInfoOutput,
@@ -436,14 +437,17 @@ async fn fetch_calls(
                 .strip_prefix(root)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| file.display().to_string());
-            Section::with_total(items, total)
-                .with_next_commands(call_hierarchy_next_commands(
-                    incoming, &file_rel, line, column, total, limit,
-                ))
-                // The same computation-time marker every cross-file
-                // section carries: a cold-start caller/callee list is a
-                // lower bound and must say so.
-                .with_indexing(calls.indexing)
+            with_cap(
+                Section::with_total(items, total)
+                    .with_next_commands(call_hierarchy_next_commands(
+                        incoming, &file_rel, line, column, total, limit,
+                    ))
+                    // The same computation-time marker every cross-file
+                    // section carries: a cold-start caller/callee list is a
+                    // lower bound and must say so.
+                    .with_indexing(calls.indexing),
+                Cap::Config("lsp.calls_limit"),
+            )
         }
         Err(e) => Section::error(format_call_hierarchy_error(
             &e.to_string(),
@@ -591,7 +595,10 @@ async fn fetch_tests(
 
     let found = items.len();
     items.truncate(limit);
-    Section::with_total(items, found)
+    with_cap(
+        Section::with_total(items, found),
+        Cap::Config("lsp.tests_limit"),
+    )
 }
 
 #[cfg(test)]

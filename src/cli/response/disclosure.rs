@@ -673,6 +673,52 @@ pub fn path_flags(within: &[PathBuf]) -> String {
         .collect()
 }
 
+/// What cut a list's items short of its count. `truncated` says only that
+/// fewer were shown than counted; the hint this makes says which cap did it
+/// and how to see the rest, which differ by where the cap is set. The count
+/// stays exact, so the remedy can name it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Cap {
+    /// The command's own option, such as `--limit`, which the caller raises.
+    Option(&'static str),
+    /// A configuration key, `section.key`, the command has no option for.
+    Config(&'static str),
+    /// A fixed cap. The remedy is the clause naming what lists the rest,
+    /// ending with the command that does, so it can be followed as written.
+    Fixed(String),
+}
+
+impl Cap {
+    pub fn hint(&self, showing: usize, count: usize) -> String {
+        match self {
+            Self::Option(option) => format!(
+                "{option} cut this list at {showing} of {count}; pass {option} {count} to list \
+                 them all"
+            ),
+            Self::Config(key) => {
+                let (section, name) = key
+                    .split_once('.')
+                    .expect("a configuration key is section.key");
+                format!(
+                    "{key} cut this list at {showing} of {count}; raise {name} under \
+                     [{section}] in .symora/config.toml to list them all"
+                )
+            }
+            Self::Fixed(remedy) => format!("This list stops at {showing} of {count}; {remedy}"),
+        }
+    }
+}
+
+/// Say what cut a list short of its count, after the section's own advice,
+/// which leads with what makes the count itself a lower bound. A list shown
+/// whole is left alone.
+pub fn with_cap<T>(mut section: Section<T>, cap: Cap) -> Section<T> {
+    if section.truncated {
+        section.hints.push(cap.hint(section.showing, section.count));
+    }
+    section
+}
+
 /// How much advice one answer carries. Two facts and two remedies is what an
 /// agent acts on; a reader that has to pick from six picks none.
 const ADVICE_LIMIT: usize = 2;
@@ -1115,6 +1161,43 @@ pub fn relative_paths(ctx: &OutputContext, paths: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A list cut short of its count says what cut it and how to see the
+    /// rest, after its own advice; one shown whole says nothing.
+    #[test]
+    fn a_capped_list_names_its_cap_and_how_to_see_the_rest() {
+        let capped = |cap| {
+            with_cap(
+                Section::with_total(vec![1, 2], 7).with_hints(vec!["own".to_string()]),
+                cap,
+            )
+            .hints
+        };
+        assert_eq!(
+            capped(Cap::Option("--limit")),
+            [
+                "own",
+                "--limit cut this list at 2 of 7; pass --limit 7 to list them all"
+            ]
+        );
+        assert_eq!(
+            capped(Cap::Config("lsp.calls_limit"))[1],
+            "lsp.calls_limit cut this list at 2 of 7; raise calls_limit under [lsp] in \
+             .symora/config.toml to list them all"
+        );
+        let fixed = &capped(Cap::Fixed(format!(
+            "every declaration: symora symbols -- {}",
+            shell_arg("src/a b.rs")
+        )))[1];
+        assert_eq!(
+            fixed,
+            "This list stops at 2 of 7; every declaration: symora symbols -- 'src/a b.rs'"
+        );
+        crate::cli::assert_named_commands_parse(fixed);
+
+        let whole = with_cap(Section::new(vec![1, 2]), Cap::Option("--limit"));
+        assert!(whole.hints.is_empty());
+    }
 
     fn rerun(query: &str) -> SymbolRerun<'_> {
         SymbolRerun {

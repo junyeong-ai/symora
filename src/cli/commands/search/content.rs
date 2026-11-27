@@ -9,7 +9,7 @@ use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
 
 use crate::cli::response::disclosure::{
-    LowerBound, as_paths, index_currency_disclosure, index_holes_bound,
+    Cap, LowerBound, as_paths, index_currency_disclosure, index_holes_bound,
     index_unavailable_disclosure, ordered_bounds, relative_paths, relative_stale_files,
     with_lower_bounds,
 };
@@ -473,7 +473,7 @@ fn content_search_hints(
     // on the symbol side. A count above the rows can come from a source total
     // larger than the rows in hand, which no `--limit` reaches.
     if truncated && count_shown >= limit {
-        hints.push("Narrow results with a longer query phrase or increase --limit".to_string());
+        hints.push(Cap::Option("--limit").hint(count_shown, count));
     }
     if search_scope.language().is_none() {
         hints.push("Add --lang to limit content search to one language".to_string());
