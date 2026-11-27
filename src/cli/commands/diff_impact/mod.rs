@@ -7,15 +7,17 @@ use futures::StreamExt;
 use serde::Serialize;
 
 use crate::app::App;
+use crate::cli::analysis::callers_from_references;
 use crate::cli::response::disclosure::{CoverageReason, LowerBound, name_some};
 use crate::cli::response::{
-    CallHierarchyOutput, INDEXING_DEGRADED, LocationOutput, ReferenceCount, Section,
+    CallHierarchyOutput, INDEXING_DEGRADED, LocationOutput, NOT_CALLABLE, REFERENCES_DERIVED,
+    ReferenceCount, Section,
 };
 use crate::cli::utils::{members_at_deletion, members_at_line, shell_arg};
 use crate::cli::{FileSymbols, SymbolBackend, declared_in};
 use crate::constants::defaults::REFERENCE_COUNT_CONCURRENCY;
 use crate::models::lsp::FindSymbolsOptions;
-use crate::models::symbol::{Language, Symbol, SymbolKind};
+use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 use crate::services::symbols::{SymbolExtractor, TypeHeaders};
 
 mod git;
@@ -36,9 +38,18 @@ pub struct DiffImpactArgs {
     #[arg(long)]
     pub staged: bool,
 
-    /// Include caller analysis for changed symbols
+    /// List each added or modified function's, method's and constructor's
+    /// callers: the callables whose code holds one of the references its
+    /// count was taken from, with no second search
+    /// (`callers_status: references_derived`)
     #[arg(long)]
     pub callers: bool,
+
+    /// Ask every added or modified symbol's callers of the language server's
+    /// call hierarchy instead, a second workspace search per symbol; implies
+    /// --callers
+    #[arg(long)]
+    pub call_hierarchy: bool,
 
     /// Maximum added and modified symbols whose references are counted, and
     /// apart from them, deleted symbols listed (0 = unlimited): a deletion,
@@ -298,7 +309,14 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         unmeasured: unreadable,
         capped,
         ..
-    } = analyze_hunks(app, &hunks, base.tree_ish(), args.callers, args.max_symbols).await;
+    } = analyze_hunks(
+        app,
+        &hunks,
+        base.tree_ish(),
+        CallerSource::asked(&args),
+        args.max_symbols,
+    )
+    .await;
     unmeasured.extend(unreadable);
     let mut listed = HashSet::new();
     unmeasured.retain(|file| listed.insert(file.clone()));
@@ -482,17 +500,48 @@ impl Plan {
     }
 }
 
+/// Where `--callers` reads each row's callers from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallerSource {
+    /// The references the row's count was taken from: the callables whose
+    /// code holds one, for a row that is itself a function, method or
+    /// constructor. No query beyond the reference count is made.
+    References,
+    /// The language server's incoming calls, asked at the row's position:
+    /// a second workspace search per row, beside the reference count's.
+    CallHierarchy,
+}
+
+impl CallerSource {
+    fn asked(args: &DiffImpactArgs) -> Option<Self> {
+        if args.call_hierarchy {
+            Some(Self::CallHierarchy)
+        } else {
+            args.callers.then_some(Self::References)
+        }
+    }
+}
+
+/// A row once its references were asked: what is still to be read off them.
+struct Measured {
+    impact: ChangedSymbolImpact,
+    /// The references its callers are read off, where they are derived.
+    derive_from: Option<Vec<Location>>,
+}
+
 /// The diff's changed symbols, their live rows measured with a bounded
 /// number of reference queries in flight, as `symbols --refs` measures a
 /// file's: asked one after another, each row waits on every query before
 /// it, and a server that answers in parallel spends the shared
 /// `lsp.timeout_secs` budget on one query at a time. Rows keep the order
-/// they were planned in.
+/// they were planned in. Callers derived from references are read once
+/// every count is taken, each referencing file's declarations read once
+/// for all of the rows its references are to.
 async fn analyze_hunks(
     app: &App,
     hunks: &[DiffHunk],
     preimage_ref: &str,
-    include_callers: bool,
+    callers: Option<CallerSource>,
     max_symbols: usize,
 ) -> HunkAnalysis {
     let Plan {
@@ -503,10 +552,13 @@ async fn analyze_hunks(
         ..
     } = plan_hunks(app, hunks, preimage_ref, max_symbols).await;
     let answers = &answers;
-    let changes = futures::stream::iter(rows)
+    let mut measured: Vec<Measured> = futures::stream::iter(rows)
         .map(|row| async move {
             match row {
-                Row::Settled(impact) => impact,
+                Row::Settled(impact) => Measured {
+                    impact,
+                    derive_from: None,
+                },
                 Row::Live {
                     answer,
                     file,
@@ -519,7 +571,7 @@ async fn analyze_hunks(
                         &file,
                         &symbol,
                         change_type,
-                        include_callers,
+                        callers,
                     )
                     .await
                 }
@@ -528,8 +580,50 @@ async fn analyze_hunks(
         .buffered(REFERENCE_COUNT_CONCURRENCY)
         .collect()
         .await;
+
+    let referencing: BTreeSet<PathBuf> = measured
+        .iter()
+        .filter_map(|row| row.derive_from.as_ref())
+        .flatten()
+        .map(|reference| reference.file.clone())
+        .collect();
+    let declarations: HashMap<PathBuf, Option<Vec<Symbol>>> = futures::stream::iter(referencing)
+        .map(|file| async move {
+            let read = declared_in(app, &file, FindSymbolsOptions::default().with_depth(10))
+                .await
+                .ok()
+                .map(|read| read.symbols);
+            (file, read)
+        })
+        .buffer_unordered(REFERENCE_COUNT_CONCURRENCY)
+        .collect()
+        .await;
+    let root = app.output.root();
+    let limit = app.config().lsp.calls_limit;
+    for row in &mut measured {
+        let Some(references) = row.derive_from.take() else {
+            continue;
+        };
+        match callers_from_references(&references, |file| {
+            declarations.get(file).and_then(|read| read.as_deref())
+        }) {
+            Some(found) => {
+                row.impact.callers = Some(Section::with_total(
+                    found
+                        .iter()
+                        .take(limit)
+                        .map(|caller| CallHierarchyOutput::from_item(caller, root))
+                        .collect(),
+                    found.len(),
+                ));
+            }
+            // A referencing file no reader could read leaves its
+            // references' callers unknown.
+            None => row.impact.callers_status = Some(CoverageReason::Unavailable.as_str()),
+        }
+    }
     HunkAnalysis {
-        changes,
+        changes: measured.into_iter().map(|row| row.impact).collect(),
         unmeasured,
         capped,
     }
@@ -803,24 +897,33 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
 }
 
 /// A live changed symbol's row: its references asked where the language
-/// server reads it, as `symbols --refs` asks them, and its callers asked at
-/// that same position.
+/// server reads it, as `symbols --refs` asks them, and with `--callers` the
+/// references to read its callers off, or with `--call-hierarchy` its
+/// callers asked at that same position.
 async fn analyze_symbol_impact(
     app: &App,
     answer: &FileSymbols,
     file: &Path,
     sym: &Symbol,
     change_type: ChangeType,
-    include_callers: bool,
-) -> ChangedSymbolImpact {
+    callers: Option<CallerSource>,
+) -> Measured {
     let lsp = app.lsp.as_ref();
     let root = app.output.root();
     let outcome = answer.references_of(lsp, file, sym, root).await;
     let count = ReferenceCount::of(&outcome, app.test_scope());
 
-    let (callers, callers_status) = match (&outcome, include_callers) {
-        (_, false) => (None, None),
-        (Ok(Some(analysis)), true) => {
+    let mut derive_from = None;
+    let (callers, callers_status) = match (callers, &outcome) {
+        (None, _) => (None, None),
+        (Some(CallerSource::References), _) if !sym.kind.is_callable() => {
+            (None, Some(NOT_CALLABLE))
+        }
+        (Some(CallerSource::References), Ok(Some(analysis))) => {
+            derive_from = Some(analysis.references().to_vec());
+            (None, Some(REFERENCES_DERIVED))
+        }
+        (Some(CallerSource::CallHierarchy), Ok(Some(analysis))) => {
             let anchor = analysis.anchor();
             match lsp
                 .incoming_calls(&anchor.file, anchor.line, anchor.column)
@@ -841,7 +944,7 @@ async fn analyze_symbol_impact(
                 Err(error) => (None, Some(CoverageReason::of(&error).as_str())),
             }
         }
-        (_, true) => (None, Some(CoverageReason::Unavailable.as_str())),
+        (Some(_), _) => (None, Some(CoverageReason::Unavailable.as_str())),
     };
 
     let (refs, test_refs, prod_refs) = match count {
@@ -850,18 +953,21 @@ async fn analyze_symbol_impact(
         } => (Some(total), Some(test), Some(prod)),
         ReferenceCount::Missing(_) => (None, None, None),
     };
-    ChangedSymbolImpact {
-        name: Some(sym.name.clone()),
-        kind: Some(sym.kind.to_string()),
-        location: LocationOutput::from_path(file, sym.location.line, sym.location.column, root),
-        change_type,
-        refs,
-        test_refs,
-        prod_refs,
-        refs_status: count.status(),
-        callers,
-        callers_status,
-        deletion: None,
+    Measured {
+        impact: ChangedSymbolImpact {
+            name: Some(sym.name.clone()),
+            kind: Some(sym.kind.to_string()),
+            location: LocationOutput::from_path(file, sym.location.line, sym.location.column, root),
+            change_type,
+            refs,
+            test_refs,
+            prod_refs,
+            refs_status: count.status(),
+            callers,
+            callers_status,
+            deletion: None,
+        },
+        derive_from,
     }
 }
 

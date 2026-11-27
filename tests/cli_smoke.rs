@@ -2515,6 +2515,131 @@ fn the_summary_counts_the_rows_of_each_reference_status() {
     assert!(page.get("refs_status").is_none(), "{page}");
 }
 
+/// A source the reference fixture serves: `target` is a function, `Shape` a
+/// class, both changed; `b.py` imports both at module level, calls `target`
+/// from `use`, passes it as a value from `keep`, and builds a `Shape` in
+/// `make`.
+#[cfg(unix)]
+fn repo_with_changed_callables() -> Option<tempfile::TempDir> {
+    let callers = "from a import target, Shape\n\n\ndef use():\n    return target()\n\n\n\
+                   def make() -> Shape:\n    return Shape()\n\n\ndef keep():\n    \
+                   register(target)\n";
+    reference_served_repo(&[
+        (
+            "a.py",
+            "def target():\n    return 1\n\n\nclass Shape:\n    size = 1\n",
+            "def target():\n    return 2\n\n\nclass Shape(object):\n    size = 1\n",
+        ),
+        ("b.py", callers, callers),
+    ])
+}
+
+/// The changed rows of a page by name: their callers status, and their
+/// callers' names with each call site's line.
+#[cfg(unix)]
+fn callers_by_row(page: &serde_json::Value) -> Vec<(String, Option<String>, Vec<(String, u64)>)> {
+    page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|row| {
+            let items = row["callers"]["items"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            (
+                row["name"].as_str().unwrap().to_string(),
+                row["callers_status"].as_str().map(str::to_string),
+                items
+                    .iter()
+                    .map(|item| {
+                        (
+                            item["name"].as_str().unwrap().to_string(),
+                            item["call_site"]["line"].as_u64().unwrap(),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// `--callers` reads a changed function's callers off the references its
+/// count was taken from, without asking the server's call hierarchy: every
+/// callable holding one of them, once, at the first it holds. The
+/// module-level import holds none, so it names no caller; a type's
+/// references are uses rather than calls, so a class row names none and says
+/// why.
+#[cfg(unix)]
+#[test]
+fn callers_are_read_off_the_references_counted() {
+    let Some(dir) = repo_with_changed_callables() else {
+        return;
+    };
+    let repo = dir.path();
+    let page = diff_impact_in_process(repo, &["--callers"]);
+    assert_eq!(
+        callers_by_row(&page),
+        [
+            (
+                "target".to_string(),
+                Some("references_derived".to_string()),
+                vec![("use".to_string(), 5), ("keep".to_string(), 13)]
+            ),
+            (
+                "Shape".to_string(),
+                Some("not_callable".to_string()),
+                vec![]
+            ),
+        ],
+        "{page}"
+    );
+    assert_eq!(page["changes"][0]["callers"]["count"], 2, "{page}");
+    assert!(page["changes"][1].get("callers").is_none(), "{page}");
+    assert_eq!(
+        page["callers_status_counts"],
+        serde_json::json!({"not_callable": 1, "references_derived": 1}),
+        "{page}"
+    );
+    let asked = std::fs::read_to_string(repo.join(".symora/log")).unwrap();
+    assert!(
+        !asked.contains("callHierarchy"),
+        "no call hierarchy is asked: {asked}"
+    );
+}
+
+/// `--call-hierarchy` asks the server's call hierarchy for every changed
+/// symbol instead, the class's included: this fake, as pyright does, names
+/// the calls alone, so the function passed as a value from `keep` is no
+/// caller here, and the class's construction in `make` is one.
+#[cfg(unix)]
+#[test]
+fn call_hierarchy_asks_the_server_for_every_changed_symbol() {
+    let Some(dir) = repo_with_changed_callables() else {
+        return;
+    };
+    let repo = dir.path();
+    let page = diff_impact_in_process(repo, &["--call-hierarchy"]);
+    assert_eq!(
+        callers_by_row(&page),
+        [
+            ("target".to_string(), None, vec![("use".to_string(), 5)]),
+            ("Shape".to_string(), None, vec![("make".to_string(), 9)]),
+        ],
+        "{page}"
+    );
+    assert!(page.get("callers_status_counts").is_none(), "{page}");
+    let asked = std::fs::read_to_string(repo.join(".symora/log")).unwrap();
+    assert_eq!(
+        asked
+            .lines()
+            .filter(|line| line.starts_with("callHierarchy/incomingCalls"))
+            .count(),
+        2,
+        "{asked}"
+    );
+}
+
 /// A diff's changed symbols are read through the same reader every other
 /// surface uses, so a language with no server still reports WHAT changed.
 /// Reference counts stay absent and say so — a count no server can supply is

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -7,10 +7,11 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::LocationArg;
-use crate::cli::response::{CallHierarchyOutput, Section};
+use crate::cli::analysis::callers_from_references;
+use crate::cli::response::{CallHierarchyOutput, REFERENCES_DERIVED, Section};
 use crate::error::LspError;
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
-use crate::services::lsp::find_containing_callable;
+use crate::models::symbol::{Location, Symbol};
 
 #[derive(Args, Debug)]
 pub struct CallersArgs {
@@ -88,7 +89,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
                         section: Section::with_total(items, total_refs)
                             .with_hints(anchor.inbound_hints(ctx.root(), "callers"))
                             .with_indexing(indexing),
-                        callers_status: Some("references_derived"),
+                        callers_status: Some(REFERENCES_DERIVED),
                     });
                 }
                 Err(e) => ctx.print_error(e),
@@ -101,11 +102,13 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
 }
 
 /// Derive callers from plain references when the server lacks call
-/// hierarchy. Returns up to `limit` caller items plus the exact count of
-/// *unique callers* found — the same domain as the items, never the raw
-/// reference count (several references inside one caller are one caller)
-/// — and the indexing state the reference query ran under, so the
-/// fallback's marker is as computation-time-accurate as the direct path's.
+/// hierarchy, as `diff-impact --callers` derives them
+/// ([`callers_from_references`]). Returns up to `limit` caller items plus
+/// the exact count of *unique callers* found — the same domain as the
+/// items, never the raw reference count (several references inside one
+/// caller are one caller) — and the indexing state the reference query ran
+/// under, so the fallback's marker is as computation-time-accurate as the
+/// direct path's.
 async fn fallback_from_refs(
     app: &App,
     file: &Path,
@@ -122,48 +125,31 @@ async fn fallback_from_refs(
 > {
     let refs = app.lsp.find_references(file, line, column).await?;
     let indexing = refs.indexing;
+    let references: Vec<Location> = refs
+        .data
+        .into_iter()
+        .filter(|reference| !reference.covers(file, line, column))
+        .collect();
 
-    let mut seen = HashSet::new();
-    let mut callers = Vec::new();
-    let mut symbol_cache: HashMap<PathBuf, Vec<crate::models::symbol::Symbol>> = HashMap::new();
-
-    for ref_loc in refs.data {
-        if ref_loc.covers(file, line, column) {
-            continue;
-        }
-
-        let symbols = match symbol_cache.get(&ref_loc.file) {
-            Some(cached) => cached,
-            None => {
-                let fetched = app
-                    .lsp
-                    .find_symbols(&ref_loc.file, FindSymbolsOptions::default().with_depth(10))
-                    .await?;
-                symbol_cache.entry(ref_loc.file.clone()).or_insert(fetched)
-            }
-        };
-
-        if let Some(caller) = find_containing_callable(symbols, ref_loc.line) {
-            let key = (
-                caller.name.clone(),
-                caller.location.file.clone(),
-                caller.location.line,
-            );
-
-            // Keep counting unique callers past the emission cap so the
-            // reported total stays exact; only storage is capped.
-            if seen.insert(key) && callers.len() < limit {
-                callers.push(CallHierarchyItem {
-                    name: caller.name.clone(),
-                    kind: caller.kind,
-                    location: caller.location.clone(),
-                    call_site: Some(ref_loc),
-                });
-            }
+    let mut symbols: HashMap<PathBuf, Vec<Symbol>> = HashMap::new();
+    for reference in &references {
+        if !symbols.contains_key(&reference.file) {
+            let fetched = app
+                .lsp
+                .find_symbols(
+                    &reference.file,
+                    FindSymbolsOptions::default().with_depth(10),
+                )
+                .await?;
+            symbols.insert(reference.file.clone(), fetched);
         }
     }
-
-    Ok((callers, seen.len(), indexing))
+    let mut callers =
+        callers_from_references(&references, |file| symbols.get(file).map(Vec::as_slice))
+            .expect("every referencing file's symbols were read");
+    let total = callers.len();
+    callers.truncate(limit);
+    Ok((callers, total, indexing))
 }
 
 #[cfg(test)]
@@ -185,7 +171,7 @@ mod tests {
     fn references_derived_fallback_marks_callers_status() {
         let output = CallersOutput {
             section: Section::with_total(Vec::<CallHierarchyOutput>::new(), 0),
-            callers_status: Some("references_derived"),
+            callers_status: Some(REFERENCES_DERIVED),
         };
         let value = serde_json::to_value(output).unwrap();
         assert_eq!(value["callers_status"], "references_derived");

@@ -115,6 +115,8 @@ struct DiffImpactInput {
     staged: bool,
     #[serde(default)]
     callers: bool,
+    #[serde(default)]
+    call_hierarchy: bool,
     #[serde(default = "default_max_symbols")]
     max_symbols: usize,
 }
@@ -134,6 +136,7 @@ async fn run_diff_impact(args: Value, app: &App) -> Result<CapturedOutput> {
                 revision: input.revision,
                 staged: input.staged,
                 callers: input.callers,
+                call_hierarchy: input.call_hierarchy,
                 max_symbols: input.max_symbols,
             },
             &app,
@@ -945,7 +948,13 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
             "body_tokens",
         ],
         "get_impact" => &["file", "line", "column", "limit", "depth"],
-        "get_diff_impact" => &["revision", "staged", "callers", "max_symbols"],
+        "get_diff_impact" => &[
+            "revision",
+            "staged",
+            "callers",
+            "call_hierarchy",
+            "max_symbols",
+        ],
         "get_diagnostics" => &[
             "file",
             "severity",

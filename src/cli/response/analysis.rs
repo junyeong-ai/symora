@@ -136,6 +136,16 @@ pub struct RefsOutput {
 /// makes it a lower bound.
 pub const INDEXING_DEGRADED: &str = "indexing_degraded";
 
+/// The `callers_status` of callers read off the references to a symbol
+/// rather than asked of the server's call hierarchy: the callables whose
+/// code holds one, which a call or a use as a value both make one.
+pub const REFERENCES_DERIVED: &str = "references_derived";
+
+/// The `callers_status` of a changed symbol that is no function, method or
+/// constructor, whose references are uses rather than calls, so none names a
+/// caller.
+pub const NOT_CALLABLE: &str = "not_callable";
+
 /// A listed declaration's reference counts, as a `symbols --refs` or
 /// `diff-impact` row carries them, or why none was taken.
 pub enum ReferenceCount {

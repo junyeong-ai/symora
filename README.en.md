@@ -85,7 +85,7 @@ flowchart TD
     G --> H[("Structured JSON")]
 ```
 
-- **Two backends, different needs.** Index and `search ast`/`map` work with no language server. `symbols` and `map file` answer from the server's tree when one serves and from the compiled-in grammar when not, and say which in `backend` (`document` | `ast`); a `symbols --symbol` path the server's tree holds nothing on is answered from the grammar's reading of the file where that reading holds it. The other LSP-backed commands (`refs`, `callers`, `context`, `impact`, `rename`, …) need the server for the target language, and when a server lacks a capability they degrade *honestly* — a structured `unsupported` response, or a fallback that says it is one (`callers` without call hierarchy marks `callers_status: "references_derived"`) — never a silently-wrong answer.
+- **Two backends, different needs.** Index and `search ast`/`map` work with no language server. `symbols` and `map file` answer from the server's tree when one serves and from the compiled-in grammar when not, and say which in `backend` (`document` | `ast`); a `symbols --symbol` path the server's tree holds nothing on is answered from the grammar's reading of the file where that reading holds it. The other LSP-backed commands (`refs`, `callers`, `context`, `impact`, `rename`, …) need the server for the target language, and when a server lacks a capability they degrade *honestly* — a structured `unsupported` response, or a fallback that says it is one (`callers` without call hierarchy marks `callers_status: "references_derived"`, as `diff-impact --callers` marks the callers it reads off the references it counted) — never a silently-wrong answer.
 - **The daemon is automatic.** On Unix, Symora keeps language-server sessions warm across invocations so the second call is fast. Set `SYMORA_NO_DAEMON=1` to run in-process; a sandbox that cannot write the daemon directory (`~/.symora`), a home too deep for the daemon's socket path to fit a Unix socket's limit, or a `HOME` or `XDG_CONFIG_HOME` given as a relative path runs in-process on its own. For the same source and language-server state, both modes give the same answer.
 
 ---
@@ -348,6 +348,8 @@ symora context src/services/checkout.ts:48 --callees --types --with-bodies   # w
 symora impact src/services/checkout.ts:48           # change blast radius
 symora diff-impact                                  # impact of tracked changes in the working tree against HEAD, staged or not
 symora diff-impact $(git merge-base main HEAD)      # impact of what this branch changed (a range A..B is refused)
+symora diff-impact --callers                        # plus each changed function's callers, read off the references counted
+symora diff-impact --call-hierarchy                 # callers from the server's call hierarchy instead (a search per symbol)
 
 # Edit & refactor (mutations preview with --dry-run)
 symora edit replace-body <file> --symbol 'Class/method' --body - --dry-run < new.ts

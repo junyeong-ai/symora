@@ -13,15 +13,17 @@
 //! type holds, so the count `refs`, `impact`, and `context` publish under
 //! the same name is the same number.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::cli::ParsedLocation;
 use crate::cli::utils::{
     AnchorResolution, RefsClassification, SymbolResolution, ambiguity_hint,
-    column_addressed_symbol, find_named_at_position, holder_of, line_addressed_symbol,
+    column_addressed_symbol, enclosing_callable, find_named_at_position, holder_of,
+    line_addressed_symbol,
 };
 use crate::error::LspError;
-use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
+use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions, IndexingDegradation};
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 use crate::services::lsp::LspService;
 use crate::services::test_scope::TestScope;
@@ -631,6 +633,43 @@ fn usages_of(references: Vec<Location>, root: &Path, declared: &[ParsedLocation]
     usages
 }
 
+/// The callers references name: each function, method or constructor whose
+/// code holds one of `references`, once, with the first reference it holds
+/// as its call site, in the order of the references. A reference outside
+/// every callable — an import or annotation at module level, a statement in
+/// a class body — names none. A reference inside one is a call or a use of
+/// the symbol as a value there, a callback it registers, which these do not
+/// tell apart: they are the callers a call hierarchy names where it counts
+/// every use inside a callable, as rust-analyzer's does, and more than one
+/// that counts calls alone, as pyright's does.
+///
+/// `declarations` gives each referencing file's symbols; `None` where it has
+/// none for one, which leaves that reference's caller unknown.
+pub fn callers_from_references<'a>(
+    references: &[Location],
+    declarations: impl Fn(&Path) -> Option<&'a [Symbol]>,
+) -> Option<Vec<CallHierarchyItem>> {
+    let mut seen = HashSet::new();
+    let mut callers = Vec::new();
+    for reference in references {
+        let symbols = declarations(&reference.file)?;
+        let Some(caller) = enclosing_callable(symbols, reference.line, Some(reference.column))
+        else {
+            continue;
+        };
+        let declared = &caller.location;
+        if seen.insert((declared.file.clone(), declared.line, declared.column)) {
+            callers.push(CallHierarchyItem {
+                name: caller.name.clone(),
+                kind: caller.kind,
+                location: declared.clone(),
+                call_site: Some(reference.clone()),
+            });
+        }
+    }
+    Some(callers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,6 +684,67 @@ mod tests {
         PrepareRenameResult, RenameResult, TypeHierarchyItem,
     };
     use crate::models::symbol::SymbolKind;
+
+    /// A reference names the innermost callable whose code holds it, once,
+    /// at the first reference it holds; one in a type's header or body
+    /// outside its methods, or at module level, names none; and one in a
+    /// file with no declarations to read leaves the callers unknown.
+    #[test]
+    fn references_name_the_callables_that_hold_them() {
+        let file = PathBuf::from("/repo/m.py");
+        let declared = |name: &str, kind, (line, column), (start, end): (u32, u32)| {
+            Symbol::new(
+                name.to_string(),
+                kind,
+                Location::full(file.clone(), line, column, start, 1, end, 20),
+            )
+        };
+        let symbols =
+            vec![
+                declared("C", SymbolKind::Class, (1, 7), (1, 10)).with_children(vec![
+                    declared("run", SymbolKind::Method, (3, 9), (3, 6)).with_children(vec![
+                        declared("inner", SymbolKind::Function, (4, 13), (4, 5)),
+                    ]),
+                ]),
+                declared("f", SymbolKind::Function, (12, 5), (12, 15)),
+            ];
+        let at = |line, column| Location::point(file.clone(), line, column);
+        let references = [
+            at(1, 9),
+            at(2, 5),
+            at(5, 9),
+            at(6, 9),
+            at(13, 5),
+            at(14, 5),
+            at(20, 1),
+        ];
+        let callers = callers_from_references(&references, |path| {
+            (path == file.as_path()).then_some(symbols.as_slice())
+        })
+        .expect("the file's declarations were read");
+        let named: Vec<(&str, u32)> = callers
+            .iter()
+            .map(|caller| {
+                (
+                    caller.name.as_str(),
+                    caller.call_site.as_ref().unwrap().line,
+                )
+            })
+            .collect();
+        assert_eq!(named, [("inner", 5), ("run", 6), ("f", 13)]);
+        assert_eq!(
+            (callers[0].location.line, callers[0].location.column),
+            (4, 13)
+        );
+
+        let elsewhere = [Location::point(PathBuf::from("/repo/n.py"), 3, 1)];
+        assert!(
+            callers_from_references(&elsewhere, |path| {
+                (path == file.as_path()).then_some(symbols.as_slice())
+            })
+            .is_none()
+        );
+    }
 
     /// Serves canned per-file symbol trees and per-position definitions —
     /// the two reads anchor resolution makes. Everything else is unreachable

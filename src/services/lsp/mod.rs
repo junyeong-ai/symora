@@ -12,8 +12,6 @@ mod rename;
 mod service;
 mod symbols;
 
-pub use helpers::find_containing_callable;
-
 use std::path::Path;
 
 use async_trait::async_trait;
