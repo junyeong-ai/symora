@@ -29,7 +29,8 @@ pub struct DefinitionOutput {
 pub struct HoverOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The range the server says the hover covers, where it names one.
+    #[serde(flatten)]
     pub range: Option<LocationOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -72,6 +73,8 @@ impl From<&crate::models::diagnostic::Diagnostic> for DiagnosticOutput {
 #[derive(Debug, Serialize)]
 pub struct CallHierarchyOutput {
     pub name: String,
+    pub kind: String,
+    #[serde(flatten)]
     pub location: LocationOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_site: Option<LocationOutput>,
@@ -87,6 +90,7 @@ impl CallHierarchyOutput {
     pub fn from_item(item: &crate::models::lsp::CallHierarchyItem, root: &Path) -> Self {
         Self {
             name: item.name.clone(),
+            kind: item.kind.to_string(),
             location: LocationOutput::from_location(&item.location, root),
             call_site: item
                 .call_site
@@ -102,6 +106,7 @@ impl CallHierarchyOutput {
 pub struct TypeInfoOutput {
     pub name: String,
     pub kind: String,
+    #[serde(flatten)]
     pub location: LocationOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,

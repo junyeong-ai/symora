@@ -102,15 +102,16 @@ pub struct DiffCoverage {
 /// pre-image identity and OMIT references — a deleted symbol has no current
 /// references to count, and a literal `0` would read as a verified "no
 /// references". The omitted fields make that absence structural, never a
-/// synthesized zero.
+/// synthesized zero. A deletion whose declarations were not identified has no
+/// `name` or `kind`; its position is the first line it removed.
 #[derive(Debug, Serialize)]
 pub struct ChangedSymbolImpact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub location: Option<LocationOutput>,
+    #[serde(flatten)]
+    pub location: LocationOutput,
     pub change_type: ChangeType,
     /// Total reference count (Added/Modified only).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -800,12 +801,7 @@ async fn analyze_symbol_impact(
     ChangedSymbolImpact {
         name: Some(sym.name.clone()),
         kind: Some(sym.kind.to_string()),
-        location: Some(LocationOutput::from_path(
-            file,
-            sym.location.line,
-            sym.location.column,
-            root,
-        )),
+        location: LocationOutput::from_path(file, sym.location.line, sym.location.column, root),
         change_type,
         refs,
         test_refs,
@@ -998,12 +994,12 @@ fn deleted_row(symbol: &Symbol, old_file: &Path, root: &Path) -> ChangedSymbolIm
     ChangedSymbolImpact {
         name: Some(symbol.name.clone()),
         kind: Some(symbol.kind.to_string()),
-        location: Some(LocationOutput::from_path(
+        location: LocationOutput::from_path(
             old_file,
             symbol.location.line,
             symbol.location.column,
             root,
-        )),
+        ),
         change_type: ChangeType::Deleted,
         refs: None,
         test_refs: None,
@@ -1025,12 +1021,7 @@ fn unresolved_deletion(
     ChangedSymbolImpact {
         name: None,
         kind: None,
-        location: Some(LocationOutput::from_path(
-            &hunk.old_file,
-            hunk.old_start,
-            1,
-            root,
-        )),
+        location: LocationOutput::from_path(&hunk.old_file, hunk.old_start, 1, root),
         change_type: ChangeType::Deleted,
         refs: None,
         test_refs: None,
@@ -1124,6 +1115,8 @@ mod tests {
             file: "src/lib.rs".to_string(),
             line: 10,
             column: 1,
+            end_line: None,
+            end_column: None,
             snippet: None,
             degraded_column: None,
         }
@@ -1134,7 +1127,7 @@ mod tests {
         let row = ChangedSymbolImpact {
             name: Some("gone".to_string()),
             kind: Some("function".to_string()),
-            location: Some(loc()),
+            location: loc(),
             change_type: ChangeType::Deleted,
             refs: None,
             test_refs: None,
@@ -1176,8 +1169,8 @@ mod tests {
             let v = serde_json::to_value(unresolved_deletion(resolution, &hunk, &root)).unwrap();
             assert_eq!(v["deletion"], serde_json::to_value(resolution).unwrap());
             assert!(v.get("name").is_none(), "{v}");
-            assert_eq!(v["location"]["file"], "old.py", "{v}");
-            assert_eq!(v["location"]["line"], 7, "{v}");
+            assert_eq!(v["file"], "old.py", "{v}");
+            assert_eq!(v["line"], 7, "{v}");
         }
     }
 
@@ -1188,7 +1181,7 @@ mod tests {
         let row = ChangedSymbolImpact {
             name: Some("touched".to_string()),
             kind: Some("function".to_string()),
-            location: Some(loc()),
+            location: loc(),
             change_type: ChangeType::Modified,
             refs: Some(3),
             test_refs: Some(1),

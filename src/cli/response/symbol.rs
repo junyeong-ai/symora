@@ -12,9 +12,9 @@ pub struct SymbolOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name_path: Option<String>,
     pub kind: String,
+    /// The name's start, then where the whole declaration ends.
+    #[serde(flatten)]
     pub location: LocationOutput,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub end_location: Option<LocationOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
     /// With `--refs`: references that name the declaration, all of them and
@@ -106,18 +106,9 @@ impl SymbolOutput {
             name: symbol.name.clone(),
             name_path: symbol.name_path.clone(),
             kind: symbol.kind.to_string(),
-            // from_location carries degraded_column: a workspace/symbol result
-            // is cross-file and may be decoded against an unreadable line. The
-            // end_location is a synthesized end position (no separate flag).
-            location: LocationOutput::from_location(&symbol.location, root),
-            end_location: symbol.location.end_line.map(|end_line| {
-                LocationOutput::from_path(
-                    &symbol.location.file,
-                    end_line,
-                    symbol.location.end_column.unwrap_or(1),
-                    root,
-                )
-            }),
+            // degraded_column is carried: a workspace/symbol result is
+            // cross-file and may be decoded against an unreadable line.
+            location: LocationOutput::span_of(&symbol.location, root),
             container: symbol.container.clone(),
             refs: None,
             test_refs: None,

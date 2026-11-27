@@ -172,6 +172,8 @@ mod tests {
             file: file.to_string(),
             line,
             column: 5,
+            end_line: None,
+            end_column: None,
             snippet: None,
             degraded_column: None,
         }

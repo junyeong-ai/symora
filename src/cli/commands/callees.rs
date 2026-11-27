@@ -370,10 +370,13 @@ mod tests {
     fn frame(name: &str, line: u32) -> CallHierarchyOutput {
         CallHierarchyOutput {
             name: name.to_string(),
+            kind: "function".to_string(),
             location: LocationOutput {
                 file: "src/lib.rs".to_string(),
                 line,
                 column: 1,
+                end_line: None,
+                end_column: None,
                 snippet: None,
                 degraded_column: None,
             },
@@ -388,6 +391,8 @@ mod tests {
             file: "src/lib.rs".to_string(),
             line: 99,
             column: 1,
+            end_line: None,
+            end_column: None,
             snippet: None,
             degraded_column: None,
         }

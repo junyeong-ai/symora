@@ -201,6 +201,7 @@ pub struct RefOutput {
 #[derive(Debug, Serialize)]
 pub struct TestOutput {
     pub name: String,
+    #[serde(flatten)]
     pub location: LocationOutput,
 }
 

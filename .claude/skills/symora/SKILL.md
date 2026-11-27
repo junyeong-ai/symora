@@ -28,7 +28,7 @@ symora diff-impact
 
 ## Address the intended symbol
 
-Lines and Unicode-scalar columns are 1-indexed.
+Lines and Unicode-scalar columns are 1-indexed. Every result states its own position flat as `file`, `line`, `column`, the name start to pass back; a span adds `end_line` (inclusive) and `end_column` (exclusive) where the source states them, and a related position (`call_site`, `definition`, `target`) is a nested object of the same shape.
 
 - For `refs`, callers/callees, implementations, type hierarchy, context, and impact: `file:line` addresses the declaration on that line or its enclosing symbol. An explicit column addresses the exact token and resolves usages through their definitions. Header keywords/whitespace may address that declaration; empty body positions address nothing.
 - `def`, hover, typedef, and rename are position-exact; an omitted column means 1. Take name positions from actual results.

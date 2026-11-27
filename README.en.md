@@ -216,28 +216,32 @@ symora callers src/services/checkout.ts:48
   "items": [
     {
       "name": "handleCheckout",
-      "location":  { "file": "src/routes/checkout.ts", "line": 23, "column": 23 },
+      "kind": "function",
+      "file": "src/routes/checkout.ts", "line": 23, "column": 23,
       "call_site": { "file": "src/routes/checkout.ts", "line": 31, "column": 31 }
     },
     {
       "name": "runOrderQueue",
-      "location":  { "file": "src/jobs/orderWorker.ts", "line": 67, "column": 23 },
+      "kind": "function",
+      "file": "src/jobs/orderWorker.ts", "line": 67, "column": 23,
       "call_site": { "file": "src/jobs/orderWorker.ts", "line": 72, "column": 19 }
     },
     {
       "name": "processesAnOrder",
-      "location":  { "file": "tests/checkout.test.ts", "line": 8, "column": 23 },
+      "kind": "function",
+      "file": "tests/checkout.test.ts", "line": 8, "column": 23,
       "call_site": { "file": "tests/checkout.test.ts", "line": 9, "column": 17 }
     },
     {
       "name": "processesTwice",
-      "location":  { "file": "tests/checkout.test.ts", "line": 13, "column": 23 },
+      "kind": "function",
+      "file": "tests/checkout.test.ts", "line": 13, "column": 23,
       "call_site": { "file": "tests/checkout.test.ts", "line": 14, "column": 17 }
     }
   ]
 }
 ```
-> Two production entry points — the HTTP route and a background job — and two test functions. `location` is where the caller is declared; `call_site` is the exact line that calls your symbol.
+> Two production entry points — the HTTP route and a background job — and two test functions. Each item's own `file`, `line`, and `column` are where the caller is declared; `call_site` is the exact position that calls your symbol.
 
 ### ⑤ Which static dependencies may be affected?
 
@@ -371,7 +375,7 @@ Every command is built for machine parsing, and the rules are stable:
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code` and `message` are always present; `hint` only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`, `cancelled`. A bad CLI argument arrives in the same envelope — `invalid_argument`, as JSON rather than clap's prose — so parsing one stream, stdout, covers every failure. One thing sits outside: a clean "nothing found" (e.g. `def` on a position with no definition) is `{ "message": … }` at exit 0 — absence is not an error.
-- **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, `typedef`, and `rename` read an omitted column as column 1. `edit replace-body`, `insert-before`, `insert-after` and `delete` address declarations only, so a column must sit on one; `edit replace` takes a raw range and reads an omitted column as column 1. Navigation location objects carry line and column. Summary targets such as those in `context` and `impact` carry file and line without a column.
+- **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, `typedef`, and `rename` read an omitted column as column 1. `edit replace-body`, `insert-before`, `insert-after` and `delete` address declarations only, so a column must sit on one; `edit replace` takes a raw range and reads an omitted column as column 1. Every item states its own position flat as `file`, `line`, and `column` (the name's start, ready for the next query); a span adds `end_line` (inclusive) and `end_column` (exclusive) only where the source states them, and a second, related position (`call_site`, `definition`) is a nested object of that same shape. `map` and `pack` give lines without columns. Summary targets such as those in `context` and `impact` carry file and line without a column.
 - **Degradation is disclosed, never hidden.** `incomplete: true` means the count itself is a lower bound — the answer does not hold everything its own sources held; the leading `hints` name the cause, and `next_commands` carries the fix where one exists. When the cause is a path that could not be read, `map`, `pack`, and `search index status` name those paths directly in `unread_paths` — check their permissions, since no rebuild reaches a path nothing can read. `stale` describes index currency, `indexing` qualifies language-server readiness, and `incomplete` describes enumeration within the consulted sources. `coverage_gaps` lists languages that couldn't be searched, and an `unsupported` error names the missing capability — the server's, or an edit shape Symora does not apply — and points to an alternative.
 - **Output format** is indented JSON when stdout is a terminal and single-line JSON when it is a pipe or file; `--format pretty|compact` fixes it. Responses declaring `budget_tokens` use their command budget. Other responses target `output.max_response_chars` (default 20,000; 0 disables). Source bodies are omitted whole before list items, with `body_omitted: "response_size"`, preserving declaration identity. A list cut to fit keeps its `count`, sets `truncated`, and adds a hint naming `output.max_response_chars`. Fixed metadata may exceed the target. Compact serialization determines fitting regardless of display format.
 

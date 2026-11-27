@@ -18,9 +18,9 @@ use super::common::resolve_search_paths;
 #[derive(Serialize)]
 struct AstMatchOutput {
     file: String,
-    start_line: u32,
+    line: u32,
+    column: u32,
     end_line: u32,
-    start_column: u32,
     end_column: u32,
     text: String,
     captures: Vec<(String, String)>,
@@ -118,9 +118,9 @@ pub async fn execute_ast_search(
                 .iter()
                 .map(|m| AstMatchOutput {
                     file: ctx.relative_path(&m.file),
-                    start_line: m.start_line,
+                    line: m.start_line,
+                    column: m.start_column,
                     end_line: m.end_line,
-                    start_column: m.start_column,
                     end_column: m.end_column,
                     text: m.text.clone(),
                     captures: m.captures.clone(),

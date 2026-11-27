@@ -5,10 +5,8 @@ expression: out
 {
   "name": "Iterator",
   "kind": "interface",
-  "location": {
-    "file": "src/iter.rs",
-    "line": 5,
-    "column": 11
-  },
+  "file": "src/iter.rs",
+  "line": 5,
+  "column": 11,
   "detail": "trait"
 }

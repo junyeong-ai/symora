@@ -873,10 +873,13 @@ mod tests {
     fn callee_item(name: &str, file: &str, line: u32) -> CallHierarchyOutput {
         CallHierarchyOutput {
             name: name.to_string(),
+            kind: "function".to_string(),
             location: LocationOutput {
                 file: file.to_string(),
                 line,
                 column: 1,
+                end_line: None,
+                end_column: None,
                 snippet: None,
                 degraded_column: None,
             },
@@ -894,6 +897,8 @@ mod tests {
                 file: file.to_string(),
                 line,
                 column: 1,
+                end_line: None,
+                end_column: None,
                 snippet: None,
                 degraded_column: None,
             },

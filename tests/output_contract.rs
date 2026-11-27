@@ -37,6 +37,8 @@ fn sample_location(line: u32, column: u32) -> LocationOutput {
         file: "src/main.rs".to_string(),
         line,
         column,
+        end_line: None,
+        end_column: None,
         snippet: None,
         degraded_column: None,
     }
@@ -342,6 +344,27 @@ fn symbol_output_without_body_or_children() {
     assert_json_snapshot!(out);
 }
 
+/// An end the source did not state is omitted, never filled in as column 1.
+#[test]
+fn symbol_output_omits_an_unstated_end() {
+    let mut location = Location::point(root().join("src/main.rs"), 12, 4);
+    location.end_line = Some(20);
+    let out = SymbolOutput::from_symbol(
+        &Symbol::new("process".to_string(), SymbolKind::Function, location),
+        &root(),
+    );
+    assert_json_snapshot!(out, @r###"
+    {
+      "name": "process",
+      "kind": "function",
+      "file": "src/main.rs",
+      "line": 12,
+      "column": 4,
+      "end_line": 20
+    }
+    "###);
+}
+
 #[test]
 fn definition_output_with_location_only() {
     let out = DefinitionOutput {
@@ -445,6 +468,7 @@ fn call_hierarchy_output_with_call_site() {
 fn call_hierarchy_output_with_body() {
     let out = CallHierarchyOutput {
         name: "callee".to_string(),
+        kind: "function".to_string(),
         location: sample_location(12, 4),
         call_site: None,
         body: Some("fn callee() {}".to_string()),
@@ -453,11 +477,10 @@ fn call_hierarchy_output_with_body() {
     assert_json_snapshot!(out, @r###"
     {
       "name": "callee",
-      "location": {
-        "file": "src/main.rs",
-        "line": 12,
-        "column": 4
-      },
+      "kind": "function",
+      "file": "src/main.rs",
+      "line": 12,
+      "column": 4,
       "body": "fn callee() {}"
     }
     "###);
@@ -581,11 +604,9 @@ fn type_info_output_with_body() {
     {
       "name": "Config",
       "kind": "struct",
-      "location": {
-        "file": "src/main.rs",
-        "line": 5,
-        "column": 12
-      },
+      "file": "src/main.rs",
+      "line": 5,
+      "column": 12,
       "body": "struct Config { path: PathBuf }"
     }
     "###);

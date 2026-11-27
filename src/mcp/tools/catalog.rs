@@ -151,7 +151,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             },
         )
         .with_output_schema(section_output_schema(
-            "Matches: file, start_line, end_line, start_column, end_column, text, captures",
+            "Matches: file, line, column, end_line, end_column (inclusive line, exclusive \
+             column), text, captures",
         )),
         ToolDefinition::read_only(
             "get_index_status",
@@ -250,7 +251,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             ),
         )
         .with_output_schema(with_extra(
-            section_output_schema("Symbols defined in the file"),
+            section_output_schema(
+                "Symbols defined in the file: name, name_path?, kind, file, line, column (the \
+                 name), end_line?/end_column? (where the declaration ends), children?",
+            ),
             &[(
                 "backend",
                 "string",
@@ -316,7 +320,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             ),
         )
         .with_output_schema(with_extra(
-            section_output_schema("Incoming calls with caller locations"),
+            section_output_schema(
+                "Incoming calls: name, kind, file, line, column (the caller's declaration), \
+                 call_site { file, line, column }",
+            ),
             &[(
                 "callers_status",
                 "string",
@@ -344,7 +351,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             ),
         )
         .with_output_schema(with_extra(
-            section_output_schema("Outgoing calls with callee locations"),
+            section_output_schema(
+                "Outgoing calls: name, kind, file, line, column (the callee's declaration), \
+                 call_site?",
+            ),
             &[
                 (
                     "depth",

@@ -1129,12 +1129,21 @@ mod tests {
     }
 }
 
-/// File location with optional source snippet (relative path by default).
+/// A position in the shape every output shares: `file`, 1-indexed `line`,
+/// and 1-indexed Unicode-scalar `column` — the name start for a declaration,
+/// ready to pass to the next query — with an optional source snippet. A span
+/// adds `end_line` (inclusive) and `end_column` (exclusive), each present only
+/// where the source states it. An item embeds it with `#[serde(flatten)]`; a
+/// second, related position (`call_site`, `definition`, `target`) nests it.
 #[derive(Debug, Clone, Serialize)]
 pub struct LocationOutput {
     pub file: String,
     pub line: u32,
     pub column: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_column: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
     /// Carried from the source [`crate::models::symbol::Location`]: present
@@ -1159,6 +1168,8 @@ impl LocationOutput {
             file,
             line,
             column,
+            end_line: None,
+            end_column: None,
             snippet: None,
             degraded_column: None,
         }
@@ -1172,6 +1183,16 @@ impl LocationOutput {
         Self {
             degraded_column: location.degraded_column,
             ..Self::from_path(&location.file, location.line, location.column, root)
+        }
+    }
+
+    /// [`Self::from_location`] with the end of the location's range, where it
+    /// states one.
+    pub fn span_of(location: &crate::models::symbol::Location, root: &Path) -> Self {
+        Self {
+            end_line: location.end_line,
+            end_column: location.end_column,
+            ..Self::from_location(location, root)
         }
     }
 }

@@ -19,9 +19,7 @@ pub async fn execute(args: HoverArgs, app: &App) -> Result<()> {
         |file, line, col| async move { app.lsp.hover(&file, line, col).await },
         |info, ctx| HoverOutput {
             content: Some(info.content),
-            range: info
-                .range
-                .map(|r| LocationOutput::from_location(&r, ctx.root())),
+            range: info.range.map(|r| LocationOutput::span_of(&r, ctx.root())),
             message: None,
             indexing: None,
         },

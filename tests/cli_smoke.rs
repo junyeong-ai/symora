@@ -1426,7 +1426,7 @@ fn a_path_the_grammar_answer_prints_addresses_its_member() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|item| item["name"] == "start" && item["location"]["line"] == 2)
+        .find(|item| item["name"] == "start" && item["line"] == 2)
         .unwrap_or_else(|| panic!("no method row: {listed}"));
     let path = method["name_path"].as_str().unwrap();
     assert_eq!(path, "Service/start", "{listed}");
@@ -2300,7 +2300,7 @@ fn a_cap_reports_changed_code_before_changed_configuration() {
             .as_array()
             .expect("changes")
             .iter()
-            .map(|row| row["location"]["file"].as_str().unwrap_or("").to_string())
+            .map(|row| row["file"].as_str().unwrap_or("").to_string())
             .collect()
     };
     let whole = analyse("0");
@@ -2680,7 +2680,7 @@ fn a_rename_is_measured_the_same_whatever_the_rename_setting() {
             .map(|c| {
                 format!(
                     "{} {} {} {}",
-                    c["name"], c["change_type"], c["deletion"], c["location"]["file"]
+                    c["name"], c["change_type"], c["deletion"], c["file"]
                 )
             })
             .collect();
@@ -2789,12 +2789,7 @@ fn a_file_name_git_quotes_is_measured_under_its_own_name() {
         .as_array()
         .expect("changes")
         .iter()
-        .map(|c| {
-            format!(
-                "{} {} {}",
-                c["name"], c["change_type"], c["location"]["file"]
-            )
-        })
+        .map(|c| format!("{} {} {}", c["name"], c["change_type"], c["file"]))
         .collect();
     assert!(
         rows.contains(&r#""w" "modified" "we\"ird.py""#.to_string()),
@@ -2975,12 +2970,7 @@ fn a_declaration_replaced_in_place_is_deleted_only_when_it_is_gone() {
         .expect("changes")
         .iter()
         .filter(|c| c["change_type"] == "deleted")
-        .map(|c| {
-            format!(
-                "{} {} {}",
-                c["name"], c["location"]["file"], c["location"]["line"]
-            )
-        })
+        .map(|c| format!("{} {} {}", c["name"], c["file"], c["line"]))
         .collect();
     assert_eq!(
         deleted,
@@ -3047,12 +3037,7 @@ fn of_same_named_declarations_the_one_not_declared_again_is_deleted() {
         .expect("changes")
         .iter()
         .filter(|c| c["change_type"] == "deleted")
-        .map(|c| {
-            format!(
-                "{} {} {}",
-                c["name"], c["location"]["file"], c["location"]["line"]
-            )
-        })
+        .map(|c| format!("{} {} {}", c["name"], c["file"], c["line"]))
         .collect();
     deleted.sort();
     assert_eq!(
@@ -3880,7 +3865,7 @@ fn a_diff_run_from_a_subdirectory_measures_that_subdirectory() {
         .find(|c| c["name"] == "gone")
         .unwrap_or_else(|| panic!("the deletion is found: {page}"));
     assert_eq!(gone["deletion"], "resolved", "{page}");
-    assert_eq!(gone["location"]["file"], "m.py", "{page}");
+    assert_eq!(gone["file"], "m.py", "{page}");
 }
 
 /// With `--staged` the diff describes the index while symbols are read from
@@ -4879,8 +4864,8 @@ fn a_declaration_the_servers_tree_lacks_is_answered_from_the_grammar() {
                 (
                     item["name_path"].as_str().unwrap().to_string(),
                     item["kind"].as_str().unwrap().to_string(),
-                    item["location"]["line"].as_u64().unwrap(),
-                    item["location"]["column"].as_u64().unwrap(),
+                    item["line"].as_u64().unwrap(),
+                    item["column"].as_u64().unwrap(),
                 )
             })
             .collect()
