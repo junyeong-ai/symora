@@ -291,7 +291,7 @@ where
     F: FnOnce(PathBuf, u32, u32) -> Fut,
     Fut: Future<Output = Result<Indexed<Option<T>>, LspError>>,
     M: FnOnce(T, &crate::cli::output::OutputContext) -> O,
-    N: FnOnce() -> O,
+    N: FnOnce(Option<crate::models::lsp::IndexingDegradation>) -> O,
     O: Serialize + crate::cli::response::DisclosesIndexing,
 {
     let ctx = &app.output;
@@ -301,7 +301,7 @@ where
         Ok(answer) => {
             let output = match answer.data {
                 Some(result) => on_found(result, ctx),
-                None => on_not_found(),
+                None => on_not_found(answer.indexing),
             };
             ctx.print_success(output.with_indexing(answer.indexing));
         }

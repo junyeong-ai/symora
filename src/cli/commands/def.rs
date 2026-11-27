@@ -28,11 +28,7 @@ pub async fn execute(args: DefArgs, app: &App) -> Result<()> {
             message: None,
             indexing: None,
         },
-        || DefinitionOutput {
-            definition: None,
-            message: Some("No definition found".to_string()),
-            indexing: None,
-        },
+        DefinitionOutput::not_found,
     )
     .await
 }

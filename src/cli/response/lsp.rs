@@ -38,6 +38,54 @@ pub struct HoverOutput {
     pub indexing: Option<IndexingDegradation>,
 }
 
+/// The message for a position the server named nothing at. Where its
+/// readiness wait ran out the server may not have read the answer yet, so
+/// the message says the answer is not known rather than absent — what
+/// `typedef` and `implementations` carry in that state as an empty list
+/// under the same `indexing` marker. `unconfirmed` keeps the plain wording:
+/// most servers never confirm readiness, and the marker already qualifies it.
+fn not_found_message(absent: &str, unknown: &str, indexing: Option<IndexingDegradation>) -> String {
+    match indexing {
+        Some(IndexingDegradation::TimedOut) => format!(
+            "{unknown}: the server's readiness wait ran out before it reported the workspace \
+             loaded, so this is not an absence; retry once it is warm"
+        ),
+        _ => absent.to_string(),
+    }
+}
+
+impl DefinitionOutput {
+    /// No definition at the position, under the indexing state it was asked in.
+    pub fn not_found(indexing: Option<IndexingDegradation>) -> Self {
+        Self {
+            definition: None,
+            message: Some(not_found_message(
+                "No definition found",
+                "No definition known yet",
+                indexing,
+            )),
+            indexing,
+        }
+    }
+}
+
+impl HoverOutput {
+    /// No hover information at the position, under the indexing state it
+    /// was asked in.
+    pub fn not_found(indexing: Option<IndexingDegradation>) -> Self {
+        Self {
+            content: None,
+            range: None,
+            message: Some(not_found_message(
+                "No hover information available",
+                "No hover information known yet",
+                indexing,
+            )),
+            indexing,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct DiagnosticOutput {
     pub severity: String,

@@ -3,6 +3,6 @@ source: tests/output_contract.rs
 expression: out
 ---
 {
-  "message": "No definition found",
+  "message": "No definition known yet: the server's readiness wait ran out before it reported the workspace loaded, so this is not an absence; retry once it is warm",
   "indexing": "timed_out"
 }

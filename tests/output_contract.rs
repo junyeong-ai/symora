@@ -387,15 +387,34 @@ fn definition_output_with_message_only() {
 
 /// A scalar answer of "nothing here" computed while the server was still
 /// indexing is a lower bound, and says so in the same field every list
-/// surface uses. Without it the two are the same JSON.
+/// surface uses. Where the readiness wait ran out the message says the
+/// answer is not known, as an empty `typedef` or `implementations` list
+/// under that marker does, rather than reading as an absence.
 #[test]
 fn definition_output_absence_under_degraded_indexing() {
-    let out = DefinitionOutput {
-        definition: None,
-        message: Some("No definition found".to_string()),
-        indexing: Some(IndexingDegradation::TimedOut),
-    };
+    let out = DefinitionOutput::not_found(Some(IndexingDegradation::TimedOut));
     assert_json_snapshot!(out);
+}
+
+/// Only a wait that ran out changes the wording: a settled answer, and an
+/// `unconfirmed` one (most servers never confirm readiness), keep it.
+#[test]
+fn not_found_wording_changes_only_where_the_readiness_wait_ran_out() {
+    for indexing in [None, Some(IndexingDegradation::Unconfirmed)] {
+        let def = serde_json::to_value(DefinitionOutput::not_found(indexing)).unwrap();
+        assert_eq!(def["message"], "No definition found", "{indexing:?}");
+        let hover = serde_json::to_value(HoverOutput::not_found(indexing)).unwrap();
+        assert_eq!(
+            hover["message"], "No hover information available",
+            "{indexing:?}"
+        );
+    }
+    let hover =
+        serde_json::to_value(HoverOutput::not_found(Some(IndexingDegradation::TimedOut))).unwrap();
+    assert_eq!(hover["indexing"], "timed_out");
+    let message = hover["message"].as_str().unwrap();
+    assert!(message.contains("not an absence"), "{message}");
+    assert!(hover.get("content").is_none(), "{hover}");
 }
 
 /// `typedef` emits the shared list shape `implementations` emits: a
