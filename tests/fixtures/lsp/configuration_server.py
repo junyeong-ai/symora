@@ -11,6 +11,13 @@ def send(message):
     sys.stdout.buffer.flush()
 
 
+def publish_pid(path):
+    # Tests read the pid as soon as the file exists, so it appears whole.
+    staged = path.with_name(path.name + ".tmp")
+    staged.write_text(str(os.getpid()))
+    os.replace(staged, path)
+
+
 observed = {}
 waiting = []
 
@@ -36,7 +43,7 @@ while True:
     method = message.get("method")
     if method == "initialize":
         if len(sys.argv) > 1 and sys.argv[1] != "--shutdown-barrier":
-            Path(sys.argv[1]).write_text(str(os.getpid()))
+            publish_pid(Path(sys.argv[1]))
             while not Path(sys.argv[2]).exists():
                 time.sleep(0.01)
         observed["initialization_options"] = message["params"].get("initializationOptions")
@@ -62,7 +69,7 @@ while True:
         continue
     elif method == "exit":
         if len(sys.argv) > 1 and sys.argv[1] == "--shutdown-barrier":
-            Path(sys.argv[2]).write_text(str(os.getpid()))
+            publish_pid(Path(sys.argv[2]))
             while not Path(sys.argv[3]).exists():
                 time.sleep(0.01)
         sys.exit()
