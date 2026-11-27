@@ -145,7 +145,7 @@ async fn goto_locations(
     feature: Option<LspFeature>,
 ) -> Result<Indexed<Vec<(LspLocation, Location)>>, LspError> {
     if let Some(feat) = feature {
-        check_feature_support(file, feat)?;
+        check_feature_support(&service.manager, file, feat)?;
     }
 
     let max_file_size = service.max_file_size_bytes();
@@ -211,7 +211,13 @@ pub(super) async fn find_implementations(
             let file = file.clone();
             let manager = Arc::clone(&manager);
             async move {
-                check_feature_support_live(&client, &file, LspFeature::FindImplementations).await?;
+                check_feature_support_live(
+                    &manager,
+                    &client,
+                    &file,
+                    LspFeature::FindImplementations,
+                )
+                .await?;
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
@@ -245,7 +251,11 @@ pub(super) async fn find_implementations(
                         .feature_advertised(LspFeature::FindImplementations)
                         .await
                 {
-                    return Err(unsupported_error(&file, LspFeature::FindImplementations));
+                    return Err(unsupported_error(
+                        &manager,
+                        &file,
+                        LspFeature::FindImplementations,
+                    ));
                 }
 
                 let mut conv = PositionConverter::new(client.position_encoding().await)

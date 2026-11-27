@@ -8,8 +8,7 @@ use crate::infra::lsp::protocol::{
     LspLocation, LspSymbolKind, Position, PositionEncoding, error_codes,
 };
 use crate::infra::lsp::{
-    LspClient, LspFeature, SupportLevel, get_alternative_suggestion, get_support_level,
-    language_server_name,
+    LspClient, LspFeature, LspManager, SupportLevel, get_alternative_suggestion, get_support_level,
 };
 use crate::models::lsp::{TypeHierarchyItem, uri_to_path};
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
@@ -123,6 +122,7 @@ pub(super) fn to_lsp_position(
 }
 
 pub(super) fn check_feature_support(
+    manager: &LspManager,
     file: &Path,
     feature: LspFeature,
 ) -> Result<SupportLevel, LspError> {
@@ -130,7 +130,7 @@ pub(super) fn check_feature_support(
     let level = get_support_level(lang, feature);
 
     if level == SupportLevel::None {
-        return Err(unsupported_error(file, feature));
+        return Err(unsupported_error(manager, file, feature));
     }
 
     Ok(level)
@@ -139,11 +139,17 @@ pub(super) fn check_feature_support(
 /// The `FeatureNotSupported` error for a feature, naming the server and a
 /// working alternative — the one place that shape is built, shared by the
 /// static gate, the live pre-flight gate, and the post-flight reclassifier.
-pub(super) fn unsupported_error(file: &Path, feature: LspFeature) -> LspError {
+pub(super) fn unsupported_error(
+    manager: &LspManager,
+    file: &Path,
+    feature: LspFeature,
+) -> LspError {
     let lang = Language::from_path(file);
     LspError::feature_not_supported(
         lang,
-        language_server_name(lang),
+        manager
+            .config(lang)
+            .map_or("unknown", |config| &config.display_name),
         feature.display_name(),
         &get_alternative_suggestion(lang, feature),
     )
@@ -155,6 +161,7 @@ pub(super) fn unsupported_error(file: &Path, feature: LspFeature) -> LspError {
 /// static false-negative into a correct attempt; it never refuses a server the
 /// caps advertise, and never downgrades a statically-supported feature.
 pub(super) async fn check_feature_support_live(
+    manager: &LspManager,
     client: &LspClient,
     file: &Path,
     feature: LspFeature,
@@ -165,7 +172,7 @@ pub(super) async fn check_feature_support_live(
     {
         return Ok(());
     }
-    Err(unsupported_error(file, feature))
+    Err(unsupported_error(manager, file, feature))
 }
 
 pub(super) fn find_project_entry(

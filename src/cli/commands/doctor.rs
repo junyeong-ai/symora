@@ -206,7 +206,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
             };
             LanguageStatus {
                 language: s.language.to_string(),
-                server: s.name.to_string(),
+                server: s.name,
                 installed: s.installed,
                 serves,
                 version: s.version,

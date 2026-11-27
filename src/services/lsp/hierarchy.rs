@@ -55,7 +55,7 @@ async fn call_hierarchy(
             async move {
                 // Pre-flight: the static table only hints; if it says None but
                 // this server advertises call hierarchy, attempt the request.
-                check_feature_support_live(&client, &file, feature).await?;
+                check_feature_support_live(&manager, &client, &file, feature).await?;
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
@@ -80,7 +80,7 @@ async fn call_hierarchy(
                     // references-derived. If it IS advertised, the empty is
                     // genuine and returned as-is.
                     if !client.feature_advertised(feature).await {
-                        return Err(unsupported_error(&file, feature));
+                        return Err(unsupported_error(&manager, &file, feature));
                     }
                     return Ok(indexing.finish(vec![]));
                 }
@@ -189,7 +189,7 @@ async fn type_hierarchy(
             let manager = Arc::clone(&manager);
             let method = method.clone();
             async move {
-                check_feature_support_live(&client, &file, LspFeature::TypeHierarchy).await?;
+                check_feature_support_live(&manager, &client, &file, LspFeature::TypeHierarchy).await?;
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
@@ -211,7 +211,7 @@ async fn type_hierarchy(
                     // Post-flight null-gap: a server that doesn't advertise type
                     // hierarchy returning empty is unsupported, not "no types".
                     if !client.feature_advertised(LspFeature::TypeHierarchy).await {
-                        return Err(unsupported_error(&file, LspFeature::TypeHierarchy));
+                        return Err(unsupported_error(&manager, &file, LspFeature::TypeHierarchy));
                     }
                     return Ok(indexing.finish(vec![]));
                 }

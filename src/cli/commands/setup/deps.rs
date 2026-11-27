@@ -72,7 +72,7 @@ pub struct DepsOutcome {
 
 #[derive(Serialize, Debug)]
 pub struct DepResult {
-    pub name: &'static str,
+    pub name: String,
     pub status: DepStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -195,14 +195,14 @@ fn check_server(config: &ServerConfig, root: &Path) -> Option<DepResult> {
             format!("{}: already installed", config.display_name),
         );
         return Some(DepResult {
-            name: config.display_name,
+            name: config.display_name.clone(),
             status: DepStatus::AlreadyInstalled,
             note: None,
         });
     }
     if config.source == ServerSource::Config {
         return Some(manual(
-            config.display_name,
+            &config.display_name,
             "command is overridden by [lsp.servers] in symora config — installing the \
              stock server would not change what symora spawns; fix the override path or \
              remove the override first",
@@ -211,7 +211,7 @@ fn check_server(config: &ServerConfig, root: &Path) -> Option<DepResult> {
     None
 }
 
-fn run_install(name: &'static str, program: &str, args: &[&str]) -> DepResult {
+fn run_install(name: &str, program: &str, args: &[&str]) -> DepResult {
     step(
         Step::Run,
         format!("installing {name} via `{program} {}`", args.join(" ")),
@@ -220,7 +220,7 @@ fn run_install(name: &'static str, program: &str, args: &[&str]) -> DepResult {
         Ok(()) => {
             step(Step::Ok, format!("{name} installed"));
             DepResult {
-                name,
+                name: name.to_string(),
                 status: DepStatus::Installed,
                 note: None,
             }
@@ -228,7 +228,7 @@ fn run_install(name: &'static str, program: &str, args: &[&str]) -> DepResult {
         Err(err) => {
             step(Step::Warn, format!("{name}: {err}"));
             DepResult {
-                name,
+                name: name.to_string(),
                 status: DepStatus::Failed,
                 note: Some(err.to_string()),
             }
@@ -248,7 +248,7 @@ fn run_install_server(
     program: &str,
     args: &[&str],
 ) -> DepResult {
-    let result = run_install(config.display_name, program, args);
+    let result = run_install(&config.display_name, program, args);
     if result.status != DepStatus::Installed || config.is_installed(root) {
         return result;
     }
@@ -260,7 +260,7 @@ fn run_install_server(
         ),
     );
     DepResult {
-        name: config.display_name,
+        name: config.display_name.clone(),
         status: DepStatus::Failed,
         note: Some(
             "install command succeeded but symora still cannot resolve the server on PATH — \
@@ -274,10 +274,10 @@ fn run_install_server(
 /// `hint` reads as a complete sentence beginning with an imperative verb
 /// (`install …`, `run …`, `see …`) so the JSON `note` field renders cleanly
 /// when surfaced to an agent or end user.
-fn manual(name: &'static str, hint: &str) -> DepResult {
+fn manual(name: &str, hint: &str) -> DepResult {
     step(Step::Warn, format!("{name}: manual install — {hint}"));
     DepResult {
-        name,
+        name: name.to_string(),
         status: DepStatus::Manual,
         note: Some(hint.to_string()),
     }
@@ -289,7 +289,7 @@ fn install_ripgrep() -> DepResult {
     if have("rg") {
         step(Step::Skip, "ripgrep: already installed");
         return DepResult {
-            name: "ripgrep",
+            name: "ripgrep".to_string(),
             status: DepStatus::AlreadyInstalled,
             note: None,
         };
@@ -545,7 +545,7 @@ mod tests {
 
     fn server(command: String, source: ServerSource) -> ServerConfig {
         ServerConfig {
-            display_name: "fake-ls",
+            display_name: "fake-ls".to_string(),
             command,
             args: vec![],
             env: std::collections::BTreeMap::new(),

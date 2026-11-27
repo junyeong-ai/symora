@@ -58,7 +58,7 @@ pub enum ServerSource {
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    pub display_name: &'static str,
+    pub display_name: String,
     pub command: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
@@ -117,7 +117,7 @@ impl ServerConfig {
     /// hint the install instruction.
     pub fn resolve(&self, root: &Path) -> Result<PathBuf, LspError> {
         resolve_command(&self.command, root).map_err(|searched| LspError::ServerNotInstalled {
-            name: self.display_name.to_string(),
+            name: self.display_name.clone(),
             searched: searched.iter().map(|d| d.display().to_string()).collect(),
             install_hint: match self.source {
                 ServerSource::Builtin => not_found_hint(self.install.current()),
@@ -168,7 +168,12 @@ impl ServerConfig {
 
     fn apply_override(&mut self, o: &ServerOverride) {
         if let Some(command) = &o.command {
+            self.display_name = Path::new(command).file_name().map_or_else(
+                || command.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            );
             self.command = command.clone();
+            self.version_command = None;
         }
         if let Some(args) = &o.args {
             self.args = args.clone();
@@ -353,7 +358,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Rust,
         ServerConfig {
-            display_name: "rust-analyzer",
+            display_name: "rust-analyzer".to_string(),
             command: "rust-analyzer".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -372,7 +377,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Cpp,
         ServerConfig {
-            display_name: "clangd",
+            display_name: "clangd".to_string(),
             command: "clangd".to_string(),
             // Preambles kept in memory leave no file behind a stopped server;
             // on disk, clangd's default, every killed server leaves one per
@@ -399,7 +404,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Zig,
         ServerConfig {
-            display_name: "zls",
+            display_name: "zls".to_string(),
             command: "zls".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -418,7 +423,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Java,
         ServerConfig {
-            display_name: "jdtls",
+            display_name: "jdtls".to_string(),
             command: "jdtls".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -437,7 +442,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Kotlin,
         ServerConfig {
-            display_name: "kotlin-lsp",
+            display_name: "kotlin-lsp".to_string(),
             command: "kotlin-lsp".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -456,7 +461,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Scala,
         ServerConfig {
-            display_name: "metals",
+            display_name: "metals".to_string(),
             command: "metals".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -475,7 +480,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Clojure,
         ServerConfig {
-            display_name: "clojure-lsp",
+            display_name: "clojure-lsp".to_string(),
             command: "clojure-lsp".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -494,7 +499,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::CSharp,
         ServerConfig {
-            display_name: "csharp-ls",
+            display_name: "csharp-ls".to_string(),
             command: "csharp-ls".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -513,7 +518,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::FSharp,
         ServerConfig {
-            display_name: "fsautocomplete",
+            display_name: "fsautocomplete".to_string(),
             command: "fsautocomplete".to_string(),
             args: vec![
                 "--adaptive-lsp-server-enabled".to_string(),
@@ -535,7 +540,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::TypeScript,
         ServerConfig {
-            display_name: "typescript-language-server",
+            display_name: "typescript-language-server".to_string(),
             command: "typescript-language-server".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -554,7 +559,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::JavaScript,
         ServerConfig {
-            display_name: "typescript-language-server",
+            display_name: "typescript-language-server".to_string(),
             command: "typescript-language-server".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -573,7 +578,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Vue,
         ServerConfig {
-            display_name: "vue-language-server",
+            display_name: "vue-language-server".to_string(),
             command: "vue-language-server".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -592,7 +597,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Python,
         ServerConfig {
-            display_name: "pyright",
+            display_name: "pyright".to_string(),
             command: "pyright-langserver".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -611,7 +616,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Ruby,
         ServerConfig {
-            display_name: "ruby-lsp",
+            display_name: "ruby-lsp".to_string(),
             command: "ruby-lsp".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -630,7 +635,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::PHP,
         ServerConfig {
-            display_name: "intelephense",
+            display_name: "intelephense".to_string(),
             command: "intelephense".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -649,7 +654,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Perl,
         ServerConfig {
-            display_name: "PerlNavigator",
+            display_name: "PerlNavigator".to_string(),
             command: "perlnavigator".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -668,7 +673,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Lua,
         ServerConfig {
-            display_name: "lua-language-server",
+            display_name: "lua-language-server".to_string(),
             command: "lua-language-server".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -687,7 +692,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Bash,
         ServerConfig {
-            display_name: "bash-language-server",
+            display_name: "bash-language-server".to_string(),
             command: "bash-language-server".to_string(),
             args: vec!["start".to_string()],
             env: BTreeMap::new(),
@@ -706,7 +711,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::PowerShell,
         ServerConfig {
-            display_name: "PowerShell EditorServices",
+            display_name: "PowerShell EditorServices".to_string(),
             command: "pwsh".to_string(),
             args: vec!["-NoLogo".to_string(), "-NoProfile".to_string(), "-Command".to_string(), "Import-Module PowerShellEditorServices; Start-EditorServices -HostName symora -HostProfileId symora -HostVersion 1.0.0 -BundledModulesPath $env:PSES_BUNDLE_PATH -Stdio".to_string()],
             env: BTreeMap::new(),
@@ -725,7 +730,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Haskell,
         ServerConfig {
-            display_name: "haskell-language-server",
+            display_name: "haskell-language-server".to_string(),
             command: "haskell-language-server-wrapper".to_string(),
             args: vec!["--lsp".to_string()],
             env: BTreeMap::new(),
@@ -744,7 +749,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Elixir,
         ServerConfig {
-            display_name: "elixir-ls",
+            display_name: "elixir-ls".to_string(),
             command: "elixir-ls".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -763,7 +768,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Erlang,
         ServerConfig {
-            display_name: "erlang_ls",
+            display_name: "erlang_ls".to_string(),
             command: "erlang_ls".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -782,7 +787,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Elm,
         ServerConfig {
-            display_name: "elm-language-server",
+            display_name: "elm-language-server".to_string(),
             command: "elm-language-server".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -801,7 +806,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::OCaml,
         ServerConfig {
-            display_name: "ocamllsp",
+            display_name: "ocamllsp".to_string(),
             command: "ocamllsp".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -820,7 +825,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Go,
         ServerConfig {
-            display_name: "gopls",
+            display_name: "gopls".to_string(),
             command: "gopls".to_string(),
             args: vec!["serve".to_string()],
             env: BTreeMap::new(),
@@ -839,7 +844,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Swift,
         ServerConfig {
-            display_name: "sourcekit-lsp",
+            display_name: "sourcekit-lsp".to_string(),
             command: "sourcekit-lsp".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -858,7 +863,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Dart,
         ServerConfig {
-            display_name: "dart-language-server",
+            display_name: "dart-language-server".to_string(),
             command: "dart".to_string(),
             args: vec!["language-server".to_string(), "--protocol=lsp".to_string()],
             env: BTreeMap::new(),
@@ -877,7 +882,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Terraform,
         ServerConfig {
-            display_name: "terraform-ls",
+            display_name: "terraform-ls".to_string(),
             command: "terraform-ls".to_string(),
             args: vec!["serve".to_string()],
             env: BTreeMap::new(),
@@ -896,7 +901,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Yaml,
         ServerConfig {
-            display_name: "yaml-language-server",
+            display_name: "yaml-language-server".to_string(),
             command: "yaml-language-server".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -915,7 +920,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Toml,
         ServerConfig {
-            display_name: "taplo",
+            display_name: "taplo".to_string(),
             command: "taplo".to_string(),
             args: vec!["lsp".to_string(), "stdio".to_string()],
             env: BTreeMap::new(),
@@ -934,7 +939,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Nix,
         ServerConfig {
-            display_name: "nil",
+            display_name: "nil".to_string(),
             command: "nil".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -953,7 +958,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Rego,
         ServerConfig {
-            display_name: "regal",
+            display_name: "regal".to_string(),
             command: "regal".to_string(),
             args: vec!["language-server".to_string()],
             env: BTreeMap::new(),
@@ -972,7 +977,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::R,
         ServerConfig {
-            display_name: "R languageserver",
+            display_name: "R languageserver".to_string(),
             command: "R".to_string(),
             args: vec![
                 "--slave".to_string(),
@@ -995,7 +1000,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Julia,
         ServerConfig {
-            display_name: "LanguageServer.jl",
+            display_name: "LanguageServer.jl".to_string(),
             command: "julia".to_string(),
             args: vec![
                 "--startup-file=no".to_string(),
@@ -1019,7 +1024,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Fortran,
         ServerConfig {
-            display_name: "fortls",
+            display_name: "fortls".to_string(),
             command: "fortls".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -1038,7 +1043,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Html,
         ServerConfig {
-            display_name: "vscode-html-language-server",
+            display_name: "vscode-html-language-server".to_string(),
             command: "vscode-html-language-server".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -1057,7 +1062,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Css,
         ServerConfig {
-            display_name: "vscode-css-language-server",
+            display_name: "vscode-css-language-server".to_string(),
             command: "vscode-css-language-server".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -1076,7 +1081,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Scss,
         ServerConfig {
-            display_name: "vscode-css-language-server",
+            display_name: "vscode-css-language-server".to_string(),
             command: "vscode-css-language-server".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -1095,7 +1100,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Json,
         ServerConfig {
-            display_name: "vscode-json-language-server",
+            display_name: "vscode-json-language-server".to_string(),
             command: "vscode-json-language-server".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -1114,7 +1119,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Sql,
         ServerConfig {
-            display_name: "sql-language-server",
+            display_name: "sql-language-server".to_string(),
             command: "sql-language-server".to_string(),
             args: vec![
                 "up".to_string(),
@@ -1137,7 +1142,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Mdx,
         ServerConfig {
-            display_name: "mdx-language-server",
+            display_name: "mdx-language-server".to_string(),
             command: "mdx-language-server".to_string(),
             args: vec!["--stdio".to_string()],
             env: BTreeMap::new(),
@@ -1156,7 +1161,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs.insert(
         Language::Markdown,
         ServerConfig {
-            display_name: "marksman",
+            display_name: "marksman".to_string(),
             command: "marksman".to_string(),
             args: vec!["server".to_string()],
             env: BTreeMap::new(),
@@ -1203,7 +1208,7 @@ pub fn merged(
 #[derive(Debug, Clone)]
 pub struct ServerHealth {
     pub language: Language,
-    pub name: &'static str,
+    pub name: String,
     /// An executable resolves at the effective command — a fact about the
     /// filesystem, not about what that executable does.
     pub installed: bool,
@@ -1236,13 +1241,13 @@ pub fn check_all_servers(
         };
         results.push(ServerHealth {
             language,
-            name: config.display_name,
             installed,
             version,
             install_instruction: config.install.current(),
             tier: config.tier,
             source: config.source,
             init_timeout: config.init_timeout(),
+            name: config.display_name,
             command: config.command,
             launch,
         });
@@ -1329,7 +1334,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = fake_executable(dir.path(), "grumpy-ls"); // exits 1 on any arg
         let config = ServerConfig {
-            display_name: "grumpy-ls",
+            display_name: "grumpy-ls".to_string(),
             command: bin.to_string_lossy().into_owned(),
             args: vec![],
             env: BTreeMap::new(),
@@ -1356,7 +1361,7 @@ mod tests {
     #[test]
     fn not_installed_states_the_search_once_and_the_install_step_in_the_hint() {
         let config = ServerConfig {
-            display_name: "fake-ls",
+            display_name: "fake-ls".to_string(),
             command: "/nowhere/a/fake-ls".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -1387,7 +1392,7 @@ mod tests {
     #[test]
     fn resolve_hint_names_config_override_when_source_is_config() {
         let config = ServerConfig {
-            display_name: "fake-ls",
+            display_name: "fake-ls".to_string(),
             command: "/nonexistent/fake-ls".to_string(),
             args: vec![],
             env: BTreeMap::new(),
@@ -1444,6 +1449,34 @@ mod tests {
         assert_eq!(ts.args, vec!["--stdio".to_string()]);
         assert_eq!(ts.tier, defaults()[&Language::TypeScript].tier);
         assert_eq!(ts.source, ServerSource::Config);
+    }
+
+    #[test]
+    fn merged_command_override_names_and_probes_the_program_it_spawns() {
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(
+            "python".to_string(),
+            ServerOverride {
+                command: Some("/opt/bin/basedpyright-langserver".to_string()),
+                ..Default::default()
+            },
+        );
+        overrides.insert(
+            "typescript".to_string(),
+            ServerOverride {
+                args: Some(vec!["--stdio".to_string(), "--log-level=4".to_string()]),
+                ..Default::default()
+            },
+        );
+        let merged = merged(&overrides);
+        let python = &merged[&Language::Python];
+        assert_eq!(python.display_name, "basedpyright-langserver");
+        assert_eq!(python.version_command, None);
+        let typescript = &merged[&Language::TypeScript];
+        assert_eq!(
+            typescript.display_name,
+            defaults()[&Language::TypeScript].display_name
+        );
     }
 
     #[test]

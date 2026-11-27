@@ -10,8 +10,7 @@ pub mod transport;
 pub mod watch;
 
 pub use capabilities::{
-    LspFeature, SupportLevel, get_alternative_suggestion, get_support_level,
-    get_unsupported_message, is_feature_supported, language_display_name, language_server_name,
+    LspFeature, SupportLevel, get_alternative_suggestion, get_support_level, is_feature_supported,
 };
 pub use client::{
     DiagnosticPull, IndexingEvent, IndexingState, LspClient, content_generation,

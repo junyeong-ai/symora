@@ -125,89 +125,6 @@ pub fn is_feature_supported(language: Language, feature: LspFeature) -> bool {
     get_support_level(language, feature) != SupportLevel::None
 }
 
-/// Get a helpful message when a feature is not supported
-pub fn get_unsupported_message(language: Language, feature: LspFeature) -> String {
-    let lang_name = language_display_name(language);
-    let server_name = language_server_name(language);
-    let feature_name = feature.display_name();
-
-    let suggestion = get_alternative_suggestion(language, feature);
-
-    format!(
-        "{} ({}) does not support '{}'. {}",
-        lang_name, server_name, feature_name, suggestion
-    )
-}
-
-/// Get language display name
-pub fn language_display_name(language: Language) -> &'static str {
-    match language {
-        // Systems
-        Language::Rust => "Rust",
-        Language::Cpp => "C++",
-        Language::Zig => "Zig",
-        // JVM
-        Language::Java => "Java",
-        Language::Kotlin => "Kotlin",
-        Language::Scala => "Scala",
-        Language::Clojure => "Clojure",
-        // .NET
-        Language::CSharp => "C#",
-        Language::FSharp => "F#",
-        // Web
-        Language::TypeScript => "TypeScript",
-        Language::JavaScript => "JavaScript",
-        Language::Vue => "Vue",
-        // Scripting
-        Language::Python => "Python",
-        Language::Ruby => "Ruby",
-        Language::PHP => "PHP",
-        Language::Perl => "Perl",
-        Language::Lua => "Lua",
-        Language::Bash => "Bash",
-        Language::PowerShell => "PowerShell",
-        // Functional
-        Language::Haskell => "Haskell",
-        Language::Elixir => "Elixir",
-        Language::Erlang => "Erlang",
-        Language::Elm => "Elm",
-        Language::OCaml => "OCaml",
-        // Mobile/Application
-        Language::Go => "Go",
-        Language::Swift => "Swift",
-        Language::Dart => "Dart",
-        // Config/DevOps
-        Language::Terraform => "Terraform",
-        Language::Yaml => "YAML",
-        Language::Toml => "TOML",
-        Language::Json => "JSON",
-        Language::Nix => "Nix",
-        Language::Rego => "Rego",
-        // Web markup and data
-        Language::Html => "HTML",
-        Language::Css => "CSS",
-        Language::Scss => "Sass",
-        Language::Sql => "SQL",
-        // Scientific
-        Language::R => "R",
-        Language::Julia => "Julia",
-        Language::Fortran => "Fortran",
-        // Documentation
-        Language::Markdown => "Markdown",
-        Language::Mdx => "MDX",
-        Language::Unknown => "Unknown",
-    }
-}
-
-/// The server a language is served by, read from the table that spawns it so
-/// a diagnostic never names a program Symora does not run.
-pub fn language_server_name(language: Language) -> &'static str {
-    super::servers::defaults()
-        .get(&language)
-        .map(|config| config.display_name)
-        .unwrap_or("unknown")
-}
-
 /// What to run instead when a server cannot answer a feature. It is followed
 /// as written, so every command it names must be one the CLI accepts.
 pub fn get_alternative_suggestion(language: Language, feature: LspFeature) -> String {
@@ -273,14 +190,6 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_message() {
-        let msg = get_unsupported_message(Language::Python, LspFeature::FindImplementations);
-        assert!(msg.contains("Python"));
-        assert!(msg.contains("pyright"));
-        assert!(msg.contains("find implementations"));
-    }
-
-    #[test]
     fn every_suggested_command_parses() {
         use LspFeature::*;
 
@@ -304,21 +213,6 @@ mod tests {
                     language, feature,
                 ));
             }
-        }
-    }
-
-    /// A diagnostic that names a program Symora does not run sends an agent
-    /// after the wrong binary at the moment it is trying to recover. The
-    /// spawn table is the only source for that name.
-    #[test]
-    fn every_language_is_named_by_the_server_it_spawns() {
-        let spawned = super::super::servers::defaults();
-        for language in Language::all() {
-            assert_eq!(
-                language_server_name(language),
-                spawned[&language].display_name,
-                "{language:?} is diagnosed under a name it is not spawned under"
-            );
         }
     }
 }
