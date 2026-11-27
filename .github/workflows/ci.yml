@@ -32,10 +32,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: stable
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -61,10 +59,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: stable
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -86,10 +82,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: stable
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
       - name: Install rust-analyzer for the pinned toolchain
         run: rustup component add rust-analyzer
