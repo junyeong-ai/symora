@@ -1018,7 +1018,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Delete the symbol's full definition. Target by file + symbol \
                           path (e.g. 'Class/method') or by file:line[:column] — exactly one of \
                           symbol or line. Reports the references outside the deleted span that \
-                          would dangle as dangling_references, count 0 included, whenever the \
+                          would dangle as dangling_references, at their positions in the file \
+                          the call leaves, count 0 included, whenever the \
                           check ran; otherwise references_status (unsupported, unavailable) \
                           says why, and they are unknown. Set expect_no_references=true to \
                           refuse the \

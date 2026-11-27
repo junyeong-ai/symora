@@ -533,7 +533,7 @@ async fn delete_symbol(
     ensure_anchor_not_stale(symbol, &doc.lines)?;
     ensure_exclusive_line_ownership(&doc.lines, symbol, &span, &addressed.declared_with)?;
 
-    let check = check_dangling_references(app, addressed, &span).await;
+    let check = check_dangling_references(app, addressed, &span, dry_run).await;
     if expect_no_references {
         ensure_no_dangling_references(&symbol.name, &check)?;
     }
@@ -589,10 +589,18 @@ enum ReferenceCheck {
 /// ([`Addressed::served`]), that live outside the deleted span. Honest per
 /// invariant 4: when the language can't answer, return a status instead of
 /// implying "none".
+///
+/// The section describes the file as the response leaves it. A delete that
+/// is applied moves the edited file's references below the span up by the
+/// lines it removed, and leaves no declaration at the position `refs` would
+/// be asked at, so the rest of a capped list is named by a search for the
+/// name, which still finds them. `refs_command`, for a refusal made before
+/// anything is written, asks at the declaration.
 async fn check_dangling_references(
     app: &App,
     addressed: &Addressed,
     span: &LineRange,
+    dry_run: bool,
 ) -> ReferenceCheck {
     use crate::cli::response::LocationOutput;
 
@@ -625,11 +633,22 @@ async fn check_dangling_references(
         }
     };
 
+    let removed = match dry_run {
+        true => 0,
+        false => span.end - span.start + 1,
+    };
     let dangling: Vec<LocationOutput> = refs
         .data
         .iter()
         .filter(|r| r.file != file || r.line < span.start || r.line > span.end)
-        .map(|r| LocationOutput::from_location(r, app.output.root()))
+        .map(|r| {
+            let mut reference = LocationOutput::from_location(r, app.output.root());
+            if r.file == file && r.line > span.end {
+                reference.line -= removed;
+                reference.end_line = reference.end_line.map(|line| line - removed);
+            }
+            reference
+        })
         .collect();
     let total = dangling.len();
     // A server still indexing returns a *lower bound*, not the truth —
@@ -666,9 +685,16 @@ async fn check_dangling_references(
         )),
     );
     if total > DELETE_REFS_DISPLAY_LIMIT {
+        let (remedy, command) = match dry_run {
+            true => ("all of them", refs_command.clone()),
+            false => (
+                "the rest are among the occurrences of its name",
+                format!("symora search content -- {}", shell_arg(&symbol.name)),
+            ),
+        };
         section = with_cap(
-            section.with_next_commands(vec![refs_command.clone()]),
-            Cap::Fixed(format!("all of them: {refs_command}")),
+            section.with_next_commands(vec![command.clone()]),
+            Cap::Fixed(format!("{remedy}: {command}")),
         );
     }
     ReferenceCheck::Checked {

@@ -3029,6 +3029,70 @@ fn callers_without_call_hierarchy_name_none_for_a_type() {
     );
 }
 
+/// `edit delete` lists the references it leaves dangling as the file stands
+/// once it answers. A preview leaves the file as it was, so a capped list's
+/// rest is the references at the declaration; an applied delete moves the
+/// file's references below it up by the lines it removed and leaves nothing
+/// at the declaration's position to ask about, so the rest is named by a
+/// search for the name, which still finds them.
+#[cfg(unix)]
+#[test]
+fn a_deletes_dangling_references_stand_where_the_delete_leaves_them() {
+    let source = "def helper():\n    return 1\n\n\ndef user():\n    return helper()\n";
+    let uses: String = (0..55).map(|i| format!("x{i} = helper()\n")).collect();
+    let Some(dir) = reference_served_repo(&[("a.py", source, source), ("b.py", &uses, &uses)])
+    else {
+        return;
+    };
+    let delete = |extra: &[&str]| {
+        json_ok(
+            dir.path(),
+            &[&["--format", "compact", "edit", "delete", "a.py:1"], extra].concat(),
+        )
+    };
+
+    let preview = delete(&["--dry-run"]);
+    let listed = &preview["dangling_references"];
+    assert_eq!(listed["count"], 56, "{preview}");
+    assert_eq!(listed["items"][0]["file"], "a.py", "{preview}");
+    assert_eq!(listed["items"][0]["line"], 6, "{preview}");
+    assert_eq!(
+        listed["next_commands"],
+        serde_json::json!(["symora refs -- 'a.py:1:5'"]),
+        "{preview}"
+    );
+
+    let applied = delete(&[]);
+    let listed = &applied["dangling_references"];
+    assert_eq!(listed["count"], 56, "{applied}");
+    assert_eq!(listed["items"][0]["file"], "a.py", "{applied}");
+    assert_eq!(
+        listed["items"][0]["line"], 4,
+        "two lines were removed above it: {applied}"
+    );
+    assert_eq!(listed["items"][1]["file"], "b.py", "{applied}");
+    assert_eq!(
+        listed["items"][1]["line"], 1,
+        "another file does not move: {applied}"
+    );
+    let search = "symora search content -- 'helper'";
+    assert_eq!(
+        listed["next_commands"],
+        serde_json::json!([search]),
+        "{applied}"
+    );
+    assert!(
+        listed["hints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hint| hint.as_str().unwrap().ends_with(search)),
+        "{applied}"
+    );
+    let left = std::fs::read_to_string(dir.path().join("a.py")).unwrap();
+    assert_eq!(left.lines().nth(3), Some("    return helper()"), "{left}");
+}
+
 /// A call chain runs between functions, methods and constructors, so finding
 /// none to a class or a variable, or from one, is no verdict on reaching it:
 /// the endpoint reads `not_callable` and the verdict stays the non-absolute

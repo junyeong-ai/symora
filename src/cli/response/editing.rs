@@ -29,8 +29,10 @@ pub struct EditOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
     /// `delete` only: references outside the deleted span that would
-    /// dangle. Present (count 0 included) whenever the check ran —
-    /// absent means it could not run; `references_status` says why.
+    /// dangle, at their positions in the file as the response leaves it, so
+    /// an applied delete's same-file references below the span move up by
+    /// the lines it removed. Present (count 0 included) whenever the check
+    /// ran — absent means it could not run; `references_status` says why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dangling_references: Option<Section<LocationOutput>>,
     /// `delete` only, and only when the reference check could not run:
