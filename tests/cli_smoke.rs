@@ -733,6 +733,12 @@ fn a_capped_list_names_the_cap_that_cut_it() {
     )
     .unwrap();
     std::fs::write(dir.path().join("lib.rs"), "fn four() {}\n").unwrap();
+    // Entrypoints are the ones a manifest declares.
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"capped\"\n[lib]\npath = \"lib.rs\"\n[[bin]]\nname = \"capped\"\npath = \"main.rs\"\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(dir.path().join(".symora")).unwrap();
     let run = |args: &[&str]| {
         json_ok(
@@ -5772,7 +5778,7 @@ fn a_map_list_says_how_much_the_limit_cut_from_it() {
     for i in 0..15 {
         let pkg = root.join(format!("pkg_{i:02}"));
         std::fs::create_dir(&pkg).unwrap();
-        std::fs::write(pkg.join("main.py"), "def run():\n    return 1\n").unwrap();
+        std::fs::write(pkg.join("__main__.py"), "def run():\n    return 1\n").unwrap();
     }
     let flat = root.join("flat");
     std::fs::create_dir(&flat).unwrap();
@@ -5916,6 +5922,88 @@ fn map_summary_lists_the_packages_workspace_manifests_declare() {
         "{broken}"
     );
     assert_eq!(broken["packages"]["items"][0]["name"], "root", "{broken}");
+}
+
+/// An entrypoint is what a manifest or the language's build declares one —
+/// a Cargo target, a Python script or `__main__.py`, a `package.json` `bin`
+/// or `main`, a Go `main` package — never a file whose name looks like one.
+#[cfg(unix)]
+#[test]
+fn map_summary_lists_the_entrypoints_manifests_declare() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let write = |path: &str, content: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    };
+    write(
+        "Cargo.toml",
+        "[package]\nname = \"my-tool\"\n\n[[bin]]\nname = \"extra\"\npath = \"tools/extra.rs\"\n",
+    );
+    write("src/lib.rs", "pub fn f() {}\n");
+    write("src/main.rs", "fn main() {}\n");
+    write("src/bin/helper.rs", "fn main() {}\n");
+    write("tools/extra.rs", "fn main() {}\n");
+    write(
+        "py/pyproject.toml",
+        "[project]\nname = \"py\"\n[project.scripts]\nrun-py = \"py_app.cli:main\"\n\
+         gone = \"py_app.missing:main\"\n",
+    );
+    write("py/src/py_app/__init__.py", "");
+    write("py/src/py_app/cli.py", "def main(): pass\n");
+    write("py/src/py_app/__main__.py", "");
+    write(
+        "js/package.json",
+        "{\"name\": \"@acme/js\", \"main\": \"./lib/index.js\", \"bin\": {\"js-run\": \"bin/run.js\"}}\n",
+    );
+    write("js/lib/index.js", "module.exports = 1;\n");
+    write("js/bin/run.js", "require('../lib');\n");
+    write("cmd/serve/main.go", "package main\n\nfunc main() {}\n");
+    write("internal/main.go", "package internal\n");
+    // Names that look like a start and are declared as none.
+    write("app.py", "app = 1\n");
+    write("web/server.ts", "export const s = 1;\n");
+
+    let summary = json_ok(
+        root,
+        &["--deterministic", "map", "summary", "--limit", "20"],
+    );
+    let entrypoints: Vec<_> = summary["entrypoints"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            format!(
+                "{} {} {}",
+                entry["file"].as_str().unwrap(),
+                entry["kind"].as_str().unwrap(),
+                entry["name"].as_str().unwrap_or("-")
+            )
+        })
+        .collect();
+    assert_eq!(
+        entrypoints,
+        [
+            "cmd/serve/main.go bin -",
+            "js/bin/run.js bin js-run",
+            "js/lib/index.js lib @acme/js",
+            "py/src/py_app/__main__.py main_module py_app",
+            "py/src/py_app/cli.py script run-py",
+            "src/bin/helper.rs bin helper",
+            "src/lib.rs lib my_tool",
+            "src/main.rs bin my-tool",
+            "tools/extra.rs bin extra",
+        ],
+        "{summary}"
+    );
+    // A declaration naming no file is said, not dropped.
+    assert!(
+        summary["hints"][0]
+            .as_str()
+            .is_some_and(|hint| hint.contains("py/pyproject.toml script gone")),
+        "{summary}"
+    );
 }
 
 /// `map file` names a file's tests by evidence: an import naming it, its

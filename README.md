@@ -138,13 +138,13 @@ symora map summary
     "count": 2,
     "showing": 2,
     "items": [
-      { "file": "src/main.ts", "reason": "main entry file" },
-      { "file": "src/app.ts", "reason": "application bootstrap candidate" }
+      { "file": "src/main.ts", "kind": "bin", "name": "shopflow" },
+      { "file": "src/index.ts", "kind": "lib", "name": "shopflow" }
     ]
   }
 }
 ```
-> TypeScript 코드 파일 67개 중 49개가 `src`에 있고, `entrypoints`는 파일명·경로에 따른 시작점 후보를 보여 줍니다. 실제 실행 경로는 소스와 설정에서 확인하세요. `languages`는 코드 언어만 세며, JSON 같은 데이터 파일은 `support_files`에 들어갑니다.
+> TypeScript 코드 파일 67개 중 49개가 `src`에 있고, `entrypoints`는 manifest가 선언한 시작점(여기서는 `package.json`의 `bin`과 `main`)만 보여 줍니다. 이름만 시작점처럼 보이는 파일(`app.ts`, `server.ts`)은 넣지 않습니다. 워크스페이스라면 manifest가 나열한 패키지가 `packages`에 함께 나옵니다. `languages`는 코드 언어만 세며, JSON 같은 데이터 파일은 `support_files`에 들어갑니다.
 
 ### ② 찾기 — 체크아웃은 어디서 처리되지?
 

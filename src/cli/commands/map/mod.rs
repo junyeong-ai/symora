@@ -20,11 +20,11 @@ mod tests_of;
 mod workspace;
 
 use tests_of::TestFileOutput;
-use workspace::PackageOutput;
+use workspace::{EntryPointOutput, PackageOutput};
 
 #[derive(Args, Debug)]
 #[command(
-    after_long_help = "Typical workflow:\n  1. `symora map summary` for entrypoints and major areas\n  2. `symora search symbols <query>` for rough workspace discovery\n  3. `symora map file <path>` for one file, the tests importing it, and its neighbours\n  4. `symora symbols <file>` or `symora refs <loc>` for precise follow-up\n"
+    after_long_help = "Typical workflow:\n  1. `symora map summary` for packages, declared entrypoints and major areas\n  2. `symora search symbols <query>` for rough workspace discovery\n  3. `symora map file <path>` for one file, the tests importing it, and its neighbours\n  4. `symora symbols <file>` or `symora refs <loc>` for precise follow-up\n"
 )]
 pub struct MapArgs {
     #[command(subcommand)]
@@ -109,19 +109,6 @@ struct DirectoryMapOutput {
 }
 
 #[derive(Debug, Serialize)]
-struct EntryPointOutput {
-    file: String,
-    reason: String,
-}
-
-#[derive(Debug)]
-struct EntryPointCandidate {
-    file: String,
-    reason: String,
-    score: i32,
-}
-
-#[derive(Debug, Serialize)]
 struct MapFileOutput {
     file: String,
     language: String,
@@ -177,8 +164,18 @@ pub async fn execute(args: MapArgs, app: &App) -> Result<()> {
 async fn execute_summary(app: &App, limit: usize) -> Result<()> {
     let ctx = &app.output;
     let mut scan = scan_project_files(app);
-    let declared = workspace::read(&scan.records, app.root());
-    scan.unread_paths.extend(declared.unread);
+    let mut declared = workspace::read(&scan.records, app.root());
+    scan.unread_paths.append(&mut declared.unread);
+    match go_commands(app, std::mem::take(&mut declared.go_mains)).await {
+        Ok((commands, mut unread)) => {
+            declared.entrypoints.extend(commands);
+            scan.unread_paths.append(&mut unread);
+        }
+        Err(hint) => declared.hints.push(hint),
+    }
+    declared
+        .entrypoints
+        .sort_by(|a, b| a.file.cmp(&b.file).then(a.kind.cmp(&b.kind)));
     let unread_paths = scan.unread_at(ctx, app.root());
     let records = scan.records;
     let code_records: Vec<_> = records
@@ -234,11 +231,7 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
     });
 
     let top_directories = limited(directories, limit, Cap::Option("--limit"));
-    let entrypoints = limited(
-        detect_entrypoints(&code_records),
-        limit,
-        Cap::Option("--limit"),
-    );
+    let entrypoints = limited(declared.entrypoints, limit, Cap::Option("--limit"));
 
     let response = MapSummaryOutput {
         root: ctx.root().display().to_string(),
@@ -350,6 +343,40 @@ async fn execute_file(app: &App, path: &str, depth: u32, tests_limit: usize) -> 
         symbols,
     });
     Ok(())
+}
+
+/// A `main.go` names a command where the grammar reads its package clause
+/// as `main`, as `go build` takes it.
+const GO_MAIN_PACKAGE: &str =
+    r#"(source_file (package_clause (package_identifier) @name) (#eq? @name "main"))"#;
+
+/// The `main.go` files among `candidates` that declare package `main`, and
+/// those the reading could not open.
+async fn go_commands(
+    app: &App,
+    candidates: Vec<PathBuf>,
+) -> Result<(Vec<EntryPointOutput>, Vec<PathBuf>), String> {
+    if candidates.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let scope = FileFilter::for_paths(app.root(), candidates);
+    let answer = app
+        .ast
+        .query(GO_MAIN_PACKAGE, Language::Go, &scope)
+        .await
+        .map_err(|e| format!("Go commands were not read: {e}"))?;
+    let files: std::collections::BTreeSet<String> = answer
+        .matches
+        .iter()
+        .filter_map(|found| {
+            let file = found.file.strip_prefix(app.root()).unwrap_or(&found.file);
+            file.to_str().map(str::to_string)
+        })
+        .collect();
+    Ok((
+        files.into_iter().map(EntryPointOutput::go_main).collect(),
+        answer.unread_paths,
+    ))
 }
 
 fn scan_project_files(app: &App) -> ProjectScan {
@@ -482,80 +509,6 @@ fn normalize_path_arg(input: &str, root: &Path) -> PathBuf {
     } else {
         root.join(path)
     }
-}
-
-fn detect_entrypoints(records: &[&FileRecord]) -> Vec<EntryPointOutput> {
-    let mut candidates = Vec::new();
-    for record in records {
-        let file_name = Path::new(&record.rel_path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-
-        if let Some((reason, score)) = classify_entrypoint(record, file_name) {
-            candidates.push(EntryPointCandidate {
-                file: record.rel_path.clone(),
-                reason: reason.to_string(),
-                score,
-            });
-        }
-    }
-
-    candidates.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| path_depth(&a.file).cmp(&path_depth(&b.file)))
-            .then_with(|| a.file.cmp(&b.file))
-    });
-
-    let mut top_dir_counts: HashMap<String, usize> = HashMap::new();
-    let mut filtered = Vec::new();
-    for candidate in candidates {
-        let top_dir = candidate
-            .file
-            .split('/')
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        let is_low_confidence = candidate.score <= 35;
-        let count = top_dir_counts.entry(top_dir).or_insert(0);
-        if is_low_confidence && *count >= 1 {
-            continue;
-        }
-        *count += 1;
-        filtered.push(EntryPointOutput {
-            file: candidate.file,
-            reason: candidate.reason,
-        });
-    }
-
-    filtered
-}
-
-fn classify_entrypoint(record: &FileRecord, file_name: &str) -> Option<(&'static str, i32)> {
-    let depth_penalty = path_depth(&record.rel_path).min(6) as i32;
-
-    let (reason, base_score) = match file_name {
-        "main.rs" | "main.go" | "main.py" | "main.ts" | "main.tsx" | "main.js" | "main.jsx" => {
-            ("main entry file", 100)
-        }
-        "lib.rs" | "lib.go" => ("library root", 92),
-        "manage.py" => ("application entry file", 90),
-        "app.rs" | "app.py" | "app.ts" | "app.tsx" | "app.js" | "server.rs" | "server.py"
-        | "server.ts" | "server.js" | "cli.rs" | "cli.py" | "cli.ts" | "cli.js" => {
-            ("application bootstrap candidate", 82)
-        }
-        "index.ts" | "index.tsx" | "index.js" | "index.jsx" => ("index/export hub", 34),
-        _ if record.rel_path.starts_with("src/main.") => ("source entry candidate", 95),
-        _ if record.rel_path.starts_with("bin/") => ("binary entry candidate", 88),
-        _ => return None,
-    };
-
-    Some((reason, base_score - depth_penalty))
-}
-
-fn path_depth(path: &str) -> usize {
-    path.split('/').count()
 }
 
 /// Whether an overview lists the declaration: a callable or a type, a

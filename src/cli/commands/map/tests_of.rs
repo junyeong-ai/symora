@@ -496,7 +496,7 @@ fn python_module_path(rel_path: &str) -> Vec<String> {
 /// its path spells from the project root, which a test run from the root
 /// imports a namespace package by. A name a component cannot spell (a
 /// hyphen, a leading digit) is no module name.
-fn python_module_names(rel_path: &str, paths: &HashSet<&str>) -> Vec<String> {
+pub(super) fn python_module_names(rel_path: &str, paths: &HashSet<&str>) -> Vec<String> {
     let module_path = python_module_path(rel_path);
     let directories: Vec<&str> = rel_path.split('/').collect();
     let directories = &directories[..directories.len().saturating_sub(1)];

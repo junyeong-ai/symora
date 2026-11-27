@@ -1,12 +1,14 @@
 //! What a project's manifests declare about its shape: the packages its
-//! workspaces list.
+//! workspaces list, and the entrypoints its packages declare.
 //!
-//! Read from what a build tool reads, never guessed from a directory's
+//! Both are read from what a build tool reads, never guessed from a file's
 //! name. A workspace whose packages all sit under `packages/` is one row of
 //! `top_directories`; its members are the rows an agent picks a package
-//! from.
+//! from. And a project's `app.py` or `server.ts` may be where it starts or
+//! may be one module among many — a manifest's `[[bin]]`, script or `main`
+//! is where the build says it starts.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -28,10 +30,50 @@ pub(super) struct PackageOutput {
     test_files: usize,
 }
 
+/// What a declared entrypoint is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum EntryKind {
+    /// An executable target: a Cargo binary, a `package.json` `bin`, a Go
+    /// `main` package's `main.go`.
+    Bin,
+    /// What importing the package loads: a Cargo library, a `package.json`
+    /// `main`.
+    Lib,
+    /// A Python console or GUI script.
+    Script,
+    /// A Python package's `__main__.py`, which `python -m` runs.
+    MainModule,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct EntryPointOutput {
+    pub(super) file: String,
+    pub(super) kind: EntryKind,
+    /// What the manifest calls it: the binary, library or script name, or
+    /// the module `python -m` takes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+impl EntryPointOutput {
+    pub(super) fn go_main(file: String) -> Self {
+        Self {
+            file,
+            kind: EntryKind::Bin,
+            name: None,
+        }
+    }
+}
+
 /// What the manifests declare, and what kept some of it from being read.
 pub(super) struct Declared {
     /// `None` where no manifest declares a workspace.
     pub(super) packages: Option<Vec<PackageOutput>>,
+    pub(super) entrypoints: Vec<EntryPointOutput>,
+    /// `main.go` files, which are a command's where the grammar reads their
+    /// package as `main`.
+    pub(super) go_mains: Vec<PathBuf>,
     pub(super) unread: Vec<PathBuf>,
     pub(super) hints: Vec<String>,
 }
@@ -100,6 +142,8 @@ const MANIFESTS: &[&str] = &[
 pub(super) fn read(records: &[FileRecord], root: &Path) -> Declared {
     let mut declared = Declared {
         packages: None,
+        entrypoints: Vec::new(),
+        go_mains: Vec::new(),
         unread: Vec::new(),
         hints: Vec::new(),
     };
@@ -150,7 +194,44 @@ pub(super) fn read(records: &[FileRecord], root: &Path) -> Declared {
         }
     }
 
+    let paths: HashSet<&str> = records.iter().map(|r| r.rel_path.as_str()).collect();
     declared.packages = packages(&manifests, records, root, &mut declared.hints);
+    let mut unplaced = Vec::new();
+    for manifest in &manifests {
+        entrypoints_of(manifest, &paths, &mut declared.entrypoints, &mut unplaced);
+    }
+    for record in records.iter().filter(|record| !record.is_test) {
+        let file_name = Path::new(&record.rel_path)
+            .file_name()
+            .and_then(|name| name.to_str());
+        match file_name {
+            Some("__main__.py") => declared.entrypoints.push(EntryPointOutput {
+                file: record.rel_path.clone(),
+                kind: EntryKind::MainModule,
+                name: super::tests_of::python_module_names(&record.rel_path, &paths)
+                    .into_iter()
+                    .next()
+                    .and_then(|name| name.strip_suffix(".__main__").map(str::to_string)),
+            }),
+            Some("main.go") => declared.go_mains.push(record.abs_path.clone()),
+            _ => {}
+        }
+    }
+    if !unplaced.is_empty() {
+        let shown: Vec<_> = unplaced.iter().take(3).cloned().collect();
+        declared.hints.push(format!(
+            "{} declared entrypoint{} name no file the walk found — a build output, or a \
+             layout this reading does not follow: {}{}.",
+            unplaced.len(),
+            if unplaced.len() == 1 { "" } else { "s" },
+            shown.join(", "),
+            if unplaced.len() > shown.len() {
+                ", …"
+            } else {
+                ""
+            }
+        ));
+    }
     declared
 }
 
@@ -387,6 +468,201 @@ fn go_work_members(root: &Path, hints: &mut Vec<String>) -> Option<Vec<(String, 
         members.push((directory, module));
     }
     Some(members)
+}
+
+/// The entrypoints a package manifest declares, placed on the files the walk
+/// found; those it names no such file for go to `unplaced`.
+fn entrypoints_of(
+    manifest: &Manifest,
+    paths: &HashSet<&str>,
+    found: &mut Vec<EntryPointOutput>,
+    unplaced: &mut Vec<String>,
+) {
+    let directory = manifest.directory();
+    let at = |relative: &str| -> String {
+        let relative = relative.trim_start_matches("./");
+        if directory.is_empty() {
+            relative.to_string()
+        } else {
+            format!("{directory}/{relative}")
+        }
+    };
+    let mut place = |file: Option<String>, kind, name: Option<String>, declared: String| match file
+        .filter(|file| paths.contains(file.as_str()))
+    {
+        Some(file) => found.push(EntryPointOutput { file, kind, name }),
+        None => unplaced.push(format!("{} {declared}", manifest.record.rel_path)),
+    };
+    match manifest.file_name() {
+        "Cargo.toml" => {
+            let Some(table) = manifest.toml() else {
+                return;
+            };
+            let Some(package) = toml_at(table, &["package", "name"]).and_then(|n| n.as_str())
+            else {
+                return;
+            };
+            let crate_name = package.replace('-', "_");
+            let lib = table.get("lib");
+            let lib_path = lib
+                .and_then(|lib| lib.get("path"))
+                .and_then(|path| path.as_str())
+                .unwrap_or("src/lib.rs");
+            if lib.is_some() || paths.contains(at(lib_path).as_str()) {
+                let name = lib
+                    .and_then(|lib| lib.get("name"))
+                    .and_then(|name| name.as_str())
+                    .map_or(crate_name, str::to_string);
+                place(
+                    Some(at(lib_path)),
+                    EntryKind::Lib,
+                    Some(name),
+                    "[lib]".into(),
+                );
+            }
+            let mut bins: Vec<(String, String)> = Vec::new();
+            for bin in table
+                .get("bin")
+                .and_then(|bins| bins.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let Some(name) = bin.get("name").and_then(|name| name.as_str()) else {
+                    continue;
+                };
+                let file = match bin.get("path").and_then(|path| path.as_str()) {
+                    Some(path) => Some(at(path)),
+                    None => [
+                        (name == package).then(|| at("src/main.rs")),
+                        Some(at(&format!("src/bin/{name}.rs"))),
+                        Some(at(&format!("src/bin/{name}/main.rs"))),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .find(|file| paths.contains(file.as_str())),
+                };
+                if let Some(file) = &file {
+                    bins.push((file.clone(), name.to_string()));
+                }
+                place(
+                    file,
+                    EntryKind::Bin,
+                    Some(name.into()),
+                    format!("[[bin]] {name}"),
+                );
+            }
+            let discovers =
+                toml_at(table, &["package", "autobins"]).and_then(|a| a.as_bool()) != Some(false);
+            if discovers {
+                let bin_dir = at("src/bin/");
+                let mut discovered: Vec<(String, String)> = Vec::new();
+                if paths.contains(at("src/main.rs").as_str()) {
+                    discovered.push((at("src/main.rs"), package.to_string()));
+                }
+                for path in paths
+                    .iter()
+                    .filter_map(|path| path.strip_prefix(bin_dir.as_str()))
+                {
+                    let name = match path.split_once('/') {
+                        Some((name, "main.rs")) => name,
+                        None => match path.strip_suffix(".rs") {
+                            Some(name) => name,
+                            None => continue,
+                        },
+                        Some(_) => continue,
+                    };
+                    discovered.push((format!("{bin_dir}{path}"), name.to_string()));
+                }
+                discovered.sort();
+                for (file, name) in discovered {
+                    if bins.iter().any(|(declared, _)| *declared == file) {
+                        continue;
+                    }
+                    found.push(EntryPointOutput {
+                        file,
+                        kind: EntryKind::Bin,
+                        name: Some(name),
+                    });
+                }
+            }
+        }
+        "pyproject.toml" => {
+            let Some(table) = manifest.toml() else {
+                return;
+            };
+            let module_root = toml_at(table, &["tool", "uv", "build-backend", "module-root"])
+                .and_then(|root| root.as_str());
+            let roots: Vec<String> = match module_root {
+                Some(root) => vec![at(root)],
+                None => vec![at("src"), directory.to_string()],
+            };
+            for scripts in [
+                &["project", "scripts"][..],
+                &["project", "gui-scripts"][..],
+                &["tool", "poetry", "scripts"][..],
+            ] {
+                let Some(scripts) = toml_at(table, scripts).and_then(|s| s.as_table()) else {
+                    continue;
+                };
+                for (name, target) in scripts {
+                    let Some(target) = target.as_str() else {
+                        continue;
+                    };
+                    let module = target.split(':').next().unwrap_or_default().trim();
+                    let module_path = module.replace('.', "/");
+                    let mut candidates = roots.iter().flat_map(|root| {
+                        let base = if root.is_empty() {
+                            module_path.clone()
+                        } else {
+                            format!("{root}/{module_path}")
+                        };
+                        [format!("{base}.py"), format!("{base}/__init__.py")]
+                    });
+                    let file = candidates.find(|file| paths.contains(file.as_str()));
+                    place(
+                        file,
+                        EntryKind::Script,
+                        Some(name.clone()),
+                        format!("script {name}"),
+                    );
+                }
+            }
+        }
+        "package.json" => {
+            let Some(json) = manifest.json() else {
+                return;
+            };
+            let package = json.get("name").and_then(|name| name.as_str());
+            match json.get("bin") {
+                Some(serde_json::Value::String(file)) => {
+                    let name = package.map(|p| p.rsplit('/').next().unwrap_or(p).to_string());
+                    place(Some(at(file)), EntryKind::Bin, name, "bin".into());
+                }
+                Some(serde_json::Value::Object(bins)) => {
+                    for (name, file) in bins {
+                        if let Some(file) = file.as_str() {
+                            place(
+                                Some(at(file)),
+                                EntryKind::Bin,
+                                Some(name.clone()),
+                                format!("bin {name}"),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if let Some(main) = json.get("main").and_then(|main| main.as_str()) {
+                place(
+                    Some(at(main)),
+                    EntryKind::Lib,
+                    package.map(str::to_string),
+                    "main".into(),
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 fn toml_at<'t>(table: &'t toml::Table, keys: &[&str]) -> Option<&'t toml::Value> {

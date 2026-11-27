@@ -138,13 +138,13 @@ symora map summary
     "count": 2,
     "showing": 2,
     "items": [
-      { "file": "src/main.ts", "reason": "main entry file" },
-      { "file": "src/app.ts", "reason": "application bootstrap candidate" }
+      { "file": "src/main.ts", "kind": "bin", "name": "shopflow" },
+      { "file": "src/index.ts", "kind": "lib", "name": "shopflow" }
     ]
   }
 }
 ```
-> 49 of the 67 TypeScript code files live under `src`. `entrypoints` suggests starting points from file names and paths; confirm execution paths in source and configuration. `languages` counts code languages only; data files such as JSON are `support_files`.
+> 49 of the 67 TypeScript code files live under `src`. `entrypoints` lists only the starting points a manifest declares (here `package.json`'s `bin` and `main`), never a file merely named like one (`app.ts`, `server.ts`). In a workspace, the packages its manifests list come in `packages`. `languages` counts code languages only; data files such as JSON are `support_files`.
 
 ### ② Discover — where is checkout handled?
 

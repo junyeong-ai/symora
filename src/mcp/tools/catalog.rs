@@ -15,8 +15,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "get_project_overview",
             "High-level project map: language breakdown, top directories, the packages \
                           its workspace manifests declare (Cargo, npm or yarn, pnpm, uv, go.work; \
-                          absent where none declares a workspace), and probable entrypoints. \
-                          Cheap orientation step before deeper queries.",
+                          absent where none declares a workspace), and the entrypoints its \
+                          manifests declare (Cargo targets, Python scripts and __main__.py, \
+                          package.json bin and main, Go main packages). Cheap orientation step \
+                          before deeper queries.",
             schema_object(&[], &[]),
         ),
         ToolDefinition::read_only(
