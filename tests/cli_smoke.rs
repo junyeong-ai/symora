@@ -2706,6 +2706,99 @@ fn call_hierarchy_asks_the_server_for_every_changed_symbol() {
     );
 }
 
+/// Python runs `__init__` where its class is called, and its server reports
+/// those calls as references to the class alone, as this fake does: the
+/// constructor's own references and incoming calls are none. Its callers are
+/// the callables holding the class's references that the syntax tree reads
+/// as called — `make` and `total`, not the import or the annotation — marked
+/// as derived, and every surface says they are a lower bound: `callers`,
+/// both diff-impact modes, and `refs`, whose count stays the references to
+/// `__init__` itself.
+#[cfg(unix)]
+#[test]
+fn a_python_constructors_callers_are_its_classs_calls() {
+    // `describe` names `Circle` in an annotation and in a string, as this
+    // fake reports any word: neither is a call the syntax tree holds.
+    let uses = "from shapes import Circle\n\n\ndef make() -> Circle:\n    return Circle(2.0)\n\n\n\
+                def total() -> float:\n    return Circle(1.0).area() + make().area()\n\n\n\
+                def describe(shape: Circle) -> str:\n    return \"a Circle(radius)\"\n";
+    let shapes = |signature: &str| {
+        format!(
+            "class Circle:\n    def __init__(self, {signature}) -> None:\n        \
+             self.radius = radius\n\n    def area(self) -> float:\n        return self.radius\n"
+        )
+    };
+    let Some(dir) = reference_served_repo(&[
+        (
+            "shapes.py",
+            &shapes("radius: float"),
+            &shapes("radius: float, name: str = \"\""),
+        ),
+        ("use.py", uses, uses),
+    ]) else {
+        return;
+    };
+    let repo = dir.path();
+    let lower_bound = |hints: &serde_json::Value| {
+        hints.as_array().is_some_and(|hints| {
+            hints.iter().any(|hint| {
+                hint.as_str().is_some_and(|hint| {
+                    hint.contains("`__init__` runs where `Circle` is called")
+                        && hint.contains("lower bound")
+                })
+            })
+        })
+    };
+    for mode in ["--callers", "--call-hierarchy"] {
+        let page = diff_impact_in_process(repo, &[mode]);
+        let row = page["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .find(|row| row["name"] == "__init__")
+            .unwrap_or_else(|| panic!("{mode}: {page}"));
+        assert_eq!(row["refs"], 0, "{mode}: {page}");
+        assert_eq!(
+            row["callers_status"], "references_derived",
+            "{mode}: {page}"
+        );
+        let callers: Vec<(&str, u64)> = row["callers"]["items"]
+            .as_array()
+            .expect("callers")
+            .iter()
+            .map(|caller| {
+                (
+                    caller["name"].as_str().unwrap(),
+                    caller["call_site"]["line"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(callers, [("make", 5), ("total", 9)], "{mode}: {page}");
+        assert!(lower_bound(&page["hints"]), "{mode}: {page}");
+    }
+
+    let out = symora()
+        .args(["callers", "shapes.py:2"])
+        .current_dir(repo)
+        .env("SYMORA_NO_DAEMON", "1")
+        .output()
+        .expect("symora binary should exist");
+    let callers: serde_json::Value = common::parse_response(&out.stdout).unwrap();
+    assert_eq!(callers["count"], 2, "{callers}");
+    assert_eq!(callers["callers_status"], "references_derived", "{callers}");
+    assert!(lower_bound(&callers["hints"]), "{callers}");
+
+    let out = symora()
+        .args(["refs", "shapes.py:2"])
+        .current_dir(repo)
+        .env("SYMORA_NO_DAEMON", "1")
+        .output()
+        .expect("symora binary should exist");
+    let refs: serde_json::Value = common::parse_response(&out.stdout).unwrap();
+    assert_eq!(refs["count"], 0, "{refs}");
+    assert!(lower_bound(&refs["hints"]), "{refs}");
+}
+
 /// A diff's changed symbols are read through the same reader every other
 /// surface uses, so a language with no server still reports WHAT changed.
 /// Reference counts stay absent and say so — a count no server can supply is

@@ -327,8 +327,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             &[(
                 "callers_status",
                 "string",
-                "Present only when callers were derived from references because the \
-                 server lacks call hierarchy — reference-based, not verified call edges",
+                "Present only when callers were derived from references — because the \
+                 server lacks call hierarchy, or a Python constructor's constructions, which \
+                 the server reports as references to its class, joined its list — \
+                 reference-based, not verified call edges",
             )],
         )),
         ToolDefinition::read_only(

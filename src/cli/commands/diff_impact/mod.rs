@@ -7,16 +7,16 @@ use futures::StreamExt;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::analysis::callers_from_references;
+use crate::cli::analysis::{Constructions, callers_from_references};
 use crate::cli::response::disclosure::{CoverageReason, LowerBound, name_some};
 use crate::cli::response::{
     CallHierarchyOutput, INDEXING_DEGRADED, LocationOutput, NOT_CALLABLE, REFERENCES_DERIVED,
     ReferenceCount, Section,
 };
 use crate::cli::utils::{members_at_deletion, members_at_line, shell_arg};
-use crate::cli::{FileSymbols, SymbolBackend, declared_in};
+use crate::cli::{FileSymbols, SymbolBackend, declarations_of, declared_in};
 use crate::constants::defaults::REFERENCE_COUNT_CONCURRENCY;
-use crate::models::lsp::FindSymbolsOptions;
+use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 use crate::services::symbols::{SymbolExtractor, TypeHeaders};
 
@@ -310,6 +310,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         changes,
         unmeasured: unreadable,
         unfinished,
+        hints: row_hints,
     } = analyze_hunks(
         app,
         &hunks,
@@ -338,6 +339,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     }
     let mut listed = HashSet::new();
     unmeasured.retain(|file| listed.insert(file.clone()));
+    hints.extend(row_hints);
     let timed_out = Some(CoverageReason::TimedOut.as_str());
     if changes
         .iter()
@@ -451,6 +453,9 @@ struct HunkAnalysis {
     /// The files the cap left work undone in, in path order: those it
     /// refused a row of and those it stopped before reading.
     unfinished: Vec<PathBuf>,
+    /// What the rows' counts and callers leave unsaid: where a constructor
+    /// runs that no reference names.
+    hints: Vec<String>,
 }
 
 /// A changed symbol's row, in the order it is reported: settled where the
@@ -549,8 +554,12 @@ impl CallerSource {
 /// A row once its references were asked: what is still to be read off them.
 struct Measured {
     impact: ChangedSymbolImpact,
-    /// The references its callers are read off, where they are derived.
+    /// The callers the server named, where derived ones join them.
+    named: Vec<CallHierarchyItem>,
+    /// The references its callers are read off, where any are.
     derive_from: Option<Vec<Location>>,
+    /// Where it runs, for a constructor run by calling its type.
+    constructions: Option<Constructions>,
 }
 
 /// The diff's changed symbols, their live rows measured with a bounded
@@ -581,7 +590,9 @@ async fn analyze_hunks(
             match row {
                 Row::Settled(impact) => Measured {
                     impact,
+                    named: Vec::new(),
                     derive_from: None,
+                    constructions: None,
                 },
                 Row::Live {
                     answer,
@@ -605,40 +616,48 @@ async fn analyze_hunks(
         .collect()
         .await;
 
-    let referencing: BTreeSet<PathBuf> = measured
+    let referencing: Vec<PathBuf> = measured
         .iter()
         .filter_map(|row| row.derive_from.as_ref())
         .flatten()
         .map(|reference| reference.file.clone())
         .collect();
-    let declarations: HashMap<PathBuf, Option<Vec<Symbol>>> = futures::stream::iter(referencing)
-        .map(|file| async move {
-            let read = declared_in(app, &file, FindSymbolsOptions::default().with_depth(10))
-                .await
-                .ok()
-                .map(|read| read.symbols);
-            (file, read)
-        })
-        .buffer_unordered(REFERENCE_COUNT_CONCURRENCY)
-        .collect()
-        .await;
+    let declarations = declarations_of(app, referencing).await;
     let root = app.output.root();
     let limit = app.config().lsp.calls_limit;
+    let mut hints = Vec::new();
     for row in &mut measured {
+        if let (Some(constructions), Some(name)) = (&row.constructions, &row.impact.name) {
+            hints.push(format!(
+                "{}:{}: {}.",
+                row.impact.location.file,
+                row.impact.location.line,
+                constructions.hint(name)
+            ));
+        }
         let Some(references) = row.derive_from.take() else {
             continue;
         };
         match callers_from_references(&references, |file| {
             declarations.get(file).and_then(|read| read.as_deref())
         }) {
-            Some(found) => {
+            Some(derived) => {
+                let mut callers = std::mem::take(&mut row.named);
+                for caller in derived {
+                    if !callers
+                        .iter()
+                        .any(|named| named.location == caller.location)
+                    {
+                        callers.push(caller);
+                    }
+                }
                 row.impact.callers = Some(Section::with_total(
-                    found
+                    callers
                         .iter()
                         .take(limit)
                         .map(|caller| CallHierarchyOutput::from_item(caller, root))
                         .collect(),
-                    found.len(),
+                    callers.len(),
                 ));
             }
             // A referencing file no reader could read leaves its
@@ -650,6 +669,7 @@ async fn analyze_hunks(
         changes: measured.into_iter().map(|row| row.impact).collect(),
         unmeasured,
         unfinished,
+        hints,
     }
 }
 
@@ -944,6 +964,14 @@ async fn analyze_symbol_impact(
     let outcome = answer.references_of(lsp, file, sym, root).await;
     let count = ReferenceCount::of(&outcome, app.test_scope());
 
+    let constructions = match &outcome {
+        Ok(Some(analysis)) => analysis.constructions().cloned(),
+        _ => None,
+    };
+    let sites = constructions
+        .as_ref()
+        .and_then(|constructions| constructions.sites.clone());
+    let mut named = Vec::new();
     let mut derive_from = None;
     let (callers, callers_status) = match (callers, &outcome) {
         (None, _) => (None, None),
@@ -951,7 +979,9 @@ async fn analyze_symbol_impact(
             (None, Some(NOT_CALLABLE))
         }
         (Some(CallerSource::References), Ok(Some(analysis))) => {
-            derive_from = Some(analysis.references().to_vec());
+            let mut references = analysis.references().to_vec();
+            references.extend(sites.unwrap_or_default());
+            derive_from = Some(references);
             (None, Some(REFERENCES_DERIVED))
         }
         (Some(CallerSource::CallHierarchy), Ok(Some(analysis))) => {
@@ -960,6 +990,13 @@ async fn analyze_symbol_impact(
                 .incoming_calls(&anchor.file, anchor.line, anchor.column)
                 .await
             {
+                // Callers the constructions name join the server's, which
+                // makes the list no longer the server's answer alone.
+                Ok(calls) if sites.is_some() => {
+                    named = calls.data;
+                    derive_from = sites;
+                    (None, Some(REFERENCES_DERIVED))
+                }
                 Ok(calls) => (
                     Some(Section::with_total(
                         calls
@@ -998,7 +1035,9 @@ async fn analyze_symbol_impact(
             callers_status,
             deletion: None,
         },
+        named,
         derive_from,
+        constructions,
     }
 }
 

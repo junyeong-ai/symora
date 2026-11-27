@@ -13,7 +13,7 @@
 //! type holds, so the count `refs`, `impact`, and `context` publish under
 //! the same name is the same number.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::cli::ParsedLocation;
@@ -23,6 +23,7 @@ use crate::cli::utils::{
     line_addressed_symbol,
 };
 use crate::error::LspError;
+use crate::infra::ast::called_names;
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions, IndexingDegradation};
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 use crate::services::lsp::LspService;
@@ -271,6 +272,112 @@ pub struct DeclaringType {
     pub references: usize,
 }
 
+/// Where a constructor its language runs by calling its type
+/// ([`runs_through_its_type`]) is run: the calls of that type.
+#[derive(Debug, Clone)]
+pub struct Constructions {
+    /// The type the constructor belongs to.
+    pub type_name: String,
+    /// The type's references the syntax tree reads as the name a call
+    /// calls, in the references' order; `None` where the type's references
+    /// or a file holding them could not be read, which leaves them unknown.
+    pub sites: Option<Vec<Location>>,
+}
+
+impl Constructions {
+    /// What a list of callers read off these constructions leaves out, said
+    /// wherever one is given: they are a lower bound.
+    pub fn hint(&self, member: &str) -> String {
+        let type_name = &self.type_name;
+        match &self.sites {
+            Some(sites) => format!(
+                "`{member}` runs where `{type_name}` is called, which its server does not \
+                 report as a reference to `{member}`: the {} call(s) of `{type_name}` the \
+                 syntax tree holds are read as its callers. A construction through an alias, \
+                 `cls(…)`, `type(self)(…)` or a subclass is not among them, so they are a \
+                 lower bound",
+                sites.len()
+            ),
+            None => format!(
+                "`{member}` runs where `{type_name}` is called, which its server does not \
+                 report as a reference to `{member}`, and the calls of `{type_name}` could \
+                 not be read, so what runs it is unknown"
+            ),
+        }
+    }
+}
+
+/// Whether `language` runs a member by calling the type that declares it
+/// rather than by naming the member, so that the server finds no reference
+/// to the member where it runs: Python runs `__new__` and `__init__` for
+/// `Circle(…)`, which pyright reports as a reference to `Circle` alone.
+/// tsserver (tsc 7), clangd and rust-analyzer report `new Circle(…)`,
+/// `Circle(…)` and `Circle::new(…)` as references to the constructor or the
+/// `new` function itself, so they need no reading of the type's; other
+/// languages are left out until a server's answer for them is checked.
+fn runs_through_its_type(language: Language, name: &str) -> bool {
+    language == Language::Python && matches!(name, "__init__" | "__new__")
+}
+
+/// The constructions that run `member`, declared in `file`, where its
+/// language runs it by calling its type ([`runs_through_its_type`]): that
+/// type's references the syntax tree reads as the callee of a call. `None`
+/// for any other member, and where no type the server's tree lists holds it.
+pub async fn constructions_of(
+    lsp: &dyn LspService,
+    file: &Path,
+    member: &Symbol,
+    root: &Path,
+) -> Option<Constructions> {
+    if !runs_through_its_type(Language::from_path(file), &member.name) {
+        return None;
+    }
+    let symbols = lsp
+        .find_symbols(file, FindSymbolsOptions::default().with_depth(10))
+        .await
+        .ok()?;
+    let declaring = declaring_type_of(&symbols, member.location.line, member.location.column)
+        .filter(|holder| holder.kind == SymbolKind::Class)?;
+    let sites = match lsp
+        .find_references(file, declaring.location.line, declaring.location.column)
+        .await
+    {
+        Ok(references) => {
+            let name = ParsedLocation {
+                file: file.to_path_buf(),
+                line: declaring.location.line,
+                column: declaring.location.column,
+                column_explicit: true,
+            };
+            let declared = declared_at(lsp, name, Some(declaring.kind)).await;
+            called_among(usages_of(references.data, root, &declared))
+        }
+        Err(_) => None,
+    };
+    Some(Constructions {
+        type_name: declaring.name,
+        sites,
+    })
+}
+
+/// The references the syntax tree of their files reads as the name a call
+/// calls; `None` where one of their files could not be read.
+fn called_among(references: Vec<Location>) -> Option<Vec<Location>> {
+    let mut called: HashMap<PathBuf, HashSet<(u32, u32)>> = HashMap::new();
+    let mut sites = Vec::new();
+    for reference in references {
+        if !called.contains_key(&reference.file) {
+            let content = std::fs::read_to_string(&reference.file).ok()?;
+            let names = called_names(&content, Language::from_path(&reference.file))?;
+            called.insert(reference.file.clone(), names);
+        }
+        if called[&reference.file].contains(&(reference.line, reference.column)) {
+            sites.push(reference);
+        }
+    }
+    Some(sites)
+}
+
 pub struct LocationAnalysis {
     /// The declaration the input addressed — target, position, and how it
     /// resolved. Its `resolution.as_status()` is the `anchor_status` marker
@@ -287,6 +394,9 @@ pub struct LocationAnalysis {
     /// marker derives from this, never from a racy after-the-fact read.
     pub(crate) indexing: Option<IndexingDegradation>,
     pub(crate) declaring_type: Option<DeclaringType>,
+    /// Where the anchor runs, for a constructor its language runs by
+    /// calling its type, whose server reports none of those calls.
+    pub(crate) constructions: Option<Constructions>,
 }
 
 impl LocationAnalysis {
@@ -319,9 +429,18 @@ impl LocationAnalysis {
     /// One sentence for every surface, because the reading it corrects is the
     /// same one: a zero taken for "nothing reaches this".
     pub fn member_reach_hint(&self) -> Option<String> {
-        let declaring = self.declaring_type.as_ref()?;
         let name = self.anchor.symbol.as_ref().map(|s| s.name.as_str())?;
+        if let Some(constructions) = &self.constructions {
+            return Some(constructions.hint(name));
+        }
+        let declaring = self.declaring_type.as_ref()?;
         Some(member_reach(name, declaring))
+    }
+
+    /// Where the anchor runs although no reference names it: see
+    /// [`Constructions`].
+    pub fn constructions(&self) -> Option<&Constructions> {
+        self.constructions.as_ref()
     }
 
     /// How the anchor resolved — see [`AnchorResolution`]. Surfaces render
@@ -382,6 +501,9 @@ pub async fn member_reach_hint_of(
     symbol: &Symbol,
     root: &Path,
 ) -> Option<String> {
+    if let Some(constructions) = constructions_of(lsp, file, symbol, root).await {
+        return Some(constructions.hint(&symbol.name));
+    }
     let declaring = declaring_type_reach(
         lsp,
         file,
@@ -507,7 +629,11 @@ impl LocationAnalysis {
             _ => None,
         };
         let usages = usages_of(references.data, root, &declared);
-        let declaring_type = match usages.is_empty() {
+        let constructions = match &anchor.symbol {
+            Some(symbol) => constructions_of(lsp, &anchor.file, symbol, root).await,
+            None => None,
+        };
+        let declaring_type = match usages.is_empty() && constructions.is_none() {
             true => declaring_type_reach(lsp, &anchor.file, anchor.line, anchor.column, root).await,
             false => None,
         };
@@ -518,6 +644,7 @@ impl LocationAnalysis {
             references: usages,
             indexing: references.indexing,
             declaring_type,
+            constructions,
         })
     }
 
@@ -544,6 +671,10 @@ impl LocationAnalysis {
             .await?;
         let declared = declared_at(lsp, input, Some(kind)).await;
         let usages = usages_of(references.data, root, &declared);
+        let constructions = match &anchor.symbol {
+            Some(symbol) => constructions_of(lsp, file, symbol, root).await,
+            None => None,
+        };
         Ok(Self {
             anchor,
             binding_name: None,
@@ -551,6 +682,7 @@ impl LocationAnalysis {
             references: usages,
             indexing: references.indexing,
             declaring_type: None,
+            constructions,
         })
     }
 
@@ -1286,6 +1418,7 @@ mod tests {
     fn analysis_of(anchor: Anchor, references: Vec<Location>) -> LocationAnalysis {
         LocationAnalysis {
             declaring_type: None,
+            constructions: None,
             anchor,
             binding_name: None,
             language: Language::Rust,

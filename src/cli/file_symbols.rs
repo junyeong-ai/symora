@@ -1,5 +1,7 @@
-use std::path::Path;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 
+use futures::StreamExt;
 use serde::Serialize;
 
 use crate::app::App;
@@ -8,6 +10,7 @@ use crate::cli::utils::{
     SymbolResolution, column_addressed_symbol, holds, line_addressed_symbol, placed_at,
     symbols_declared_on_line,
 };
+use crate::constants::defaults::REFERENCE_COUNT_CONCURRENCY;
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Location, Symbol};
@@ -108,6 +111,28 @@ impl FileSymbols {
             .await
             .map(Some)
     }
+}
+
+/// Each file's declarations ([`declared_in`]), read once and a bounded
+/// number at a time; `None` for a file nothing could read. What
+/// [`callers_from_references`](crate::cli::analysis::callers_from_references)
+/// reads the callables holding references off.
+pub async fn declarations_of(
+    app: &App,
+    files: impl IntoIterator<Item = PathBuf>,
+) -> HashMap<PathBuf, Option<Vec<Symbol>>> {
+    let files: BTreeSet<PathBuf> = files.into_iter().collect();
+    futures::stream::iter(files)
+        .map(|file| async move {
+            let read = declared_in(app, &file, FindSymbolsOptions::default().with_depth(10))
+                .await
+                .ok()
+                .map(|read| read.symbols);
+            (file, read)
+        })
+        .buffer_unordered(REFERENCE_COUNT_CONCURRENCY)
+        .collect()
+        .await
 }
 
 /// The declarations a file makes.

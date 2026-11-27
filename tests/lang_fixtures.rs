@@ -524,8 +524,9 @@ fn context_with_bodies_attaches_whole_type_bodies() {
 /// construction, dispatch, a protocol satisfied structurally — and none of
 /// those name the member, so its zero is not reachability. `Circle.__init__`
 /// is the ordinary case: the fixture builds a `Circle`, which names the class
-/// and never the constructor. A free item has no such route, so its zero
-/// stands bare rather than being qualified into uselessness.
+/// and never the constructor, so the call of `Circle` is read as its caller.
+/// A free item has no such route, so its zero stands bare rather than being
+/// qualified into uselessness.
 #[test]
 #[ignore = "requires pyright + a built fixture venv; run: cargo test --test lang_fixtures -- --ignored"]
 fn an_empty_reference_set_says_what_kind_of_empty_it_is() {
@@ -541,31 +542,48 @@ fn an_empty_reference_set_says_what_kind_of_empty_it_is() {
 
     let counted = |page: &Value| page["count"].as_u64().is_some_and(|n| n > 0);
 
+    let constructed = |page: &Value| {
+        page["hints"].as_array().is_some_and(|hints| {
+            hints.iter().any(|h| {
+                h.as_str().is_some_and(|h| {
+                    h.contains("runs where `Circle` is called")
+                        && h.contains("the 1 call(s) of `Circle`")
+                        && h.contains("lower bound")
+                })
+            })
+        })
+    };
     let constructor = settled(
         &mut session,
         "find_references",
         at("__init__"),
-        |page| {
-            page["hints"].as_array().is_some_and(|hints| {
-                hints
-                    .iter()
-                    .any(|h| h.as_str().is_some_and(|h| h.contains("is used")))
-            })
-        },
+        constructed,
         "the fixture builds a `Circle`",
     );
     assert_eq!(
         constructor["count"], 0,
         "the fixture never names the constructor: {constructor}"
     );
-    let hints = constructor["hints"].as_array().expect("hints");
-    assert!(
-        hints.iter().any(|h| {
-            h.as_str()
-                .is_some_and(|h| h.contains("Circle") && h.contains("not evidence"))
-        }),
-        "a member of a referenced type must say its zero is not reachability: {constructor}"
+    let callers = settled(
+        &mut session,
+        "find_callers",
+        at("__init__"),
+        constructed,
+        "the call of `Circle` runs the constructor",
     );
+    assert_eq!(callers["callers_status"], "references_derived", "{callers}");
+    let named: Vec<(&str, Option<u64>)> = callers["items"]
+        .as_array()
+        .expect("callers")
+        .iter()
+        .map(|item| {
+            (
+                item["name"].as_str().unwrap(),
+                item["call_site"]["line"].as_u64(),
+            )
+        })
+        .collect();
+    assert_eq!(named, [("describe", Some(7))], "{callers}");
 
     settled(
         &mut session,

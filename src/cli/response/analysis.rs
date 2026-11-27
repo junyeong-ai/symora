@@ -297,6 +297,7 @@ mod tests {
             references: Vec::new(),
             indexing: None,
             declaring_type: None,
+            constructions: None,
         }
     }
 
