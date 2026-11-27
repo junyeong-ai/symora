@@ -618,6 +618,16 @@ impl LspClient {
         }
     }
 
+    /// Moves the last use back by `age`, as if the client had sat unused
+    /// that long, so a test of idleness waits for nothing.
+    #[cfg(test)]
+    pub(super) fn age_use(&self, age: Duration) {
+        self.usage
+            .lock()
+            .expect("client usage lock poisoned")
+            .last_used -= age;
+    }
+
     /// Send a request and wait for response
     pub async fn request<T: serde::de::DeserializeOwned>(
         &self,

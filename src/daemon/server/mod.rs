@@ -313,6 +313,7 @@ impl DaemonServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::lsp::manager::tests::IDLE_LIMIT;
     use context::get_context;
 
     fn idle_test_server(root: &std::path::Path) -> DaemonServer {
@@ -321,7 +322,7 @@ mod tests {
             pid_path: root.join("daemon.pid"),
             lock_path: root.join("daemon.lock"),
             bind_lock_path: root.join("daemon.bind.lock"),
-            idle_timeout: Duration::from_secs(1),
+            idle_timeout: IDLE_LIMIT,
             max_concurrent: 1,
         })
     }
@@ -331,7 +332,7 @@ mod tests {
             .connection_usage
             .lock()
             .expect("daemon connection usage lock poisoned")
-            .last_used = Instant::now() - Duration::from_secs(2);
+            .last_used = Instant::now() - 2 * IDLE_LIMIT;
     }
 
     #[tokio::test]
@@ -385,7 +386,7 @@ mod tests {
         assert!(!*server.shutdown.borrow());
         let released_after = Instant::now();
         drop(client);
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if server
                     .connection_usage
@@ -400,7 +401,7 @@ mod tests {
             }
         })
         .await
-        .unwrap();
+        .expect("the closed connection was never released");
         assert!(
             server
                 .connection_usage

@@ -142,6 +142,7 @@ pub(super) async fn restart_project(projects: &ProjectsMap, project: &str) -> Pr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::lsp::manager::tests::IDLE_LIMIT;
 
     #[tokio::test]
     async fn restart_refuses_a_server_start_after_its_caller_is_cancelled() {
@@ -288,14 +289,16 @@ mod tests {
             .await
             .unwrap();
         let ctx = Arc::clone(&lease);
-        ctx.last_used
-            .store(epoch_millis() - 1000, Ordering::Relaxed);
+        ctx.last_used.store(
+            epoch_millis() - (2 * IDLE_LIMIT).as_millis() as u64,
+            Ordering::Relaxed,
+        );
         assert!(!ctx.is_idle(Duration::ZERO));
         let released_after = epoch_millis();
         drop(lease);
         assert_eq!(ctx.in_flight.load(Ordering::Acquire), 0);
         assert!(ctx.last_used.load(Ordering::Relaxed) >= released_after);
-        assert!(!ctx.is_idle(Duration::from_secs(1)));
+        assert!(!ctx.is_idle(IDLE_LIMIT));
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(ctx.is_idle(Duration::from_millis(10)));
     }
@@ -351,7 +354,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let ctx = ProjectContext::new(root.path());
         assert_eq!(ctx.request_count.load(Ordering::Relaxed), 0);
-        assert!(!ctx.is_idle(Duration::from_secs(1)));
+        assert!(!ctx.is_idle(IDLE_LIMIT));
         ctx.last_used
             .store(epoch_millis() - 1000, Ordering::Relaxed);
         assert!(ctx.is_idle(Duration::from_millis(10)));

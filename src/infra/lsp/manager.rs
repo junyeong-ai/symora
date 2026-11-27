@@ -598,6 +598,12 @@ async fn forward_file_changes(
 pub(crate) mod tests {
     use super::*;
 
+    /// An idle limit no pause between two steps of a test reaches, however
+    /// loaded the machine. A test that needs a client, project or daemon
+    /// idle past it moves the last use back (`LspClient::age_use`) rather
+    /// than waiting for it.
+    pub(crate) const IDLE_LIMIT: Duration = Duration::from_secs(60);
+
     fn manager_with_cap(cap: usize) -> LspManager {
         let mut config = crate::config::LspRuntimeConfig::default();
         config.max_concurrent_servers = cap;
@@ -690,7 +696,7 @@ pub(crate) mod tests {
             Arc::clone(&manager.runtime_config),
             false,
         );
-        let created_at = client.usage().last_used;
+        client.age_use(2 * IDLE_LIMIT);
         let Reservation::Granted { done, evict } = manager.reserve(Language::Go) else {
             panic!("the empty pool must admit a start");
         };
@@ -700,11 +706,10 @@ pub(crate) mod tests {
             language: Language::Go,
             done,
         };
-        tokio::time::sleep(Duration::from_millis(20)).await;
         let admitted_at = std::time::Instant::now();
         slot.fill(&client);
         assert!(client.usage().last_used >= admitted_at);
-        assert_eq!(manager.cleanup_idle(created_at.elapsed()).await, 0);
+        assert_eq!(manager.cleanup_idle(IDLE_LIMIT).await, 0);
         assert!(Arc::ptr_eq(
             &manager.peek_client(Language::Go).unwrap(),
             &client
@@ -1096,12 +1101,12 @@ exec sleep 600
             let fake = FakeServer::new();
             let manager = fake.manager("serve", 0);
             let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            client.age_use(2 * IDLE_LIMIT);
             let stamp = client.usage().last_used;
-            tokio::time::sleep(Duration::from_millis(40)).await;
             let again = bounded(manager.get_client(Language::Go)).await.unwrap();
             assert!(Arc::ptr_eq(&client, &again));
             assert!(client.usage().last_used > stamp);
-            assert_eq!(manager.cleanup_idle(Duration::from_millis(30)).await, 0);
+            assert_eq!(manager.cleanup_idle(IDLE_LIMIT).await, 0);
             let stamp = client.usage().last_used;
             manager.peek_client(Language::Go).unwrap();
             client
@@ -1123,6 +1128,7 @@ exec sleep 600
                     return false;
                 }
                 let client = client.unwrap();
+                client.age_use(2 * IDLE_LIMIT);
                 let stamp = client.usage().last_used;
                 let request = client.request::<serde_json::Value>("textDocument/hover", None);
                 let mut request = Box::pin(request);
@@ -1134,7 +1140,8 @@ exec sleep 600
                 drop(request);
                 assert!(!client.usage().in_flight);
                 assert!(client.usage().last_used > stamp);
-                assert_eq!(manager.cleanup_idle(Duration::from_millis(10)).await, 0);
+                assert_eq!(manager.cleanup_idle(IDLE_LIMIT).await, 0);
+                client.age_use(2 * IDLE_LIMIT);
                 let stamp = client.usage().last_used;
                 assert!(matches!(
                     bounded(client.request::<serde_json::Value>("textDocument/hover", None)).await,
@@ -1142,7 +1149,7 @@ exec sleep 600
                 ));
                 assert!(!client.usage().in_flight);
                 assert!(client.usage().last_used > stamp);
-                assert_eq!(manager.cleanup_idle(Duration::from_millis(10)).await, 0);
+                assert_eq!(manager.cleanup_idle(IDLE_LIMIT).await, 0);
                 assert_eq!(bounded(manager.cleanup_idle(Duration::ZERO)).await, 1);
                 fake.assert_all_gone().await;
                 true
