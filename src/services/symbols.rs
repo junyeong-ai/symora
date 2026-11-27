@@ -6361,6 +6361,29 @@ class K {
 "#,
             declares: &["namespace:F", "class:K", "constructor:K/K"],
         },
+        // An extension block declares no type: its members compile to static
+        // members of the class that holds it, which is their container.
+        DeclarationFixture {
+            language: Language::CSharp,
+            path: "extensions.cs",
+            source: r#"
+public static class Ext {
+    extension<T>(System.Collections.Generic.IEnumerable<T> source) {
+        public bool IsEmpty => false;
+        public T First2() => default;
+    }
+    extension(string) {
+        public static string Blank => "";
+    }
+}
+"#,
+            declares: &[
+                "class:Ext",
+                "property:Ext/IsEmpty",
+                "method:Ext/First2",
+                "property:Ext/Blank",
+            ],
+        },
         DeclarationFixture {
             language: Language::PHP,
             path: "b.php",
