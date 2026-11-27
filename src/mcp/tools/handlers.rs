@@ -112,6 +112,8 @@ struct DiffImpactInput {
     #[serde(default)]
     staged: bool,
     #[serde(default)]
+    path: Option<Vec<std::path::PathBuf>>,
+    #[serde(default)]
     callers: bool,
     #[serde(default)]
     call_hierarchy: bool,
@@ -133,6 +135,7 @@ async fn run_diff_impact(args: Value, app: &App) -> Result<CapturedOutput> {
             DiffImpactArgs {
                 revision: input.revision,
                 staged: input.staged,
+                path: input.path,
                 callers: input.callers,
                 call_hierarchy: input.call_hierarchy,
                 max_symbols: input.max_symbols,
@@ -913,6 +916,7 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
         "get_diff_impact" => &[
             "revision",
             "staged",
+            "path",
             "callers",
             "call_hierarchy",
             "max_symbols",

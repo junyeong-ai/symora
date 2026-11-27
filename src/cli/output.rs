@@ -5,6 +5,7 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 use super::errors::OutputError;
+use super::response::NARROW_THE_QUERY;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]
@@ -177,14 +178,21 @@ impl OutputContext {
     }
 
     pub fn print_success<T: Serialize>(&self, data: T) {
-        self.print_response(data, &[]);
+        self.print_response(data, &[], NARROW_THE_QUERY);
     }
 
     pub fn print_source<T: Serialize>(&self, data: T, body_paths: &[String]) {
-        self.print_response(data, body_paths);
+        self.print_response(data, body_paths, NARROW_THE_QUERY);
     }
 
-    fn print_response<T: Serialize>(&self, data: T, body_paths: &[String]) {
+    /// `print_success` for a response its reader narrows by other means than
+    /// its query, which `narrowing` names for the size-limit hint: a
+    /// `diff-impact` narrows to fewer files with `--path`.
+    pub fn print_narrowable<T: Serialize>(&self, data: T, narrowing: &str) {
+        self.print_response(data, &[], narrowing);
+    }
+
+    fn print_response<T: Serialize>(&self, data: T, body_paths: &[String], narrowing: &str) {
         if self.options.quiet {
             return;
         }
@@ -215,6 +223,7 @@ impl OutputContext {
             if crate::cli::response::fit_to_char_budget(
                 &mut response,
                 self.max_response_chars,
+                narrowing,
                 &measure,
             ) {
                 tracing::debug!("response fitted to output.max_response_chars");

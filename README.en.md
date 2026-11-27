@@ -348,6 +348,7 @@ symora diff-impact                                  # impact of tracked changes 
 symora diff-impact $(git merge-base main HEAD)      # impact of what this branch changed (a range A..B is refused)
 symora diff-impact --callers                        # plus each changed function's callers, read off the references counted
 symora diff-impact --call-hierarchy                 # callers from the server's call hierarchy instead (a search per symbol)
+symora diff-impact main --path packages/api         # only the changes under packages/api; references are still searched project-wide
 
 # Edit & refactor (mutations preview with --dry-run)
 symora edit replace-body <file> --symbol 'Class/method' --body - --dry-run < new.ts

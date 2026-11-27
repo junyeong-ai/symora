@@ -348,6 +348,7 @@ symora diff-impact                                  # HEAD 대비 추적 중인 
 symora diff-impact $(git merge-base main HEAD)      # 이 브랜치가 바꾼 것의 영향 (범위 A..B는 받지 않음)
 symora diff-impact --callers                        # 바뀐 함수마다 이미 센 참조에서 읽어 낸 호출자 포함
 symora diff-impact --call-hierarchy                 # 호출자를 서버의 call hierarchy로 (심볼마다 검색 한 번 더)
+symora diff-impact main --path packages/api         # packages/api 아래 변경만 분석 (참조는 프로젝트 전체에서 찾음)
 
 # 편집 & 리팩터링 (변경 작업은 --dry-run으로 미리보기)
 symora edit replace-body <file> --symbol 'Class/method' --body - --dry-run < new.ts

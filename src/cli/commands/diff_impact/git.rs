@@ -47,8 +47,9 @@ impl Base {
 /// The base the diff is measured from, resolved once so the diff and every
 /// pre-image read name the same tree. Only a single commit is accepted: the
 /// other side is always read from the working tree (or the index), so a
-/// range's second revision would name a tree nothing reads.
-pub(super) fn resolve_base(root: &Path, revision: &str) -> Result<Base> {
+/// range's second revision would name a tree nothing reads. `options` are
+/// the options a suggested command repeats before its revision.
+pub(super) fn resolve_base(root: &Path, revision: &str, options: &str) -> Result<Base> {
     let output = Command::new("git")
         .current_dir(root)
         .args([
@@ -79,7 +80,7 @@ pub(super) fn resolve_base(root: &Path, revision: &str) -> Result<Base> {
             &["hash-object", "-t", "tree", "--stdin"],
         )?));
     }
-    Err(unresolvable_revision(revision).into())
+    Err(unresolvable_revision(revision, options).into())
 }
 
 /// Whether `HEAD` is a symbolic ref to a branch — which, for a `HEAD` that
@@ -112,7 +113,7 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// A ref name cannot contain `..`, so a revision that does is range syntax.
-fn unresolvable_revision(revision: &str) -> OutputError {
+fn unresolvable_revision(revision: &str, options: &str) -> OutputError {
     match revision.split_once("..") {
         Some((left, _)) => {
             let from = if left.is_empty() { "HEAD" } else { left };
@@ -123,9 +124,9 @@ fn unresolvable_revision(revision: &str) -> OutputError {
                 ),
             )
             .with_hint(format!(
-                "`symora diff-impact -- {}` measures everything since {from}; \
-                 `symora diff-impact -- \"$(git merge-base -- {} HEAD)\"` measures what this branch \
-                 changed after it left {from}.",
+                "`symora diff-impact{options} -- {}` measures everything since {from}; \
+                 `symora diff-impact{options} -- \"$(git merge-base -- {} HEAD)\"` measures what \
+                 this branch changed after it left {from}.",
                 shell_arg(from), shell_arg(from)
             ))
         }
@@ -148,15 +149,17 @@ pub(super) fn is_ancestor_of_head(root: &Path, commit: &str) -> bool {
 /// Files whose working-tree content differs from the index. A change of the
 /// executable bit alone leaves the lines on disk the staged ones.
 pub(super) fn unstaged_files(root: &Path) -> Result<HashSet<PathBuf>> {
-    diff_names(root, &["-c", "core.fileMode=false"], &[])
+    diff_names(root, &["-c", "core.fileMode=false"], &[], &[])
 }
 
-/// Files git neither tracks nor ignores, which no diff holds until they are
-/// added, in git's order.
-pub(super) fn untracked_files(root: &Path) -> Result<Vec<PathBuf>> {
+/// Files git neither tracks nor ignores under `paths` (git pathspecs; none
+/// means everywhere), which no diff holds until they are added, in git's
+/// order.
+pub(super) fn untracked_files(root: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let output = Command::new("git")
         .current_dir(root)
-        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
+        .args(paths)
         .output()
         .context("Failed to run git ls-files")?;
     if !output.status.success() {
@@ -173,19 +176,116 @@ pub(super) fn untracked_files(root: &Path) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
-/// Files in an unresolved merge conflict, which have no single staged
-/// version.
-pub(super) fn unmerged_files(root: &Path, base: &str) -> Result<HashSet<PathBuf>> {
-    diff_names(root, &[], &["--cached", "--diff-filter=U", base, "--"])
+/// Files under `paths` in an unresolved merge conflict, which have no single
+/// staged version.
+pub(super) fn unmerged_files(
+    root: &Path,
+    base: &str,
+    paths: &[PathBuf],
+) -> Result<HashSet<PathBuf>> {
+    diff_names(root, &[], &["--cached", "--diff-filter=U", base], paths)
 }
 
-/// The files a `git diff --name-only` with `config` and `args` lists.
-fn diff_names(root: &Path, config: &[&str], args: &[&str]) -> Result<HashSet<PathBuf>> {
+/// The files of the diff against `base` that `paths`, git pathspecs, match,
+/// each side of a rename matched apart. Rename detection runs over the
+/// paths a diff compares, so a diff confined to the pathspecs would read a
+/// file moved into them as added and one moved out of them as deleted; with
+/// renames off here, the old and the new path are each matched on their
+/// own, and the whole diff's renames stay what they are.
+pub(super) fn matched_files(
+    root: &Path,
+    base: &str,
+    staged: bool,
+    paths: &[PathBuf],
+) -> Result<HashSet<PathBuf>> {
+    let mut args = vec!["--no-renames", "--ignore-submodules=none"];
+    if staged {
+        args.push("--cached");
+    }
+    args.push(base);
+    diff_names(root, &[], &args, paths)
+}
+
+/// Refuses a pathspec that names nothing in the project, so a mistyped path
+/// does not read as one whose files did not change. Each is matched, as
+/// `git ls-files --error-unmatch` matches it, against the index and, with
+/// `--with-tree`, the files `base` held that it no longer does: a deleted
+/// directory is a path the diff removed, not a mistake. A match lies
+/// outside the project when git names it from `root` with `..`.
+pub(super) fn check_paths(root: &Path, base: &str, paths: &[PathBuf]) -> Result<(), OutputError> {
+    let mut unknown = Vec::new();
+    let mut outside = Vec::new();
+    for path in paths {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(["ls-files", "-z", "--error-unmatch"])
+            .arg(format!("--with-tree={base}"))
+            .arg("--")
+            .arg(path)
+            .output()
+            .map_err(|error| {
+                OutputError::new(
+                    ErrorCode::Io,
+                    format!("Failed to run git ls-files: {error}"),
+                )
+            })?;
+        let named = path.display().to_string();
+        match output.status.code() {
+            Some(0) => {
+                let inside = output
+                    .stdout
+                    .split(|&b| b == 0)
+                    .filter(|name| !name.is_empty())
+                    .any(|name| !name.starts_with(b"../"));
+                if !inside {
+                    outside.push(named);
+                }
+            }
+            // `--error-unmatch` exits 1 for a pathspec nothing matched; any
+            // other failure is git refusing the pathspec itself.
+            Some(1) => unknown.push(named),
+            _ => {
+                return Err(OutputError::invalid(format!(
+                    "git refused --path {named}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+        }
+    }
+    if !outside.is_empty() {
+        return Err(OutputError::invalid(format!(
+            "--path names only files outside the project: {}",
+            outside.join(", ")
+        )));
+    }
+    if !unknown.is_empty() {
+        return Err(OutputError::not_found(format!(
+            "--path matches no file git tracks, or tracked at the revision: {}",
+            unknown.join(", ")
+        ))
+        .with_hint(
+            "Check the paths against `git ls-files`. Untracked files are in no diff; \
+             `git add --intent-to-add -- <file>` puts one in it as a new file.",
+        ));
+    }
+    Ok(())
+}
+
+/// The files a `git diff --name-only` with `config` and `args` lists under
+/// `paths`, git pathspecs (none means everywhere).
+fn diff_names(
+    root: &Path,
+    config: &[&str],
+    args: &[&str],
+    paths: &[PathBuf],
+) -> Result<HashSet<PathBuf>> {
     let output = Command::new("git")
         .current_dir(root)
         .args(config)
         .args(["diff", "--relative", "--name-only", "-z"])
         .args(args)
+        .arg("--")
+        .args(paths)
         .output()
         .context("Failed to run git diff")?;
     if !output.status.success() {
@@ -271,10 +371,17 @@ pub(super) fn parse_git_diff(root: &Path, base: &str, staged: bool) -> Result<Pa
     Ok(parse_diff_output(&diff_output, root))
 }
 
+/// A file the diff changes, by the paths its two sides name it.
+pub(super) struct ChangedFile {
+    pub(super) file: PathBuf,
+    /// The path the base names it by: `file`, unless the diff renamed it.
+    pub(super) old_file: PathBuf,
+}
+
 /// Every file the diff changes, from the same diff's `--numstat`. The patch
 /// alone would miss those it names no lines for: an empty file, a mode
 /// change, a pure rename, and a file git diffs as binary.
-pub(super) fn changed_files(root: &Path, base: &str, staged: bool) -> Result<Vec<PathBuf>> {
+pub(super) fn changed_files(root: &Path, base: &str, staged: bool) -> Result<Vec<ChangedFile>> {
     let mut cmd = Command::new("git");
     cmd.current_dir(root);
     cmd.args([
@@ -304,22 +411,22 @@ pub(super) fn changed_files(root: &Path, base: &str, staged: bool) -> Result<Vec
 
 /// `--numstat -z` writes `added<TAB>deleted<TAB>path<NUL>`, or for a rename
 /// `added<TAB>deleted<TAB><NUL>old<NUL>new<NUL>`.
-fn parse_numstat(numstat: &[u8], root: &Path) -> Vec<PathBuf> {
+fn parse_numstat(numstat: &[u8], root: &Path) -> Vec<ChangedFile> {
     let mut fields = numstat.split(|&b| b == 0);
     let mut files = Vec::new();
     while let Some(record) = fields.next() {
         if record.is_empty() {
             continue;
         }
-        let path = match record.splitn(3, |&b| b == b'\t').nth(2) {
-            Some([]) | None => {
-                fields.next();
-                fields.next()
-            }
-            Some(path) => Some(path),
+        let (old, new) = match record.splitn(3, |&b| b == b'\t').nth(2) {
+            Some([]) | None => (fields.next(), fields.next()),
+            Some(path) => (Some(path), Some(path)),
         };
-        if let Some(path) = path {
-            files.push(root.join(path_from_git(path)));
+        if let (Some(old), Some(new)) = (old, new) {
+            files.push(ChangedFile {
+                file: root.join(path_from_git(new)),
+                old_file: root.join(path_from_git(old)),
+            });
         }
     }
     files
@@ -585,9 +692,20 @@ mod tests {
     fn every_changed_file_is_read_from_numstat() {
         let root = Path::new("/r");
         let numstat = b"1\t1\tm.py\x000\t0\tempty.py\x00-\t-\tlogo.png\x00-\t-\t\x00old.bin\x00new.bin\x002\t0\t\x00a.py\x00b.py\x00";
+        let sides: Vec<(PathBuf, PathBuf)> = parse_numstat(numstat, root)
+            .into_iter()
+            .map(|changed| (changed.old_file, changed.file))
+            .collect();
         assert_eq!(
-            parse_numstat(numstat, root),
-            ["m.py", "empty.py", "logo.png", "new.bin", "b.py"].map(|p| root.join(p))
+            sides,
+            [
+                ("m.py", "m.py"),
+                ("empty.py", "empty.py"),
+                ("logo.png", "logo.png"),
+                ("old.bin", "new.bin"),
+                ("a.py", "b.py"),
+            ]
+            .map(|(old, new)| (root.join(old), root.join(new)))
         );
     }
 

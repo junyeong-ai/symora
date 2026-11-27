@@ -669,39 +669,59 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ])),
         ToolDefinition::read_only(
             "get_diff_impact",
-            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes; untracked files are in neither, and a working-tree run names them in hints. Reports changed symbols, static references, and unmeasured files; total_references is absent when no row was measured. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals: refs_status marks a lower bound (indexing_degraded) or why no count was taken (timed_out when the lsp.timeout_secs budget ran out, unsupported, unavailable), and refs_status_counts and callers_status_counts count the rows of each status, so a total is a lower bound by those rows alone; test references are not execution coverage. Documentation and configuration files (Markdown, YAML, TOML, JSON) are listed in unmeasured_files rather than read by key. changes is a list with count, showing and truncated, and with callers, a changed function's, method's or constructor's callers is one too, read off the references its count was taken from (callers_status references_derived, not verified calls): every callable whose code holds one, a use as a value counted like a call, an import outside a callable not at all; another kind's row reads not_callable, and call_hierarchy asks the server instead. callers is absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind, and its position is the first line it removed.",
-            schema_object(&[
-                ("revision", "string", "One base revision, not a revision range; default HEAD"),
-                ("staged", "boolean", "Compare staged changes instead of the working tree"),
-                (
-                    "callers",
-                    "boolean",
-                    "List each changed function's, method's and constructor's callers, read off \
-                     the references its count was taken from",
-                ),
-                (
-                    "call_hierarchy",
-                    "boolean",
-                    "Ask every changed symbol's callers of the server's call hierarchy \
-                     instead, which it requires, a second workspace search per symbol; implies \
-                     callers",
-                ),
-                (
-                    "max_symbols",
-                    "integer",
-                    &format!(
-                        "Maximum added and modified symbols whose references are counted, \
-                         and apart from them, deleted symbols listed, so a deletion never \
-                         takes a counted symbol's place; the files it stops in or before are \
-                         listed in unmeasured_files; default {DIFF_IMPACT_MAX_SYMBOLS}, \
-                         0 means unlimited"
+            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes; untracked files are in neither, and a working-tree run names them in hints. path confines the analysis to the changed files some git pathspecs match, and a rename when either of its paths does, while references and callers are still searched across the whole project: changed_files_count then counts the matched files and excluded_files_count the changed files left out, which nothing in the answer measures. When max_symbols, the lsp.timeout_secs budget or the response size cuts a large diff short, measure it a part at a time with path. Reports changed symbols, static references, and unmeasured files; total_references is absent when no row was measured. Check incomplete, unmeasured_files, excluded_files_count, and each row's refs_status and callers_status before interpreting totals: refs_status marks a lower bound (indexing_degraded) or why no count was taken (timed_out when the lsp.timeout_secs budget ran out, unsupported, unavailable), and refs_status_counts and callers_status_counts count the rows of each status, so a total is a lower bound by those rows alone; test references are not execution coverage. Documentation and configuration files (Markdown, YAML, TOML, JSON) are listed in unmeasured_files rather than read by key. changes is a list with count, showing and truncated, and with callers, a changed function's, method's or constructor's callers is one too, read off the references its count was taken from (callers_status references_derived, not verified calls): every callable whose code holds one, a use as a value counted like a call, an import outside a callable not at all; another kind's row reads not_callable, and call_hierarchy asks the server instead. callers is absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind, and its position is the first line it removed.",
+            {
+                let mut schema = schema_object(&[
+                    ("revision", "string", "One base revision, not a revision range; default HEAD"),
+                    ("staged", "boolean", "Compare staged changes instead of the working tree"),
+                    (
+                        "callers",
+                        "boolean",
+                        "List each changed function's, method's and constructor's callers, read off \
+                         the references its count was taken from",
                     ),
-                ),
-            ], &[]),
+                    (
+                        "call_hierarchy",
+                        "boolean",
+                        "Ask every changed symbol's callers of the server's call hierarchy \
+                         instead, which it requires, a second workspace search per symbol; implies \
+                         callers",
+                    ),
+                    (
+                        "max_symbols",
+                        "integer",
+                        &format!(
+                            "Maximum added and modified symbols whose references are counted, \
+                             and apart from them, deleted symbols listed, so a deletion never \
+                             takes a counted symbol's place; the files it stops in or before are \
+                             listed in unmeasured_files; default {DIFF_IMPACT_MAX_SYMBOLS}, \
+                             0 means unlimited"
+                        ),
+                    ),
+                ], &[]);
+                schema["properties"]["path"] = serde_json::json!({
+                    "type": "array", "items": {"type": "string"}, "minItems": 1,
+                    "description": "Analyse only the changed files these git pathspecs match, \
+                        project-relative: a file or directory, a glob such as *.py, or :!dir to \
+                        leave one out; a rename is analysed when either of its paths matches. \
+                        A pathspec matching no file tracked now or at the revision is refused"
+                });
+                schema
+            },
         )
         .with_output_schema(output_schema(&[
             ("revision", "string", "The revision compared with"),
-            ("changed_files_count", "integer", "Files the diff changed"),
+            (
+                "changed_files_count",
+                "integer",
+                "Files the diff changed, those path matches where it is given",
+            ),
+            (
+                "excluded_files_count",
+                "integer",
+                "With path, the changed files it does not match, which nothing here \
+                 measures; 0 when it matches every one; absent without path",
+            ),
             (
                 "total_references",
                 "integer",

@@ -25,8 +25,8 @@ use symora::cli::errors::{ErrorCode, OutputError};
 use symora::cli::response::{
     ActionOutput, AffectedFileOutput, ApplyActionOutput, CallHierarchyOutput, CoverageGap,
     DefinitionOutput, DiagnosticOutput, EditOutput, FileChangeOutput, HoverOutput, ImpactOutput,
-    LineRange, LocationOutput, RefOutput, Section, ServerStatusOutput, SymbolOutput, TargetOutput,
-    TestCoverageOutput, TestOutput, TypeInfoOutput, fit_to_char_budget,
+    LineRange, LocationOutput, NARROW_THE_QUERY, RefOutput, Section, ServerStatusOutput,
+    SymbolOutput, TargetOutput, TestCoverageOutput, TestOutput, TypeInfoOutput, fit_to_char_budget,
 };
 use symora::models::diagnostic::DiagnosticsStatus;
 use symora::models::lsp::{CallHierarchyItem, IndexingDegradation};
@@ -123,11 +123,16 @@ fn section_fitted_to_char_budget() {
         .collect();
     let mut value = serde_json::to_value(Section::new(items)).unwrap();
 
-    let fitted = fit_to_char_budget(&mut value, 300, &|v: &serde_json::Value| {
-        serde_json::to_string(v)
-            .map(|s| s.chars().count())
-            .unwrap_or(usize::MAX)
-    });
+    let fitted = fit_to_char_budget(
+        &mut value,
+        300,
+        NARROW_THE_QUERY,
+        &|v: &serde_json::Value| {
+            serde_json::to_string(v)
+                .map(|s| s.chars().count())
+                .unwrap_or(usize::MAX)
+        },
+    );
 
     assert!(fitted);
     assert_json_snapshot!(value);
@@ -149,11 +154,16 @@ fn fitter_preserves_config_errors_while_trimming_section_items() {
         json!(["failed to load .symora/config.toml: expected a value"]),
     );
 
-    let fitted = fit_to_char_budget(&mut value, 200, &|v: &serde_json::Value| {
-        serde_json::to_string(v)
-            .map(|s| s.chars().count())
-            .unwrap_or(usize::MAX)
-    });
+    let fitted = fit_to_char_budget(
+        &mut value,
+        200,
+        NARROW_THE_QUERY,
+        &|v: &serde_json::Value| {
+            serde_json::to_string(v)
+                .map(|s| s.chars().count())
+                .unwrap_or(usize::MAX)
+        },
+    );
 
     assert!(fitted);
     assert!(
@@ -734,8 +744,8 @@ fn impact_output_full() {
     assert_json_snapshot!(out);
 }
 
-/// A diff-impact summary counts the rows of each status, the rows are the
-/// shared list, and a changed function's callers read off its references are the shared list marked
+/// A diff-impact summary counts the rows of each status and the changed
+/// files `--path` left out, the rows are the shared list, and a changed function's callers read off its references are the shared list marked
 /// `references_derived`; a class row says `not_callable` and lists none; a
 /// deletion carries neither counts nor callers.
 #[test]
@@ -762,6 +772,7 @@ fn diff_impact_output_with_status_counts_and_derived_callers() {
     let out = DiffImpactOutput {
         revision: "HEAD".to_string(),
         changed_files_count: 2,
+        excluded_files_count: Some(1),
         total_references: Some(4),
         refs_status_counts: BTreeMap::from([("indexing_degraded", 1)]),
         callers_status_counts: BTreeMap::from([("not_callable", 1), ("references_derived", 1)]),
@@ -773,6 +784,9 @@ fn diff_impact_output_with_status_counts_and_derived_callers() {
         unmeasured_files: vec!["README.md".to_string()],
         incomplete: false,
         hints: vec![
+            "--path leaves out 1 of the 3 files the diff changes, which this answer does not \
+             measure; another --path measures them."
+                .to_string(),
             "Documentation and configuration files are not read as symbols: README.md. Read \
              their diff for what changed."
                 .to_string(),

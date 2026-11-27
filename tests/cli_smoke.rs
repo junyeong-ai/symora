@@ -2169,8 +2169,8 @@ fn a_capped_diff_analysis_says_its_counts_are_a_lower_bound() {
     assert!(
         capped["hints"][0]
             .as_str()
-            .is_some_and(|s| s.contains("--max-symbols")),
-        "the cause of `incomplete`, the cap, leads the hints: {capped}"
+            .is_some_and(|s| s.contains("--max-symbols") && s.contains("--path")),
+        "the cause of `incomplete`, the cap, leads the hints with its remedies: {capped}"
     );
 
     let whole = json_ok(
@@ -2608,6 +2608,56 @@ fn callers_are_read_off_the_references_counted() {
     );
 }
 
+/// `--path` confines which changes are analysed, not where their references
+/// are looked for: a changed function's references and callers in a file the
+/// path leaves out are counted and listed, and the changed file it leaves
+/// out is no row and is not read.
+#[cfg(unix)]
+#[test]
+fn a_path_confines_the_changes_not_where_their_references_are_found() {
+    let Some(dir) = reference_served_repo(&[
+        (
+            "a.py",
+            "def one():\n    return 1\n",
+            "def one():\n    return 2\n",
+        ),
+        (
+            "b.py",
+            "from a import one\n\n\ndef use():\n    return one()\n",
+            "from a import one\n\n\ndef use():\n    return one()\n",
+        ),
+        (
+            "c.py",
+            "def three():\n    return 3\n",
+            "def three():\n    return 4\n",
+        ),
+    ]) else {
+        return;
+    };
+    let repo = dir.path();
+    let page = diff_impact_in_process(repo, &["--path", "a.py", "--callers"]);
+    assert_eq!(page["changed_files_count"], 1, "{page}");
+    assert_eq!(page["excluded_files_count"], 1, "{page}");
+    assert_eq!(
+        callers_by_row(&page),
+        [(
+            "one".to_string(),
+            Some("references_derived".to_string()),
+            vec![("use".to_string(), 5)]
+        )],
+        "{page}"
+    );
+    assert_eq!(
+        page["changes"]["items"][0]["refs"], 2,
+        "the import and the call in b.py: {page}"
+    );
+    let asked = std::fs::read_to_string(repo.join(".symora/log")).unwrap();
+    assert!(
+        !asked.lines().any(|line| line.ends_with(" c.py")),
+        "the file the path leaves out is not read: {asked}"
+    );
+}
+
 /// The rows are the shared list, so a response past `output.max_response_chars`
 /// is cut to fit like any other: a row's callers, the detail one `callers`
 /// query lists again, before the rows, which take their counts with them.
@@ -2651,11 +2701,13 @@ fn a_response_past_its_size_target_cuts_callers_before_rows() {
         let chars = serde_json::to_string(&page).unwrap().chars().count();
         (page, chars)
     };
+    // The hint names the ceiling and the way a diff is asked for in parts.
     let sized = |page: &serde_json::Value| {
         page["changes"]["hints"].as_array().is_some_and(|hints| {
-            hints
-                .iter()
-                .any(|hint| hint.as_str().unwrap().contains("max_response_chars"))
+            hints.iter().any(|hint| {
+                let hint = hint.as_str().unwrap();
+                hint.contains("max_response_chars") && hint.contains("narrow the diff with --path")
+            })
         })
     };
     let (whole, whole_chars) = analyse(0, &["--callers"]);
@@ -4500,6 +4552,320 @@ fn a_base_off_the_branch_says_what_else_the_diff_takes_back() {
     assert!(
         on["hints"].is_null(),
         "an ancestor base needs no warning: {on}"
+    );
+
+    // The command it suggests measures the same paths again.
+    let scoped = json_ok(
+        repo,
+        &["--deterministic", "diff-impact", "side", "--path", "pkg"],
+    );
+    assert!(
+        scoped["hints"]
+            .as_array()
+            .is_some_and(
+                |hints| hints.iter().any(|h| h.as_str().is_some_and(|h| h.contains(
+                    "symora diff-impact --path='pkg' -- \"$(git merge-base -- 'side' HEAD)\""
+                )))
+            ),
+        "{scoped}"
+    );
+    let out = run_in(
+        repo,
+        &[
+            "--deterministic",
+            "diff-impact",
+            "HEAD~1..HEAD",
+            "-p",
+            "pkg",
+        ],
+    );
+    let refused: serde_json::Value = common::parse_response(&out.stdout).unwrap();
+    assert!(
+        refused["error"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("symora diff-impact --path='pkg' -- 'HEAD~1'")),
+        "{refused}"
+    );
+}
+
+/// The rows of a diff-impact `--path` confines, as `(name, change_type,
+/// file)`, sorted.
+#[cfg(unix)]
+fn rows_of(page: &serde_json::Value) -> Vec<String> {
+    let mut rows: Vec<String> = page["changes"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("changes: {page}"))
+        .iter()
+        .map(|c| {
+            format!(
+                "{} {} {}",
+                c["name"].as_str().unwrap_or("?"),
+                c["change_type"].as_str().unwrap_or("?"),
+                c["file"].as_str().unwrap_or("?")
+            )
+        })
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
+/// `--path` analyses the changed files its git pathspecs match, and the
+/// answer counts the changed files it leaves out, so a part of a diff never
+/// reads as the whole of it: `changed_files_count` and every list but the
+/// excluded count speak for the matched files alone. A directory, a glob,
+/// an exclusion and a deleted file each select as git selects them.
+#[cfg(unix)]
+#[test]
+fn a_path_confines_the_diff_and_counts_the_files_it_leaves_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    for package in ["pkg/a", "pkg/b", "pkg/c"] {
+        std::fs::create_dir_all(repo.join(package)).unwrap();
+    }
+    std::fs::write(repo.join("pkg/a/m.py"), "def one():\n    return 1\n").unwrap();
+    std::fs::write(repo.join("pkg/b/n.py"), "def three():\n    return 3\n").unwrap();
+    std::fs::write(repo.join("pkg/b/gone.py"), "def retired():\n    return 0\n").unwrap();
+    std::fs::write(repo.join("pkg/c/k.py"), "def still():\n    return 5\n").unwrap();
+    std::fs::write(repo.join("README.md"), "# Title\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "base"]);
+    std::fs::write(repo.join("pkg/a/m.py"), "def one():\n    return 10\n").unwrap();
+    std::fs::write(repo.join("pkg/b/n.py"), "def three():\n    return 30\n").unwrap();
+    git(repo, &["rm", "-q", "pkg/b/gone.py"]);
+    std::fs::write(repo.join("README.md"), "# Title\n\nMore.\n").unwrap();
+    std::fs::write(repo.join("pkg/a/draft.py"), "def draft():\n    pass\n").unwrap();
+    std::fs::write(repo.join("pkg/b/draft.py"), "def draft():\n    pass\n").unwrap();
+
+    let whole = json_ok(repo, &["--deterministic", "diff-impact"]);
+    assert_eq!(whole["changed_files_count"], 4, "{whole}");
+    assert!(
+        whole["excluded_files_count"].is_null(),
+        "nothing is left out without --path: {whole}"
+    );
+
+    let package = json_ok(repo, &["--deterministic", "diff-impact", "--path", "pkg/a"]);
+    assert_eq!(rows_of(&package), ["one modified pkg/a/m.py"], "{package}");
+    assert_eq!(package["changed_files_count"], 1, "{package}");
+    assert_eq!(package["excluded_files_count"], 3, "{package}");
+    assert!(package["unmeasured_files"].is_null(), "{package}");
+    let hints: Vec<&str> = package["hints"]
+        .as_array()
+        .unwrap_or_else(|| panic!("hints: {package}"))
+        .iter()
+        .filter_map(|h| h.as_str())
+        .collect();
+    assert!(
+        hints
+            .iter()
+            .any(|h| h.contains("--path leaves out 3 of the 4 files")),
+        "{package}"
+    );
+    let untracked = hints
+        .iter()
+        .find(|h| h.starts_with("Untracked files"))
+        .unwrap_or_else(|| panic!("untracked: {package}"));
+    assert!(
+        untracked.contains("pkg/a/draft.py") && !untracked.contains("pkg/b/draft.py"),
+        "only the untracked files under the path are named: {package}"
+    );
+
+    for (paths, rows, changed, excluded) in [
+        (
+            &["--path", "pkg/b/gone.py"][..],
+            &["retired deleted pkg/b/gone.py"][..],
+            1,
+            3,
+        ),
+        (
+            &["--path", "*.py"],
+            &[
+                "one modified pkg/a/m.py",
+                "retired deleted pkg/b/gone.py",
+                "three modified pkg/b/n.py",
+            ],
+            3,
+            1,
+        ),
+        (&["--path", ":!pkg/b"], &["one modified pkg/a/m.py"], 2, 2),
+        (&["-p", "pkg/c"], &[], 0, 4),
+    ] {
+        let page = json_ok(
+            repo,
+            &[&["--deterministic", "diff-impact"][..], paths].concat(),
+        );
+        assert_eq!(rows_of(&page), rows, "{paths:?}: {page}");
+        assert_eq!(page["changed_files_count"], changed, "{paths:?}: {page}");
+        assert_eq!(page["excluded_files_count"], excluded, "{paths:?}: {page}");
+    }
+
+    let documented = json_ok(
+        repo,
+        &[
+            "--deterministic",
+            "diff-impact",
+            "--path",
+            "pkg/a",
+            "--path",
+            "README.md",
+        ],
+    );
+    assert_eq!(documented["changed_files_count"], 2, "{documented}");
+    assert_eq!(
+        documented["unmeasured_files"],
+        serde_json::json!(["README.md"]),
+        "{documented}"
+    );
+
+    let all = json_ok(repo, &["--deterministic", "diff-impact", "--path", "."]);
+    assert_eq!(all["excluded_files_count"], 0, "{all}");
+    assert!(
+        !all["hints"].as_array().is_some_and(|hints| hints
+            .iter()
+            .any(|h| h.as_str().is_some_and(|h| h.contains("--path leaves out")))),
+        "a path that leaves nothing out says nothing about it: {all}"
+    );
+
+    // Measuring the staging area, the pathspecs are matched against it: a
+    // change staged and then undone on disk is in the staged diff alone.
+    std::fs::write(repo.join("pkg/c/k.py"), "def still():\n    return 50\n").unwrap();
+    git(repo, &["add", "pkg/c/k.py"]);
+    std::fs::write(repo.join("pkg/c/k.py"), "def still():\n    return 5\n").unwrap();
+    let staged = json_ok(
+        repo,
+        &[
+            "--deterministic",
+            "diff-impact",
+            "--staged",
+            "--path",
+            "pkg/c",
+        ],
+    );
+    assert_eq!(staged["changed_files_count"], 1, "{staged}");
+    assert_eq!(
+        staged["excluded_files_count"], 1,
+        "the staged removal of gone.py: {staged}"
+    );
+}
+
+/// git detects a rename only between the paths a diff compares, so a diff
+/// confined to a pathspec reads a file moved into it as added and one moved
+/// out of it as deleted. The renames are those of the whole diff: either
+/// path of a rename puts it under `--path`, and its rows are the rows the
+/// whole diff gives it. A directory the change removed is a path it names.
+#[cfg(unix)]
+#[test]
+fn a_rename_across_a_path_is_measured_as_the_rename_it_is() {
+    let functions = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| format!("def {name}():\n    return 1\n\n\n"))
+            .collect::<String>()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::create_dir(repo.join("old")).unwrap();
+    std::fs::write(
+        repo.join("old/m.py"),
+        functions(&["keep", "gone", "e1", "e2", "e3", "edit"]),
+    )
+    .unwrap();
+    std::fs::write(repo.join("top.py"), functions(&["elsewhere"])).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "base"]);
+    std::fs::create_dir(repo.join("new")).unwrap();
+    git(repo, &["mv", "old/m.py", "new/m.py"]);
+    std::fs::write(
+        repo.join("new/m.py"),
+        functions(&["keep", "e1", "e2", "e3", "edit"])
+            .replace("def edit():\n    return 1", "def edit():\n    return 30"),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("top.py"),
+        functions(&["elsewhere"]).replace("return 1", "return 2"),
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    // The directory the move emptied is gone from disk as from the index.
+    std::fs::remove_dir(repo.join("old")).unwrap();
+
+    let moved: Vec<String> = rows_of(&json_ok(repo, &["--deterministic", "diff-impact"]))
+        .into_iter()
+        .filter(|row| !row.ends_with(" top.py"))
+        .collect();
+    for row in ["edit modified new/m.py", "gone deleted old/m.py"] {
+        assert!(moved.iter().any(|r| r == row), "{row} in {moved:#?}");
+    }
+    for path in ["new", "old", "new/m.py", "old/m.py"] {
+        let page = json_ok(repo, &["--deterministic", "diff-impact", "--path", path]);
+        assert_eq!(rows_of(&page), moved, "--path {path}: {page}");
+        assert_eq!(page["changed_files_count"], 1, "--path {path}: {page}");
+        assert_eq!(page["excluded_files_count"], 1, "--path {path}: {page}");
+    }
+}
+
+/// A pathspec that names nothing git knows in the project is refused, so a
+/// mistyped path does not read as one whose files did not change, and a
+/// path outside the project is refused as `search --path` refuses one.
+#[cfg(unix)]
+#[test]
+fn a_path_that_names_nothing_in_the_project_is_refused() {
+    let repo = repo_with_a_deleted_function();
+    let repo = repo.path();
+    std::fs::write(repo.join("draft.py"), "x = 0\n").unwrap();
+    for (dir, args, code, named) in [
+        (
+            repo,
+            &["--path", "pkg", "--path", "pgk"][..],
+            "not_found",
+            "pgk",
+        ),
+        (repo, &["--path", "draft.py"], "not_found", "draft.py"),
+        (repo, &["--path", "/"], "invalid_argument", "/"),
+        (
+            &repo.join("pkg"),
+            &["--path", "../top.py"],
+            "invalid_argument",
+            "../top.py",
+        ),
+    ] {
+        let out = run_in(
+            dir,
+            &[&["--deterministic", "diff-impact", "HEAD~1"][..], args].concat(),
+        );
+        assert!(!out.status.success(), "{args:?}");
+        let refused: serde_json::Value = common::parse_response(&out.stdout).unwrap();
+        assert_eq!(refused["error"]["code"], code, "{args:?}: {refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(named)),
+            "{args:?}: {refused}"
+        );
+    }
+    let out = run_in(
+        repo,
+        &[
+            "--deterministic",
+            "diff-impact",
+            "--path",
+            "pkg",
+            "--path",
+            "pgk",
+        ],
+    );
+    let refused: serde_json::Value = common::parse_response(&out.stdout).unwrap();
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| !message.contains("pkg")),
+        "a path that matches is not named among those that do not: {refused}"
     );
 }
 

@@ -333,6 +333,9 @@ fn recount_bodies(value: &mut serde_json::Value) {
     }
 }
 
+/// The size-limit hint's advice for a response its query narrows.
+pub const NARROW_THE_QUERY: &str = "narrow the query";
+
 /// Reduce a serialized response toward `max_chars` by dropping whole trailing
 /// items from its `Section`-shaped lists: the lists inside another list's
 /// items first, the most deeply nested of them before the rest, and among
@@ -341,10 +344,12 @@ fn recount_bodies(value: &mut serde_json::Value) {
 /// asked about the item can list again, while an item dropped from its list
 /// takes its own identity and counts with it. `showing` shrinks with the
 /// items, `truncated` is set, and one disclosure hint naming
-/// `output.max_response_chars` lands on the largest list before measuring,
-/// so its own length is budgeted. `count` and per-item shape
-/// are never touched, and the value is never sliced: when even zero items
-/// stays over the ceiling, the reduced-but-whole JSON is emitted as-is.
+/// `output.max_response_chars` and `narrowing`, how the reader asks for less
+/// ([`NARROW_THE_QUERY`] unless the command says otherwise), lands on the
+/// largest list before measuring, so its own length is budgeted. `count`
+/// and per-item shape are never touched, and the value is never sliced:
+/// when even zero items stays over the ceiling, the reduced-but-whole JSON
+/// is emitted as-is.
 ///
 /// `measure` must serialize exactly the string the caller will emit —
 /// the measurement counts emitted characters, not an estimate. Returns true
@@ -365,6 +370,7 @@ fn recount_bodies(value: &mut serde_json::Value) {
 pub fn fit_to_char_budget(
     value: &mut serde_json::Value,
     max_chars: usize,
+    narrowing: &str,
     measure: &dyn Fn(&serde_json::Value) -> usize,
 ) -> bool {
     if measure(value) <= max_chars {
@@ -396,7 +402,7 @@ pub fn fit_to_char_budget(
         .and_then(serde_json::Value::as_object_mut)
     {
         let hint = format!(
-            "Response exceeded output.max_response_chars ({max_chars}); items were dropped to fit — narrow the query or raise the ceiling in .symora/config.toml"
+            "Response exceeded output.max_response_chars ({max_chars}); items were dropped to fit — {narrowing} or raise the ceiling in .symora/config.toml"
         );
         if let Some(hints) = node
             .entry("hints")
@@ -864,7 +870,12 @@ mod tests {
             .collect();
         let mut value = serde_json::to_value(Section::new(items)).unwrap();
 
-        assert!(fit_to_char_budget(&mut value, 500, &compact_chars));
+        assert!(fit_to_char_budget(
+            &mut value,
+            500,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
 
         assert!(compact_chars(&value) <= 500);
         assert_eq!(value["count"], 20);
@@ -898,7 +909,12 @@ mod tests {
             .collect();
         let mut value = serde_json::to_value(Section::new(items).with_stale(true)).unwrap();
 
-        assert!(fit_to_char_budget(&mut value, 600, &compact_chars));
+        assert!(fit_to_char_budget(
+            &mut value,
+            600,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
 
         let showing = value["showing"].as_u64().unwrap();
         assert!(showing > 0 && showing < 20, "a partial keep: {showing}");
@@ -917,7 +933,12 @@ mod tests {
         let mut value = serde_json::to_value(Section::new(items).with_stale(true)).unwrap();
         assert_eq!(value["stale"], true);
 
-        assert!(fit_to_char_budget(&mut value, 120, &compact_chars));
+        assert!(fit_to_char_budget(
+            &mut value,
+            120,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
 
         assert_eq!(value["showing"], 0, "the budget leaves no room for items");
         assert!(
@@ -946,7 +967,7 @@ mod tests {
 
         for budget in 100..600 {
             let mut fitted = value.clone();
-            if !fit_to_char_budget(&mut fitted, budget, &compact_chars) {
+            if !fit_to_char_budget(&mut fitted, budget, NARROW_THE_QUERY, &compact_chars) {
                 continue;
             }
             if compact_chars(&fitted) > budget {
@@ -970,7 +991,12 @@ mod tests {
         let mut value = serde_json::to_value(Section::new(vec![1, 2, 3])).unwrap();
         let before = value.clone();
 
-        assert!(!fit_to_char_budget(&mut value, 10_000, &compact_chars));
+        assert!(!fit_to_char_budget(
+            &mut value,
+            10_000,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
         assert_eq!(value, before);
     }
 
@@ -982,13 +1008,23 @@ mod tests {
             "files": ["tests/a.rs", "tests/b.rs", "tests/c.rs"],
         });
         let before = coverage.clone();
-        assert!(!fit_to_char_budget(&mut coverage, 10, &compact_chars));
+        assert!(!fit_to_char_budget(
+            &mut coverage,
+            10,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
         assert_eq!(coverage, before);
 
         // count + items without showing is not a Section either.
         let mut no_showing = serde_json::json!({ "count": 3, "items": [1, 2, 3] });
         let before = no_showing.clone();
-        assert!(!fit_to_char_budget(&mut no_showing, 10, &compact_chars));
+        assert!(!fit_to_char_budget(
+            &mut no_showing,
+            10,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
         assert_eq!(no_showing, before);
     }
 
@@ -1011,7 +1047,12 @@ mod tests {
             "items": items,
         });
 
-        assert!(fit_to_char_budget(&mut value, 550, &compact_chars));
+        assert!(fit_to_char_budget(
+            &mut value,
+            550,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
 
         assert!(compact_chars(&value) <= 550);
         assert_eq!(value["count"], 8);
@@ -1038,7 +1079,12 @@ mod tests {
             "symbols": { "count": 10, "showing": 10, "items": items },
         });
 
-        assert!(fit_to_char_budget(&mut value, 450, &compact_chars));
+        assert!(fit_to_char_budget(
+            &mut value,
+            450,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
 
         assert!(compact_chars(&value) <= 450);
         assert_eq!(value["language"], "rust");
@@ -1074,7 +1120,12 @@ mod tests {
         });
         let budget = 900;
 
-        assert!(fit_to_char_budget(&mut value, budget, &compact_chars));
+        assert!(fit_to_char_budget(
+            &mut value,
+            budget,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
 
         assert!(compact_chars(&value) <= budget, "{value}");
         let changes = &value["changes"];
@@ -1125,7 +1176,12 @@ mod tests {
     fn fit_recounts_bodies_included() {
         // (a) Dropping the body-carrying tail recounts to the survivors.
         let mut value = body_bearing_callees(Some(2));
-        assert!(fit_to_char_budget(&mut value, 800, &compact_chars));
+        assert!(fit_to_char_budget(
+            &mut value,
+            800,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
         let section = &value["callees"];
         assert_eq!(section["showing"], 2, "ceiling must drop the last 2 items");
         assert_eq!(section["bodies_included"], 1);
@@ -1134,14 +1190,24 @@ mod tests {
 
         // (b) An emptied section has nothing to disclose — key removed.
         let mut value = body_bearing_callees(Some(2));
-        assert!(fit_to_char_budget(&mut value, 50, &compact_chars));
+        assert!(fit_to_char_budget(
+            &mut value,
+            50,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
         assert!(value["callees"]["items"].as_array().unwrap().is_empty());
         assert!(value["callees"].get("bodies_included").is_none());
 
         // (c) Coincidental `body` keys never grow the field where body
         // attachment didn't run.
         let mut value = body_bearing_callees(None);
-        assert!(fit_to_char_budget(&mut value, 800, &compact_chars));
+        assert!(fit_to_char_budget(
+            &mut value,
+            800,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
         assert!(value["callees"]["showing"].as_u64().unwrap() < 4);
         assert!(value["callees"].get("bodies_included").is_none());
     }
@@ -1154,7 +1220,12 @@ mod tests {
         // A ceiling smaller than the empty envelope: everything droppable
         // is dropped, and the whole — still valid — JSON is emitted over
         // budget rather than sliced.
-        assert!(fit_to_char_budget(&mut value, 5, &compact_chars));
+        assert!(fit_to_char_budget(
+            &mut value,
+            5,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
 
         assert_eq!(value["count"], 2);
         assert_eq!(value["showing"], 0);

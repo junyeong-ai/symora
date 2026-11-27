@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::analysis::{Constructions, callers_from_references};
+use crate::cli::errors::OutputError;
 use crate::cli::response::disclosure::{CoverageReason, LowerBound, name_some};
 use crate::cli::response::{
     CallHierarchyOutput, INDEXING_DEGRADED, LocationOutput, NOT_CALLABLE, REFERENCES_DERIVED,
@@ -23,8 +24,8 @@ use crate::services::symbols::{SymbolExtractor, TypeHeaders};
 mod git;
 
 use git::{
-    Base, DiffHunk, ParsedDiff, changed_files, git_show, is_ancestor_of_head, parse_git_diff,
-    resolve_base, unmerged_files, unstaged_files, untracked_files,
+    Base, DiffHunk, ParsedDiff, changed_files, check_paths, git_show, is_ancestor_of_head,
+    matched_files, parse_git_diff, resolve_base, unmerged_files, unstaged_files, untracked_files,
 };
 
 #[derive(Args, Debug)]
@@ -37,6 +38,14 @@ pub struct DiffImpactArgs {
     /// Compare the staged index, instead of the working tree, with the revision
     #[arg(long)]
     pub staged: bool,
+
+    /// Analyse only the changed files these git pathspecs match, read from
+    /// the project root: a file or directory, a glob such as `*.py`, or
+    /// `:!dir` to leave one out. A rename is analysed when either of its
+    /// paths matches. References and callers are still searched across the
+    /// whole project
+    #[arg(short, long, value_name = "PATHSPEC")]
+    pub path: Option<Vec<PathBuf>>,
 
     /// List each added or modified function's, method's and constructor's
     /// callers: the callables whose code holds one of the references its
@@ -61,7 +70,13 @@ pub struct DiffImpactArgs {
 #[derive(Debug, Serialize)]
 pub struct DiffImpactOutput {
     pub revision: String,
+    /// The files the diff changes, those `--path` matches where it is given.
     pub changed_files_count: usize,
+    /// With `--path`, the files the diff changes that it does not match,
+    /// which nothing here measures; 0 where it matches every one. Omitted
+    /// without `--path`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excluded_files_count: Option<usize>,
     /// The reference counts of the changed symbols whose counts were
     /// measured, summed. Omitted when none was: a failed lookup counted
     /// nothing, and a deleted symbol has no live references to count.
@@ -212,14 +227,24 @@ pub enum DeletionResolution {
 pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let root = ctx.root();
+    let paths: &[PathBuf] = args.path.as_deref().unwrap_or_default();
+    if args.path.as_ref().is_some_and(Vec::is_empty) {
+        return Err(OutputError::invalid("path must contain at least one pathspec").into());
+    }
+    // A suggested command measures the same paths again.
+    let options: String = paths
+        .iter()
+        .map(|path| format!(" --path={}", shell_arg(&path.display().to_string())))
+        .collect();
 
-    let base = resolve_base(root, &args.revision)?;
+    let base = resolve_base(root, &args.revision, &options)?;
+    check_paths(root, base.tree_ish(), paths)?;
     let ParsedDiff {
         mut hunks,
-        binary,
-        links,
+        mut binary,
+        mut links,
     } = parse_git_diff(root, base.tree_ish(), args.staged)?;
-    let changed_files = changed_files(root, base.tree_ish(), args.staged)?;
+    let changed = changed_files(root, base.tree_ish(), args.staged)?;
     let mut hints = Vec::new();
     // Files are told apart by path until they are rendered: two names that
     // are not UTF-8 can render alike.
@@ -230,12 +255,37 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     {
         hints.push(format!(
             "`{rev}` is not an ancestor of HEAD, so this diff also takes back what `{rev}` \
-             gained after this branch left it; `symora diff-impact -- \"$(git merge-base -- {rev_arg} HEAD)\"` \
+             gained after this branch left it; `symora diff-impact{options} -- \"$(git merge-base -- {rev_arg} HEAD)\"` \
              measures this branch alone.",
             rev = args.revision,
             rev_arg = shell_arg(&args.revision),
         ));
     }
+
+    // `--path` confines the diff to the files it matches, a rename by
+    // either of its paths, once the whole diff's renames are known.
+    let (changed_files_count, excluded_files_count) = if paths.is_empty() {
+        (changed.len(), None)
+    } else {
+        let matched = matched_files(root, base.tree_ish(), args.staged, paths)?;
+        let held: HashSet<PathBuf> = changed
+            .iter()
+            .filter(|c| matched.contains(&c.file) || matched.contains(&c.old_file))
+            .map(|c| c.file.clone())
+            .collect();
+        hunks.retain(|hunk| held.contains(&hunk.file));
+        binary.retain(|file| held.contains(file));
+        links.retain(|file| held.contains(file));
+        let excluded = changed.len() - held.len();
+        if excluded > 0 {
+            hints.push(format!(
+                "--path leaves out {excluded} of the {} files the diff changes, which this \
+                 answer does not measure; another --path measures them.",
+                changed.len()
+            ));
+        }
+        (held.len(), Some(excluded))
+    };
 
     let binary: BTreeSet<PathBuf> = binary.into_iter().collect();
     if !binary.is_empty() {
@@ -268,7 +318,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     }
 
     if !args.staged {
-        let untracked: Vec<String> = untracked_files(root)?
+        let untracked: Vec<String> = untracked_files(root, paths)?
             .iter()
             .map(|file| relative_display(file, root))
             .collect();
@@ -283,7 +333,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
 
     if args.staged {
         let unstaged = unstaged_files(root)?;
-        let unmerged = unmerged_files(root, base.tree_ish())?;
+        let unmerged = unmerged_files(root, base.tree_ish(), paths)?;
         // A file with no staged lines, a pure rename or a mode change, has
         // nothing under the unstaged edits; a conflicted file has no staged
         // lines of its own to measure.
@@ -366,9 +416,10 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         Some(with_tests as f32 / measurable as f32)
     };
 
-    ctx.print_success(DiffImpactOutput {
+    let output = DiffImpactOutput {
         revision: args.revision,
-        changed_files_count: changed_files.len(),
+        changed_files_count,
+        excluded_files_count,
         total_references: total_refs,
         refs_status_counts,
         callers_status_counts,
@@ -384,7 +435,8 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
             .collect(),
         incomplete: capped,
         hints,
-    });
+    };
+    ctx.print_narrowable(output, "narrow the diff with --path");
     Ok(())
 }
 

@@ -72,6 +72,19 @@ const CASES: &[ParityCase] = &[
         cli: &["diff-impact", "symora_nonexistent_test_revision"],
         error: Some("invalid_argument"),
     },
+    // A documentation file: no language server is asked about it.
+    ParityCase {
+        tool: "get_diff_impact",
+        arguments: r#"{"path":["README.md"]}"#,
+        cli: &["diff-impact", "--path", "README.md"],
+        error: None,
+    },
+    ParityCase {
+        tool: "get_diff_impact",
+        arguments: r#"{"path":["symora_missing_parity_path"]}"#,
+        cli: &["diff-impact", "--path", "symora_missing_parity_path"],
+        error: Some("not_found"),
+    },
     ParityCase {
         tool: "get_project_overview",
         arguments: "{}",

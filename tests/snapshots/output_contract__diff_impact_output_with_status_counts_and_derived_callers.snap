@@ -5,6 +5,7 @@ expression: out
 {
   "revision": "HEAD",
   "changed_files_count": 2,
+  "excluded_files_count": 1,
   "total_references": 4,
   "refs_status_counts": {
     "indexing_degraded": 1
@@ -22,6 +23,7 @@ expression: out
     "README.md"
   ],
   "hints": [
+    "--path leaves out 1 of the 3 files the diff changes, which this answer does not measure; another --path measures them.",
     "Documentation and configuration files are not read as symbols: README.md. Read their diff for what changed."
   ],
   "changes": {

@@ -314,7 +314,7 @@ impl LowerBound {
                 "Analysis stopped at {symbols} symbol(s) whose references are counted, or \
                  as many deletions, before running out of candidates, so those past the cap \
                  are missing from the counts and {} are not measured in full; raise \
-                 --max-symbols to reach them",
+                 --max-symbols, or measure the diff a part at a time with --path, to reach them",
                 name_some(files)
             ),
             Self::AnalysisTimedOut(secs) => format!(
