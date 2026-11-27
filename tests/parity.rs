@@ -400,7 +400,7 @@ fn daemon_and_direct_emit_identical_payloads() {
 fn degradation_is_detected_at_any_depth() {
     let top: Value = serde_json::from_str(r#"{"count":0,"indexing":"timed_out"}"#).unwrap();
     let nested: Value =
-        serde_json::from_str(r#"{"refs":{"total":0,"indexing":"timed_out"}}"#).unwrap();
+        serde_json::from_str(r#"{"refs":{"count":0,"indexing":"timed_out"}}"#).unwrap();
     let in_array: Value = serde_json::from_str(r#"{"items":[{"indexing":"timed_out"}]}"#).unwrap();
     let clean: Value = serde_json::from_str(r#"{"count":1,"items":[{"line":3}]}"#).unwrap();
 

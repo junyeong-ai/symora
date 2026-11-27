@@ -114,7 +114,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                     .collect(),
                 target,
                 refs: RefOutput {
-                    total: classified.total,
+                    count: classified.total,
                     test: classified.test,
                     prod: classified.prod,
                     files: Some(total_files),

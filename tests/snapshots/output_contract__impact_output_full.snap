@@ -11,7 +11,7 @@ expression: out
     "column": 4
   },
   "refs": {
-    "total": 10,
+    "count": 10,
     "test": 3,
     "prod": 7,
     "files": 4,

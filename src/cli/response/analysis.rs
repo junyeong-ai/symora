@@ -183,7 +183,7 @@ impl ReferenceCount {
 /// Reference statistics (counts, no judgements).
 #[derive(Debug, Serialize)]
 pub struct RefOutput {
-    pub total: usize,
+    pub count: usize,
     pub test: usize,
     pub prod: usize,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -512,7 +512,7 @@ fn target_output_fallback_for_unknown_symbol() {
 #[test]
 fn ref_output_full_metadata() {
     let out = RefOutput {
-        total: 42,
+        count: 42,
         test: 12,
         prod: 30,
         files: Some(8),
@@ -530,7 +530,7 @@ fn ref_output_discloses_degraded_indexing() {
     // they are a lower bound — disclosed via `indexing`, omitted otherwise so
     // the common (authoritative) summary carries no filler.
     let out = RefOutput {
-        total: 4,
+        count: 4,
         test: 1,
         prod: 3,
         files: Some(2),
@@ -549,7 +549,7 @@ fn ref_output_discloses_an_omitted_usage() {
     // from, so the counts are a lower bound — disclosed via `incomplete`,
     // omitted otherwise so the common (authoritative) summary carries no filler.
     let out = RefOutput {
-        total: 0,
+        count: 0,
         test: 0,
         prod: 0,
         files: Some(0),
@@ -565,7 +565,7 @@ fn ref_output_discloses_an_omitted_usage() {
 #[test]
 fn ref_output_minimal() {
     let out = RefOutput {
-        total: 0,
+        count: 0,
         test: 0,
         prod: 0,
         files: None,
@@ -657,7 +657,7 @@ fn impact_output_full() {
         hints: Vec::new(),
         target,
         refs: RefOutput {
-            total: 10,
+            count: 10,
             test: 3,
             prod: 7,
             files: Some(4),
@@ -717,7 +717,7 @@ fn impact_output_without_blast_radius() {
             4,
         ),
         refs: RefOutput {
-            total: 0,
+            count: 0,
             test: 0,
             prod: 0,
             files: None,

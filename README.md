@@ -195,7 +195,7 @@ symora context src/services/checkout.ts:48 --all
     "signature": "async processOrder(cart: Cart, user: User): Promise<Order>",
     "body": "  async processOrder(cart: Cart, user: User): Promise<Order> {\n    const reserved = await this.inventory.reserve(cart.items);\n    const order = await this.payment.charge(user, cart.total);\n    return this.orders.create(order, reserved);\n  }"
   },
-  "refs":    { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false, "indexing": "unconfirmed" },
+  "refs":    { "count": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false, "indexing": "unconfirmed" },
   "callers": { "count": 4, "showing": 4, "indexing": "unconfirmed", "items": [ /* handleCheckout, runOrderQueue, 테스트 함수 2개 */ ] },
   "callees": { "count": 3, "showing": 3, "indexing": "unconfirmed", "items": [ /* reserve, charge, create */ ] },
   "types":   { "count": 1, "showing": 1, "indexing": "unconfirmed", "items": [ /* Order */ ] },
@@ -252,7 +252,7 @@ symora impact src/services/checkout.ts:48 --depth 2
 ```json
 {
   "target": { "name": "processOrder", "kind": "method", "file": "src/services/checkout.ts", "line": 48, "column": 9 },
-  "refs": { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false, "indexing": "unconfirmed" },
+  "refs": { "count": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false, "indexing": "unconfirmed" },
   "coverage": { "count": 3, "files": ["tests/checkout.test.ts"] },
   "blast_radius": {
     "direct_callers": 4,

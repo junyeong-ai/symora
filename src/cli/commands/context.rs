@@ -168,12 +168,12 @@ async fn fetch_context(
         t
     };
 
-    // `refs` here is a summary, not a list — nothing to cap, and `total`
+    // `refs` here is a summary, not a list — nothing to cap, and `count`
     // is the true total the output contract promises.
     let classified = analysis.classify(test_scope);
 
     let refs_summary = RefOutput {
-        total: classified.total,
+        count: classified.total,
         test: classified.test,
         prod: classified.prod,
         files: Some(classified.unique_files),

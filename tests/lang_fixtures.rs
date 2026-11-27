@@ -595,7 +595,7 @@ fn an_empty_reference_set_says_what_kind_of_empty_it_is() {
     let loc = format!("packages/core/src/fixture_core/geometry.py:{line}:{column}");
     for command in ["impact", "context"] {
         let page = run_in_fixture(&[command.to_string(), loc.clone()]);
-        assert_eq!(page["refs"]["total"], 0, "{command}: {page}");
+        assert_eq!(page["refs"]["count"], 0, "{command}: {page}");
         assert!(
             page["hints"].as_array().is_some_and(|h| h
                 .iter()
