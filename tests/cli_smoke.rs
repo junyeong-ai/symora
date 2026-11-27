@@ -5891,10 +5891,11 @@ fn a_computed_member_is_found_live_through_what_encloses_it() {
 }
 
 /// A declaration the index finds and the language server's tree lacks — the
-/// Dart analyzer outlines no extension type's or enum's primary constructor
-/// and qualifies no extension type member's path — is answered from the
-/// grammar by every surface that names it, by path or by where its name is
-/// placed, never as absent or as the type whose name ends there.
+/// Dart analyzer outlines no extension type's or enum's primary constructor —
+/// is answered from the grammar by every surface that names it, by path or by
+/// where its name is placed, never as absent or as the type whose name ends
+/// there. The extension type the analyzer sends as a namespace is the class
+/// the grammar reads at its name, so the tree qualifies its members.
 #[cfg(unix)]
 #[test]
 fn a_declaration_the_servers_tree_lacks_is_answered_from_the_grammar() {
@@ -5949,16 +5950,21 @@ fn a_declaration_the_servers_tree_lacks_is_answered_from_the_grammar() {
     // lacks, each with its own backend.
     for (path, expected) in [
         ("X/X", row("X/X", "constructor", 1, 17)),
-        ("X/twice", row("X/twice", "property", 2, 11)),
         ("E/v", row("E/v", "field", 5, 18)),
     ] {
         let answer = json_ok(dir, &["symbols", "f.dart", "--symbol", path]);
         assert_eq!(answer["backend"], "ast", "{path}: {answer}");
         assert_eq!(rows(&answer), [expected], "{path}: {answer}");
     }
-    let answer = json_ok(dir, &["symbols", "f.dart", "--symbol", "E"]);
-    assert_eq!(answer["backend"], "document", "{answer}");
-    assert_eq!(rows(&answer), [row("E", "enum", 5, 6)], "{answer}");
+    for (path, expected) in [
+        ("E", row("E", "enum", 5, 6)),
+        ("X[class]", row("X", "class", 1, 16)),
+        ("X/twice", row("X/twice", "property", 2, 11)),
+    ] {
+        let answer = json_ok(dir, &["symbols", "f.dart", "--symbol", path]);
+        assert_eq!(answer["backend"], "document", "{path}: {answer}");
+        assert_eq!(rows(&answer), [expected], "{path}: {answer}");
+    }
     let answer = json_ok(dir, &["symbols", "f.dart", "--symbol", "Nope"]);
     assert_eq!(answer["backend"], "document", "{answer}");
     assert_eq!(answer["count"], 0, "{answer}");
@@ -5998,7 +6004,7 @@ fn a_declaration_the_servers_tree_lacks_is_answered_from_the_grammar() {
     for (at, path, kind, lines) in [
         ("f.dart:5:7", "E/E", "constructor", (5, 5)),
         ("f.dart:1:22", "X/raw", "field", (1, 1)),
-        ("f.dart:1:16", "X", "namespace", (1, 3)),
+        ("f.dart:1:16", "X", "class", (1, 3)),
         ("f.dart:9:9", "N/N.named", "method", (9, 9)),
     ] {
         let edit = json_ok(

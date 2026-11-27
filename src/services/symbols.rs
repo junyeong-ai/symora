@@ -329,6 +329,12 @@ impl SymbolExtractor {
     /// holder's, so it never takes the extent its holder was joined to: the
     /// analyzer places a Dart class's unnamed primary constructor at the
     /// class's name, where the grammar reads the class.
+    ///
+    /// The one kind read there is a Dart namespace's. Dart declares none, and
+    /// the analyzer sends an extension and an extension type alike as one,
+    /// which passes its members through to the path above it; the grammar
+    /// reads which the declaration at its name is, an impl or a class. One it
+    /// reads nothing at, an unnamed extension, stays the namespace sent.
     pub fn complete_from_declarations(
         &self,
         symbols: &mut [Symbol],
@@ -337,15 +343,18 @@ impl SymbolExtractor {
         language: Language,
     ) {
         /// The declaration an extent was read from, by its place in the
-        /// grammar's reading, and the extent.
-        type Extent = (usize, Option<(u32, u32)>, Option<(u32, u32)>);
+        /// grammar's reading, the extent, and the declaration's kind.
+        type Extent = (usize, Option<(u32, u32)>, Option<(u32, u32)>, SymbolKind);
         struct Extents {
             by_start: HashMap<(u32, u32), Extent>,
             by_end: HashMap<(u32, u32), Extent>,
+            /// Whether a namespace the server sends is the declaration the
+            /// grammar reads at its name.
+            reads_namespaces: bool,
         }
         fn widen(symbols: &mut [Symbol], extents: &Extents, holder: Option<usize>) {
             for symbol in symbols {
-                let location = &mut symbol.location;
+                let location = &symbol.location;
                 let own = |extent: &&Extent| Some(extent.0) != holder;
                 let named = extents
                     .by_start
@@ -355,7 +364,11 @@ impl SymbolExtractor {
                         let end = (location.name_end_line?, location.name_end_column?);
                         extents.by_end.get(&end).filter(own)
                     });
-                if let Some(&(_, start, end)) = named {
+                if let Some(&(_, start, end, kind)) = named {
+                    if extents.reads_namespaces && symbol.kind == SymbolKind::Namespace {
+                        symbol.kind = kind;
+                    }
+                    let location = &mut symbol.location;
                     if let Some(start) = start
                         && start < location.effective_start()
                     {
@@ -373,7 +386,7 @@ impl SymbolExtractor {
                         location.end_column = Some(end.1);
                     }
                 }
-                let holder = named.map(|&(declaration, _, _)| declaration).or(holder);
+                let holder = named.map(|&(declaration, ..)| declaration).or(holder);
                 widen(&mut symbol.children, extents, holder);
             }
         }
@@ -384,6 +397,7 @@ impl SymbolExtractor {
         let mut extents = Extents {
             by_start: HashMap::new(),
             by_end: HashMap::new(),
+            reads_namespaces: language == Language::Dart,
         };
         let declarations = self.declarations_in(&tree, path, content, language);
         for (declaration, (node, declared)) in declarations.into_iter().enumerate() {
@@ -397,6 +411,7 @@ impl SymbolExtractor {
                 declaration,
                 written.start.then(|| location.effective_start()),
                 written.end.then_some((end_line, end_column)),
+                declared.kind,
             );
             extents
                 .by_start
@@ -10356,6 +10371,94 @@ region     = "us-central1"
         assert_eq!(extent(&symbols[2].children[0]), ((12, 5), (12, 11)));
         assert_eq!(extent(&symbols[3]), ((8, 5), (8, 13)));
         assert_eq!(extent(&symbols[4]), ((15, 1), (17, 2)));
+    }
+
+    /// The analyzer sends a Dart extension and an extension type alike as a
+    /// namespace, at its name, or at the type an unnamed extension is `on`
+    /// (`elementKindToSymbolKind`, `_newExtensionOutline`). Each takes the
+    /// kind the grammar reads at that name, and with it keys its members by
+    /// its name; an unnamed one, which the grammar does not read, stays the
+    /// namespace sent.
+    #[test]
+    fn a_dart_namespace_is_the_extension_or_extension_type_written_at_its_name() {
+        let content = "class Foo {}\n\nextension FooExt on Foo {\n  int doubled() => 2;\n}\n\n\
+                       extension on Foo {\n  int tripled() => 3;\n}\n\n\
+                       extension type Meters(int value) {\n  Meters add(Meters o) => o;\n}\n";
+        let path = Path::new("a.dart");
+        let served = |name: &str, kind: SymbolKind, (line, column): (u32, u32), end: u32| {
+            Symbol::new(
+                name.to_string(),
+                kind,
+                Location::full(path.to_path_buf(), line, column, line, 1, end, 2)
+                    .with_name_end(line, column + name.len() as u32),
+            )
+        };
+        let foo_end = (7, 14 + "Foo".len() as u32);
+        let mut symbols = vec![
+            served("Foo", SymbolKind::Class, (1, 7), 1),
+            served("FooExt", SymbolKind::Namespace, (3, 11), 5).with_children(vec![served(
+                "doubled",
+                SymbolKind::Method,
+                (4, 7),
+                4,
+            )]),
+            Symbol::new(
+                "extension on Foo".to_string(),
+                SymbolKind::Namespace,
+                Location::full(path.to_path_buf(), 7, 14, 7, 1, 9, 2)
+                    .with_name_end(foo_end.0, foo_end.1),
+            )
+            .with_children(vec![served("tripled", SymbolKind::Method, (8, 7), 8)]),
+            served("Meters", SymbolKind::Namespace, (11, 16), 13).with_children(vec![served(
+                "add",
+                SymbolKind::Method,
+                (12, 10),
+                12,
+            )]),
+        ];
+        SymbolExtractor::new().complete_from_declarations(
+            &mut symbols,
+            path,
+            content,
+            Language::Dart,
+        );
+        Symbol::compute_paths_for_all(&mut symbols);
+        let mut read = Vec::new();
+        fn rows(symbols: &[Symbol], out: &mut Vec<(String, SymbolKind)>) {
+            for symbol in symbols {
+                out.push((symbol.path().to_string(), symbol.kind));
+                rows(&symbol.children, out);
+            }
+        }
+        rows(&symbols, &mut read);
+        assert_eq!(
+            read,
+            [
+                ("Foo".to_string(), SymbolKind::Class),
+                ("FooExt".to_string(), SymbolKind::Impl),
+                ("FooExt/doubled".to_string(), SymbolKind::Method),
+                ("extension on Foo".to_string(), SymbolKind::Namespace),
+                ("tripled".to_string(), SymbolKind::Method),
+                ("Meters".to_string(), SymbolKind::Class),
+                ("Meters/add".to_string(), SymbolKind::Method),
+            ]
+        );
+
+        // Another language's namespace is what its server says, whatever
+        // the grammar reads at its name.
+        let mut namespace = vec![Symbol::new(
+            "S".to_string(),
+            SymbolKind::Namespace,
+            Location::full(Path::new("a.rs").to_path_buf(), 1, 12, 1, 1, 1, 14)
+                .with_name_end(1, 13),
+        )];
+        SymbolExtractor::new().complete_from_declarations(
+            &mut namespace,
+            Path::new("a.rs"),
+            "pub struct S;\n",
+            Language::Rust,
+        );
+        assert_eq!(namespace[0].kind, SymbolKind::Namespace);
     }
 
     /// A symbol a server nests in another is a declaration of its own. The
