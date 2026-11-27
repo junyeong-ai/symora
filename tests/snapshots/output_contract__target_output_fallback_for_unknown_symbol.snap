@@ -7,5 +7,6 @@ expression: out
   "kind": "unknown",
   "file": "src/main.rs",
   "line": 50,
+  "column": 4,
   "anchor_status": "not_a_symbol"
 }

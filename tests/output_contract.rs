@@ -503,6 +503,7 @@ fn target_output_fallback_for_unknown_symbol() {
             "unknown".to_string(),
             "src/main.rs".to_string(),
             50,
+            4,
         )
     };
     assert_json_snapshot!(out);
@@ -650,6 +651,7 @@ fn impact_output_full() {
         "function".to_string(),
         "src/main.rs".to_string(),
         12,
+        4,
     );
     let out = ImpactOutput {
         hints: Vec::new(),
@@ -712,6 +714,7 @@ fn impact_output_without_blast_radius() {
             "function".to_string(),
             "src/main.rs".to_string(),
             12,
+            4,
         ),
         refs: RefOutput {
             total: 0,

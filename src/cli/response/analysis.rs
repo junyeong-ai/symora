@@ -19,6 +19,7 @@ pub struct TargetOutput {
     pub kind: String,
     pub file: String,
     pub line: u32,
+    pub column: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -39,12 +40,13 @@ pub struct TargetOutput {
 }
 
 impl TargetOutput {
-    pub fn new(name: String, kind: String, file: String, line: u32) -> Self {
+    pub fn new(name: String, kind: String, file: String, line: u32, column: u32) -> Self {
         Self {
             name,
             kind,
             file,
             line,
+            column,
             signature: None,
             body: None,
             body_omitted: None,
@@ -65,6 +67,7 @@ impl TargetOutput {
             kind: symbol.kind.to_string(),
             file,
             line: symbol.location.line,
+            column: symbol.location.column,
             signature: None,
             body: None,
             body_omitted: None,
@@ -102,7 +105,13 @@ impl TargetOutput {
             .unwrap_or_else(|| format!("symbol@{}:{}", anchor.line, anchor.column));
         Self {
             anchor_status: anchor.resolution.as_status(),
-            ..Self::new(name, "unknown".to_string(), file, anchor.line)
+            ..Self::new(
+                name,
+                "unknown".to_string(),
+                file,
+                anchor.line,
+                anchor.column,
+            )
         }
     }
 }

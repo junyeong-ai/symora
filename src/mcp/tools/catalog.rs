@@ -286,7 +286,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 (
                     "target",
                     "object",
-                    "The symbol the position resolved to: { name, kind, file, line, signature?, \
+                    "The symbol the position resolved to: { name, kind, file, line, column, signature?, \
                      anchor_status? } — anchor_status is \"binding\" (a declaration the \
                      symbol tree does not list, such as a local or a parameter; the list is \
                      exactly its), \

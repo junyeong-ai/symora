@@ -7,7 +7,8 @@ expression: out
     "name": "process",
     "kind": "function",
     "file": "src/main.rs",
-    "line": 12
+    "line": 12,
+    "column": 4
   },
   "refs": {
     "total": 0,
