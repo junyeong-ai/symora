@@ -750,13 +750,15 @@ pub(crate) mod tests {
         /// hanging start pays it in full. Every wait for the pool to make
         /// progress, or for its processes to go, allows twice that: a start
         /// outlives the caller that launched it by up to a budget.
-        const START_BUDGET_SECS: u64 = 10;
+        pub(crate) const START_BUDGET_SECS: u64 = 10;
 
         /// The budget of a test that waits a hanging start or an unanswered
         /// request out in full, short so the wait costs the suite little. An
         /// idle machine starts the fake within milliseconds; a loaded one
-        /// can take longer than this, so such a test runs through
-        /// [`waited_out`].
+        /// can take longer than this, so a test that waits out a start runs
+        /// through [`waited_out`], and one that waits out a request starts
+        /// its server under [`START_BUDGET_SECS`] and holds only the request
+        /// to this budget.
         const WAITED_OUT_SECS: u64 = 3;
 
         const FAKE_SERVER: &str = r#"#!/bin/sh
@@ -926,7 +928,7 @@ exec sleep 600
 
             /// Whether a server this fake was asked to run got far enough to
             /// record itself.
-            pub(crate) fn started(&self) -> bool {
+            fn started(&self) -> bool {
                 !self.pids().is_empty()
             }
 
@@ -971,7 +973,7 @@ exec sleep 600
         /// The scenario judges that from the fake, never from what the pool
         /// answered, so a pool that gives up before its server starts fails
         /// under either budget.
-        pub(crate) async fn waited_out(scenario: impl AsyncFn(u64) -> bool) {
+        async fn waited_out(scenario: impl AsyncFn(u64) -> bool) {
             if !scenario(WAITED_OUT_SECS).await {
                 assert!(
                     scenario(START_BUDGET_SECS).await,
@@ -1118,43 +1120,42 @@ exec sleep 600
             fake.assert_all_gone().await;
         }
 
+        /// The request that times out is waited out under a budget of its
+        /// own, so the start before it runs under the full start budget and
+        /// how long the fake takes to answer `initialize` never counts.
         #[tokio::test]
         async fn request_timeout_and_cancellation_release_and_refresh_use() {
-            waited_out(async |budget| {
-                let fake = FakeServer::new();
-                let manager = fake.budgeted("serve", 0, FileWatch::On, budget);
-                let client = bounded(manager.get_client(Language::Go)).await;
-                if !fake.started() {
-                    return false;
-                }
-                let client = client.unwrap();
-                client.age_use(2 * IDLE_LIMIT);
-                let stamp = client.usage().last_used;
-                let request = client.request::<serde_json::Value>("textDocument/hover", None);
-                let mut request = Box::pin(request);
-                tokio::select! {
-                    _ = &mut request => panic!("request answered"),
-                    _ = tokio::time::sleep(Duration::from_millis(20)) => {}
-                }
-                assert!(client.usage().in_flight);
-                drop(request);
-                assert!(!client.usage().in_flight);
-                assert!(client.usage().last_used > stamp);
-                assert_eq!(manager.cleanup_idle(IDLE_LIMIT).await, 0);
-                client.age_use(2 * IDLE_LIMIT);
-                let stamp = client.usage().last_used;
-                assert!(matches!(
-                    bounded(client.request::<serde_json::Value>("textDocument/hover", None)).await,
-                    Err(LspError::Timeout(_))
-                ));
-                assert!(!client.usage().in_flight);
-                assert!(client.usage().last_used > stamp);
-                assert_eq!(manager.cleanup_idle(IDLE_LIMIT).await, 0);
-                assert_eq!(bounded(manager.cleanup_idle(Duration::ZERO)).await, 1);
-                fake.assert_all_gone().await;
-                true
-            })
-            .await;
+            let fake = FakeServer::new();
+            let manager = fake.manager("serve", 0);
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            client.age_use(2 * IDLE_LIMIT);
+            let stamp = client.usage().last_used;
+            let request = client.request::<serde_json::Value>("textDocument/hover", None);
+            let mut request = Box::pin(request);
+            tokio::select! {
+                _ = &mut request => panic!("request answered"),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+            assert!(client.usage().in_flight);
+            drop(request);
+            assert!(!client.usage().in_flight);
+            assert!(client.usage().last_used > stamp);
+            assert_eq!(manager.cleanup_idle(IDLE_LIMIT).await, 0);
+            client.age_use(2 * IDLE_LIMIT);
+            let stamp = client.usage().last_used;
+            let unanswered = crate::infra::deadline::scope(
+                Duration::from_secs(WAITED_OUT_SECS),
+                client.request::<serde_json::Value>("textDocument/hover", None),
+            );
+            assert!(matches!(
+                bounded(unanswered).await,
+                Err(LspError::Timeout(_))
+            ));
+            assert!(!client.usage().in_flight);
+            assert!(client.usage().last_used > stamp);
+            assert_eq!(manager.cleanup_idle(IDLE_LIMIT).await, 0);
+            assert_eq!(bounded(manager.cleanup_idle(Duration::ZERO)).await, 1);
+            fake.assert_all_gone().await;
         }
 
         #[tokio::test]
