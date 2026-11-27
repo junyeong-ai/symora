@@ -262,7 +262,13 @@ pub enum LowerBound {
     /// ran out before every count was taken, so the rows marked `timed_out`
     /// carry none. Kept apart from the cap because a larger budget, not a
     /// larger cap, reaches them.
-    AnalysisTimedOut(u64),
+    AnalysisTimedOut {
+        secs: u64,
+        /// How the command asks for less at a time, where it can, as
+        /// [`DIFF_IN_PARTS`] does for a `diff-impact`: a smaller ask spends
+        /// the same budget on fewer rows.
+        narrowing: Option<&'static str>,
+    },
     /// A language server answered these languages for the whole workspace and
     /// the answer was confined to the requested paths afterwards, so matches
     /// inside them that a capped answer held back are not counted.
@@ -282,6 +288,10 @@ pub enum LowerBound {
         indexable: bool,
     },
 }
+
+/// How a `diff-impact` that a cap or budget cut short asks for less at a
+/// time: the same analysis, over fewer of the files the diff changes.
+pub const DIFF_IN_PARTS: &str = "measure the diff a part at a time with --path";
 
 impl LowerBound {
     pub fn hint(&self) -> String {
@@ -314,13 +324,14 @@ impl LowerBound {
                 "Analysis stopped at {symbols} symbol(s) whose references are counted, or \
                  as many deletions, before running out of candidates, so those past the cap \
                  are missing from the counts and {} are not measured in full; raise \
-                 --max-symbols, or measure the diff a part at a time with --path, to reach them",
+                 --max-symbols, or {DIFF_IN_PARTS}, to reach them",
                 name_some(files)
             ),
-            Self::AnalysisTimedOut(secs) => format!(
+            Self::AnalysisTimedOut { secs, narrowing } => format!(
                 "The language-server budget (lsp.timeout_secs = {secs}) ran out before every \
                  count was taken, so rows marked timed_out carry none; raise timeout_secs under \
-                 [lsp] in .symora/config.toml to take them"
+                 [lsp] in .symora/config.toml{} to take them",
+                narrowing.map_or(String::new(), |narrowing| format!(", or {narrowing},"))
             ),
             Self::LiveAnswerNarrowed {
                 languages,
@@ -376,7 +387,7 @@ impl LowerBound {
             | Self::IndexPageCapped
             | Self::LiveFileNotDescribed
             | Self::AnalysisCapped { .. }
-            | Self::AnalysisTimedOut(_) => None,
+            | Self::AnalysisTimedOut { .. } => None,
         }
     }
 }

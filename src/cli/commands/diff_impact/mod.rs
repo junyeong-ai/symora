@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::analysis::{Constructions, callers_from_references};
 use crate::cli::errors::OutputError;
-use crate::cli::response::disclosure::{CoverageReason, LowerBound, name_some};
+use crate::cli::response::disclosure::{CoverageReason, DIFF_IN_PARTS, LowerBound, name_some};
 use crate::cli::response::{
     CallHierarchyOutput, INDEXING_DEGRADED, LocationOutput, NOT_CALLABLE, REFERENCES_DERIVED,
     ReferenceCount, Section,
@@ -394,7 +394,13 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         .iter()
         .any(|c| c.refs_status == timed_out || c.callers_status == timed_out)
     {
-        hints.push(LowerBound::AnalysisTimedOut(app.config().lsp.timeout_secs).hint());
+        hints.push(
+            LowerBound::AnalysisTimedOut {
+                secs: app.config().lsp.timeout_secs,
+                narrowing: Some(DIFF_IN_PARTS),
+            }
+            .hint(),
+        );
     }
 
     // Coverage is measured only over rows that have reference counts

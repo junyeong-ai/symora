@@ -141,7 +141,13 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                 .flat_map(HashMap::values)
                 .any(|count| matches!(count, ReferenceCount::Missing(CoverageReason::TimedOut)))
             {
-                hints.push(LowerBound::AnalysisTimedOut(app.config().lsp.timeout_secs).hint());
+                hints.push(
+                    LowerBound::AnalysisTimedOut {
+                        secs: app.config().lsp.timeout_secs,
+                        narrowing: None,
+                    }
+                    .hint(),
+                );
             }
             let body_paths = SymbolOutput::body_paths(&items);
             ctx.print_source(

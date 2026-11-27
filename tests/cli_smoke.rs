@@ -2658,6 +2658,46 @@ fn a_path_confines_the_changes_not_where_their_references_are_found() {
     );
 }
 
+/// A row whose references the budget ran out before is marked `timed_out`,
+/// and the hint gives both ways to take it: a larger budget, or less of the
+/// diff at a time.
+#[cfg(unix)]
+#[test]
+fn a_diff_the_budget_cut_short_names_the_budget_and_the_path() {
+    let Some(dir) = reference_served_repo(&[(
+        "a.py",
+        "def one():\n    return 1\n",
+        "def one():\n    return 2\n",
+    )]) else {
+        return;
+    };
+    let repo = dir.path();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/reference_server.py");
+    let config = serde_json::json!({"lsp": {"timeout_secs": 2, "servers": {"python": {
+        "command": "python3",
+        "args": [server, repo.join(".symora/log"), "unanswered-references"],
+    }}}});
+    std::fs::write(
+        repo.join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let page = diff_impact_in_process(repo, &[]);
+    assert_eq!(
+        page["changes"]["items"][0]["refs_status"], "timed_out",
+        "{page}"
+    );
+    assert!(
+        page["hints"]
+            .as_array()
+            .is_some_and(|hints| hints.iter().any(|h| h
+                .as_str()
+                .is_some_and(|h| h.contains("lsp.timeout_secs = 2") && h.contains("--path")))),
+        "{page}"
+    );
+}
+
 /// The rows are the shared list, so a response past `output.max_response_chars`
 /// is cut to fit like any other: a row's callers, the detail one `callers`
 /// query lists again, before the rows, which take their counts with them.

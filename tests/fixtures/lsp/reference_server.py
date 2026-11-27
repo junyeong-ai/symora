@@ -11,7 +11,8 @@ declaration's own name, inside a function or method, which is the caller.
 
 Every message's method, and the name of the file it asks about, is appended
 to the file named by the first argument. `no-call-hierarchy` among the
-arguments after it leaves the call hierarchy provider out.
+arguments after it leaves the call hierarchy provider out, and
+`unanswered-references` leaves every references request without a reply.
 """
 
 import json
@@ -150,6 +151,8 @@ while True:
         continue
     elif method == "textDocument/documentSymbol":
         result = document_symbols(path_of(params["textDocument"]["uri"]))
+    elif method == "textDocument/references" and "unanswered-references" in modes:
+        continue
     elif method == "textDocument/references":
         name = name_at(path_of(params["textDocument"]["uri"]), params["position"])
         result = [{"uri": path.as_uri(), "range": span(line, start, end)}
