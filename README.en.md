@@ -321,7 +321,7 @@ symora search ast '(class_declaration) @c' --lang typescript   # structural AST 
 
 # Project & file overview
 symora map summary                          # repo shape
-symora map file src/services/checkout.ts    # one file: symbols, siblings, related files
+symora map file src/services/checkout.ts    # one file: symbols, siblings, tests importing it
 
 # Symbols & inspection (LSP or AST declarations; semantic queries require LSP)
 symora symbols src/services/checkout.ts --depth 2   # declarations two levels deep

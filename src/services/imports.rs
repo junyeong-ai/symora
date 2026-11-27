@@ -50,6 +50,10 @@ enum Dialect {
 
 pub struct ImportExtractor {
     languages: HashMap<Language, OnceLock<Option<LanguageEntry>>>,
+    /// Python's `from` imports read for the names they take
+    /// ([`ImportExtractor::python_module_names`]), apart from the module
+    /// references `extract` reads, which pack resolves.
+    python_from: OnceLock<Option<LanguageEntry>>,
 }
 
 impl Default for ImportExtractor {
@@ -64,7 +68,10 @@ impl ImportExtractor {
             .iter()
             .map(|&(language, _, _, _)| (language, OnceLock::new()))
             .collect();
-        Self { languages }
+        Self {
+            languages,
+            python_from: OnceLock::new(),
+        }
     }
 
     /// The parser and query of `language`, compiled the first time it is
@@ -86,6 +93,65 @@ impl ImportExtractor {
         static SHARED: std::sync::LazyLock<ImportExtractor> =
             std::sync::LazyLock::new(ImportExtractor::new);
         &SHARED
+    }
+
+    /// Every module name a Python file's imports may name: the module each
+    /// import and `from` import names, as [`extract`](Self::extract) reads
+    /// them, and each name a `from` import takes from its module, spelled as
+    /// the submodule it would be — `from pkg import a, b as c` reads `pkg`,
+    /// `pkg.a` and `pkg.b`, `from . import a` reads `.` and `.a`. Whether a
+    /// taken name is a submodule or a value its module defines is the files'
+    /// to say; `*` takes none. The file is parsed once for both.
+    pub fn python_module_names(&self, content: &str) -> Vec<String> {
+        let (Some(modules), Some(taken)) = (
+            self.entry(Language::Python),
+            self.python_from
+                .get_or_init(|| {
+                    compile(
+                        tree_sitter_python::LANGUAGE.into(),
+                        PYTHON_FROM_NAMES_QUERY,
+                        Dialect::Plain,
+                    )
+                })
+                .as_ref(),
+        ) else {
+            return Vec::new();
+        };
+        let tree = {
+            let Ok(mut parser) = modules.parser.lock() else {
+                return Vec::new();
+            };
+            match parser.parse(content, None) {
+                Some(tree) => tree,
+                None => return Vec::new(),
+            }
+        };
+        let source = content.as_bytes();
+        let mut names = Vec::new();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&modules.query, tree.root_node(), source);
+        while let Some(m) = matches.next() {
+            names.extend(references_of(m.captures(), source, modules));
+        }
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&taken.query, tree.root_node(), source);
+        while let Some(m) = matches.next() {
+            let captured = |name| {
+                m.captures()
+                    .iter()
+                    .find(|capture| taken.capture_name(capture) == Some(name))
+                    .map(|capture| text_of(capture.node, source))
+            };
+            let (Some(module), Some(name)) = (captured("module"), captured("name")) else {
+                continue;
+            };
+            names.push(if module.ends_with('.') {
+                format!("{module}{name}")
+            } else {
+                format!("{module}.{name}")
+            });
+        }
+        names
     }
 
     pub fn is_supported(language: Language) -> bool {
@@ -767,6 +833,12 @@ const PYTHON_QUERY: &str = r#"
 (import_from_statement module_name: (_) @path)
 "#;
 
+/// The names a `from` import takes, beside the module it takes them from.
+const PYTHON_FROM_NAMES_QUERY: &str = r#"
+(import_from_statement module_name: (_) @module name: (dotted_name) @name)
+(import_from_statement module_name: (_) @module name: (aliased_import name: (dotted_name) @name))
+"#;
+
 const GO_QUERY: &str = r#"
 (import_spec path: [(interpreted_string_literal) (raw_string_literal)] @path)
 "#;
@@ -1391,6 +1463,38 @@ module "ordinary-percent" { source = "./100%" }
             ),
             vec!["example.com/he\\u006cper"],
         );
+    }
+
+    /// The names a `from` import takes are read beside its module, so a
+    /// submodule imported from its package (`from pkg import mod`) can be
+    /// told from the package; a wildcard takes none. The modules are the
+    /// references `extract` reads.
+    #[test]
+    fn python_from_names_are_spelled_as_the_submodules_they_would_be() {
+        let source = "from pkg import a, b as c\nfrom . import d\nfrom ..up import (e,\n    f)\n\
+                      from star import *\nimport plain\ndef g():\n    from local import h\n";
+        assert_eq!(
+            ImportExtractor::shared().python_module_names(source),
+            vec![
+                "pkg", ".", "..up", "star", "plain", "local", "pkg.a", "pkg.b", ".d", "..up.e",
+                "..up.f", "local.h"
+            ],
+        );
+        assert_eq!(
+            ImportExtractor::shared().python_module_names(source)[..6],
+            extract(source, Language::Python)[..]
+        );
+        let extractor = ImportExtractor::new();
+        extractor.python_module_names("");
+        let entry = extractor.python_from.get().unwrap().as_ref().unwrap();
+        let tree = entry.parser.lock().unwrap().parse(source, None).unwrap();
+        let mut matched = vec![false; entry.query.pattern_count()];
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&entry.query, tree.root_node(), source.as_bytes());
+        while let Some(found) = matches.next() {
+            matched[found.pattern_index] = true;
+        }
+        assert!(matched.iter().all(|m| *m), "{matched:?}");
     }
 
     #[test]

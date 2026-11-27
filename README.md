@@ -321,7 +321,7 @@ symora search ast '(class_declaration) @c' --lang typescript   # 구조적 AST �
 
 # 프로젝트 & 파일 개요
 symora map summary                          # 저장소 형태
-symora map file src/services/checkout.ts    # 한 파일: 심볼·형제·관련 파일
+symora map file src/services/checkout.ts    # 한 파일: 심볼·형제·이 파일을 import하는 테스트
 
 # 심볼 & 들여다보기 (LSP 또는 AST 선언; 의미 분석은 LSP 필요)
 symora symbols src/services/checkout.ts --depth 2   # 두 단계까지의 선언

@@ -1,6 +1,6 @@
 use crate::constants::defaults::{
     CALL_GRAPH_MAX_DEPTH, CONTEXT_BODY_TOKENS, DIFF_IMPACT_MAX_SYMBOLS, IMPACT_DEFAULT_DEPTH,
-    MAP_FILE_DEPTH, MAP_FILE_RELATED_LIMIT,
+    MAP_FILE_DEPTH, MAP_FILE_RELATED_LIMIT, MAP_FILE_TESTS_LIMIT,
 };
 use crate::mcp::protocol::ToolDefinition;
 
@@ -19,9 +19,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::read_only(
             "get_file_overview",
-            "Compact map for one file: focus symbols, siblings, name-matched counterparts, \
-                          shallow symbol tree, and nearby files suggested from names and \
-                          directory layout. Use find_references for semantic links. `focus_symbols` and \
+            "Compact map for one file: focus symbols, siblings, the tests that name it \
+                          (test files whose imports name it, its package's Go test files, its \
+                          Rust test regions, each marked by its evidence, with a hint saying \
+                          what the reading leaves out), shallow symbol tree, and nearby files \
+                          suggested from names and directory layout. Use find_references for \
+                          semantic links and get_context with tests for the tests referencing \
+                          one declaration. `focus_symbols` and \
                           `backend` are omitted together when nothing read the file's \
                           declarations — an empty list would say the file declares none.",
             schema_object(
@@ -36,6 +40,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "related_limit",
                         "integer",
                         &format!("Maximum related files to show (default {MAP_FILE_RELATED_LIMIT})"),
+                    ),
+                    (
+                        "tests_limit",
+                        "integer",
+                        &format!("Maximum tests to show (default {MAP_FILE_TESTS_LIMIT})"),
                     ),
                 ],
                 &["path"],

@@ -40,6 +40,11 @@ toml = "1.2.3"
 # Format-preserving TOML edits (comments, ordering, all table forms) for the
 # MCP installer's Codex config — the canonical crate for surgical TOML editing.
 toml_edit = "0.25.21"
+# YAML for the manifests `map` reads (`pnpm-workspace.yaml`, `pubspec.yaml`):
+# a whole parser, since reading lines takes a flow sequence written over
+# several of them for none. The smallest maintained one: serde_yaml is
+# archived. Without default features it reads UTF-8 alone, which these are.
+yaml-rust2 = { version = "0.13.2", default-features = false }
 
 # Version pinning — the requirement grammar `--check-version` accepts, and
 # the ordering rules a hand-rolled comparison gets wrong on pre-releases.

@@ -15,9 +15,14 @@ use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
 
+mod modfile;
+mod tests_of;
+
+use tests_of::TestFileOutput;
+
 #[derive(Args, Debug)]
 #[command(
-    after_long_help = "Typical workflow:\n  1. `symora map summary` for entrypoints and major areas\n  2. `symora search symbols <query>` for rough workspace discovery\n  3. `symora map file <path>` for one file, its tests, and its neighbours\n  4. `symora symbols <file>` or `symora refs <loc>` for precise follow-up\n"
+    after_long_help = "Typical workflow:\n  1. `symora map summary` for entrypoints and major areas\n  2. `symora search symbols <query>` for rough workspace discovery\n  3. `symora map file <path>` for one file, the tests importing it, and its neighbours\n  4. `symora symbols <file>` or `symora refs <loc>` for precise follow-up\n"
 )]
 pub struct MapArgs {
     #[command(subcommand)]
@@ -44,6 +49,10 @@ pub enum MapCommand {
         /// Maximum related files to show
         #[arg(long, default_value_t = defaults::MAP_FILE_RELATED_LIMIT)]
         related_limit: usize,
+
+        /// Maximum tests to show
+        #[arg(long, default_value_t = defaults::MAP_FILE_TESTS_LIMIT)]
+        tests_limit: usize,
     },
 }
 
@@ -114,12 +123,12 @@ struct MapFileOutput {
     language: String,
     test_file: bool,
     /// Present (true) only when the walk could not read somewhere those lists
-    /// draw from, so `siblings` and `counterpart_files` — read as "this file
-    /// has no others beside it" and "this file has no test" — are a lower
+    /// draw from, so `siblings` and `tests` — read as "this file has no
+    /// others beside it" and "no test imports this file" — are a lower
     /// bound. They enumerate rather than rank, which is what makes their
     /// emptiness a claim the walk has to have earned. `siblings` asks about
-    /// one directory; `counterpart_files` searches the whole project, so a
-    /// hole anywhere bounds it.
+    /// one directory; `tests` reads test files across the whole project, so
+    /// a hole anywhere, or a test file that would not read, bounds it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incomplete: bool,
     /// The paths that flag stands for, so the shortfall can be checked rather
@@ -134,7 +143,9 @@ struct MapFileOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     backend: Option<crate::cli::SymbolBackend>,
     siblings: Section<String>,
-    counterpart_files: Vec<String>,
+    /// The tests whose evidence names this file (`tests_of`): each says
+    /// which, and the section's hint says what its reading leaves out.
+    tests: Section<TestFileOutput>,
     symbols: Section<SymbolOutput>,
     related_files: Vec<RelatedFileOutput>,
 }
@@ -178,7 +189,8 @@ pub async fn execute(args: MapArgs, app: &App) -> Result<()> {
             path,
             depth,
             related_limit,
-        } => execute_file(app, &path, depth, related_limit).await,
+            tests_limit,
+        } => execute_file(app, &path, depth, related_limit, tests_limit).await,
     }
 }
 
@@ -266,15 +278,37 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
     Ok(())
 }
 
-async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -> Result<()> {
+async fn execute_file(
+    app: &App,
+    path: &str,
+    depth: u32,
+    related_limit: usize,
+    tests_limit: usize,
+) -> Result<()> {
     let ctx = &app.output;
-    let scan = scan_project_files(app);
-    let unread_paths = scan.unread_at(ctx, app.root());
-    let records = &scan.records;
-    let Some(target) = find_record(records, path, app.root()) else {
+    let mut scan = scan_project_files(app);
+    let Some(target) = find_record(&scan.records, path, app.root()) else {
         ctx.print_error(scan.missing_target(app.root(), path));
         return Ok(());
     };
+    let tests = match tests_of::tests_of(
+        &target,
+        &scan.records,
+        app.root(),
+        app.config().search.max_file_size_bytes(),
+    ) {
+        Ok(found) => {
+            scan.unread_paths.extend(found.unread);
+            // What the reading leaves out leads; the cap, where it cut the
+            // list, follows.
+            let mut tests = limited(found.items, tests_limit, Cap::Option("--tests-limit"));
+            tests.hints.splice(0..0, found.hints);
+            tests
+        }
+        Err(e) => Section::error(e),
+    };
+    let unread_paths = scan.unread_at(ctx, app.root());
+    let records = &scan.records;
 
     let (backend, focus_symbols, symbols) = match crate::cli::declared_in(
         app,
@@ -321,10 +355,6 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
         .filter(|r| r.parent == target.parent && r.rel_path != target.rel_path)
         .map(|r| r.rel_path.clone())
         .collect();
-    let counterpart_files = detect_counterparts(&target, records)
-        .into_iter()
-        .map(|r| r.rel_path.clone())
-        .collect();
 
     ctx.print_success(MapFileOutput {
         file: target.rel_path,
@@ -342,7 +372,7 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
                 parent => format!("the rest are the other files in {parent}/"),
             }),
         ),
-        counterpart_files,
+        tests,
         symbols,
         related_files,
     });
@@ -559,18 +589,6 @@ fn classify_entrypoint(record: &FileRecord, file_name: &str) -> Option<(&'static
 
 fn path_depth(path: &str) -> usize {
     path.split('/').count()
-}
-
-fn detect_counterparts<'a>(target: &FileRecord, records: &'a [FileRecord]) -> Vec<&'a FileRecord> {
-    records
-        .iter()
-        .filter(|candidate| candidate.rel_path != target.rel_path)
-        .filter(|candidate| {
-            let candidate_stem = normalize_stem(&candidate.stem);
-            let target_stem = normalize_stem(&target.stem);
-            candidate_stem == target_stem && candidate.language == target.language
-        })
-        .collect()
 }
 
 fn collect_related_files(

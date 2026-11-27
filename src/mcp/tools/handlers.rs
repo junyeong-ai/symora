@@ -171,6 +171,8 @@ struct FileOverviewInput {
     depth: u32,
     #[serde(default = "default_related_limit")]
     related_limit: usize,
+    #[serde(default = "default_tests_limit")]
+    tests_limit: usize,
 }
 
 fn default_file_overview_depth() -> u32 {
@@ -179,6 +181,10 @@ fn default_file_overview_depth() -> u32 {
 
 fn default_related_limit() -> usize {
     defaults::MAP_FILE_RELATED_LIMIT
+}
+
+fn default_tests_limit() -> usize {
+    defaults::MAP_FILE_TESTS_LIMIT
 }
 
 async fn run_file_overview(args: Value, app: &App) -> Result<CapturedOutput> {
@@ -190,6 +196,7 @@ async fn run_file_overview(args: Value, app: &App) -> Result<CapturedOutput> {
                     path: input.path,
                     depth: input.depth,
                     related_limit: input.related_limit,
+                    tests_limit: input.tests_limit,
                 },
             },
             &a,
@@ -878,7 +885,7 @@ async fn run_edit(
 pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
     Some(match tool {
         "get_project_overview" => &[],
-        "get_file_overview" => &["path", "depth", "related_limit"],
+        "get_file_overview" => &["path", "depth", "related_limit", "tests_limit"],
         "search_symbols" => &[
             "query",
             "path",

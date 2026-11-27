@@ -38,6 +38,10 @@ No two declarations of a file share a name position: the index keeps one row per
 
 `declaration_visibility` answers `is_exported`; its contract is in `.claude/rules/json-output-stability.md` (Symbols and analysis).
 
+## Import references come from the parse tree
+
+`services/imports.rs` reads a file's module references through a tree-sitter query per language: a reference is only one where the grammar says so, never a line that spells a path. `map file` matches them, and the names a Python `from` import takes (`python_module_names`), against the names a file answers to, to list the tests importing it; how it attributes them is in `cli/commands/map/tests_of.rs`.
+
 ## Service abstractions: LSP and Store
 
 `LspService` and `StoreService` are the traits every command speaks to. Each has two interchangeable implementations, chosen once above the mode boundary:

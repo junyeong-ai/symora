@@ -5798,6 +5798,173 @@ fn a_map_list_says_how_much_the_limit_cut_from_it() {
     assert_eq!(file["siblings"]["showing"], 8, "{file}");
 }
 
+/// `map file` names a file's tests by evidence: an import naming it, its
+/// package's build, a region its language compiles only under test. A file
+/// sharing its name is none of those — in a workspace several packages hold
+/// a `deadline.py`, and listing their tests beside this one's reads as
+/// "related" while it is not.
+#[cfg(unix)]
+#[test]
+fn map_file_names_the_tests_that_import_a_file_and_no_namesake() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let write = |path: &str, content: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    };
+    write("core/src/app/__init__.py", "");
+    write("core/src/app/deadline.py", "LIMIT = 1\n");
+    write("other/src/other/__init__.py", "");
+    write("other/src/other/deadline.py", "LIMIT = 2\n");
+    write("tests/__init__.py", "");
+    write(
+        "tests/test_budget.py",
+        "def test_limit():\n    from app.deadline import LIMIT\n    assert LIMIT\n",
+    );
+    write("tests/test_submodule.py", "from app import deadline\n");
+    write("tests/test_relative.py", "from .helpers import deadline\n");
+    write("tests/helpers/__init__.py", "");
+    write("tests/helpers/deadline.py", "");
+    write("tests/test_other.py", "from other.deadline import LIMIT\n");
+    // Spelled in a comment and a string, and sharing the file's name: no import.
+    write(
+        "tests/test_deadline.py",
+        "# app.deadline\nTEXT = \"from app.deadline import LIMIT\"\n",
+    );
+
+    write("web/src/util.ts", "export const u = 1;\n");
+    write("web/src/util.test.ts", "import { u } from './util';\n");
+    write(
+        "web/test/other.test.ts",
+        "import { u } from '../src/util.js';\n",
+    );
+    write("web/test/alias.test.ts", "import { u } from '@app/util';\n");
+
+    write("go.mod", "module example.com/m\n\ngo 1.22\n");
+    write("store/store.go", "package store\n");
+    write("store/store_test.go", "package store\n");
+    write(
+        "api/api_test.go",
+        "package api\n\nimport \"example.com/m/store\"\n",
+    );
+    write(
+        "api/other_test.go",
+        "package api\n\nimport \"example.com/m/storex\"\n",
+    );
+
+    write(
+        "src/main/java/com/x/Foo.java",
+        "package com.x;\npublic class Foo {}\n",
+    );
+    write(
+        "src/test/java/com/y/BarTest.java",
+        "package com.y;\nimport com.x.Foo;\nclass BarTest {}\n",
+    );
+    write(
+        "src/test/java/com/y/BazTest.java",
+        "package com.y;\nimport com.x.Foobar;\nclass BazTest {}\n",
+    );
+
+    write(
+        "src/lib.rs",
+        "pub fn f() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n",
+    );
+    write("lib/a.rb", "def a; end\n");
+
+    // A pubspec read as YAML, here a flow mapping no line of which starts
+    // with `name:`.
+    write(
+        "dart/pubspec.yaml",
+        "{name: dart_pkg, environment: {sdk: '>=3.0.0 <4.0.0'}}\n",
+    );
+    write("dart/lib/src/util.dart", "int util() => 1;\n");
+    write(
+        "dart/test/util_test.dart",
+        "import 'package:dart_pkg/src/util.dart';\n",
+    );
+    // A go.mod that does not read is said, not taken for no module.
+    write("broken/go.mod", "module \"example.com/broken\n");
+    write("broken/b.go", "package broken\n");
+    write("broken/b_test.go", "package broken\n");
+
+    let tests = |file: &str| {
+        let value = json_ok(root, &["--deterministic", "map", "file", file]);
+        let tests = value["tests"].clone();
+        assert!(tests["hints"][0].is_string(), "{value}");
+        tests["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                let mut row = format!(
+                    "{} {}",
+                    item["file"].as_str().unwrap(),
+                    item["evidence"].as_str().unwrap()
+                );
+                if let Some(line) = item["line"].as_u64() {
+                    row.push_str(&format!(" {line}-{}", item["end_line"]));
+                }
+                row
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        tests("core/src/app/deadline.py"),
+        [
+            "tests/test_budget.py imports",
+            "tests/test_submodule.py imports"
+        ]
+    );
+    assert_eq!(
+        tests("other/src/other/deadline.py"),
+        ["tests/test_other.py imports"]
+    );
+    assert_eq!(
+        tests("tests/helpers/deadline.py"),
+        ["tests/test_relative.py imports"]
+    );
+    assert_eq!(
+        tests("web/src/util.ts"),
+        [
+            "web/src/util.test.ts imports",
+            "web/test/other.test.ts imports"
+        ]
+    );
+    assert_eq!(
+        tests("store/store.go"),
+        [
+            "store/store_test.go same_package",
+            "api/api_test.go imports_package"
+        ]
+    );
+    assert_eq!(
+        tests("src/main/java/com/x/Foo.java"),
+        ["src/test/java/com/y/BarTest.java imports"]
+    );
+    assert_eq!(tests("src/lib.rs"), ["src/lib.rs test_region 3-7"]);
+    assert_eq!(
+        tests("dart/lib/src/util.dart"),
+        ["dart/test/util_test.dart imports"]
+    );
+    assert_eq!(tests("broken/b.go"), ["broken/b_test.go same_package"]);
+    let broken = json_ok(root, &["--deterministic", "map", "file", "broken/b.go"]);
+    assert!(
+        broken["tests"]["hints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hint| hint
+                .as_str()
+                .is_some_and(|hint| hint.starts_with("broken/go.mod could not be read"))),
+        "{broken}"
+    );
+
+    // A language no reading covers says so, rather than "no tests".
+    let ruby = json_ok(root, &["--deterministic", "map", "file", "lib/a.rb"]);
+    assert_eq!(ruby["tests"]["error"]["code"], "unsupported", "{ruby}");
+}
+
 #[cfg(unix)]
 #[test]
 fn doctor_server_env_preserves_json_shape() {

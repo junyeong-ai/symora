@@ -39,6 +39,10 @@ pub mod defaults {
     pub const MAP_FILE_DEPTH: u32 = 1;
     pub const MAP_FILE_RELATED_LIMIT: usize = 8;
 
+    /// Tests `map file` lists: enough for a module most of a suite imports
+    /// to show where its tests are without the list filling the response.
+    pub const MAP_FILE_TESTS_LIMIT: usize = 10;
+
     /// Cap on neighbours (callers or callees) fanned out per BFS frontier node,
     /// shared by the incoming (impact/blast-radius) and outgoing (callees)
     /// walks. Stops a single hot spot (e.g., a logger) from exploding the graph.
