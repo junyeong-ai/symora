@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::app::App;
+use crate::cli::commands::search::{IndexWrites, SymbolQuery};
 use crate::cli::commands::{
     actions::{ActionsArgs, ActionsCommand, ApplyArgs, ListArgs},
     callees::CalleesArgs,
@@ -24,7 +25,9 @@ use crate::cli::commands::{
     symbols::SymbolsArgs,
 };
 use crate::cli::output::{BufferedSink, OutputFormat, OutputOptions};
+use crate::cli::response::SymbolSource;
 use crate::constants::defaults;
+use crate::mcp::McpProfile;
 
 use super::schema::{EditTargetInput, LocationInput};
 
@@ -46,11 +49,16 @@ fn parse_args<T: serde::de::DeserializeOwned>(args: Value) -> Result<T> {
     })
 }
 
-pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<CapturedOutput> {
+pub async fn dispatch(
+    name: &str,
+    arguments: Value,
+    app: &App,
+    profile: McpProfile,
+) -> Result<CapturedOutput> {
     match name {
         "get_project_overview" => run_project_overview(arguments, app).await,
         "get_file_overview" => run_file_overview(arguments, app).await,
-        "search_symbols" => run_search_symbols(arguments, app).await,
+        "search_symbols" => run_search_symbols(arguments, app, profile).await,
         "search_content" => run_search_content(arguments, app).await,
         "check_language_support" => run_check_language_support(arguments, app).await,
         "search_ast" => run_search_ast(arguments, app).await,
@@ -212,23 +220,27 @@ struct SearchSymbolsInput {
     limit: Option<usize>,
 }
 
-async fn run_search_symbols(args: Value, app: &App) -> Result<CapturedOutput> {
+/// A read-only server's search writes nothing, so it builds no missing
+/// index; the full profile's builds one in a git work tree, as the CLI's does.
+async fn run_search_symbols(args: Value, app: &App, profile: McpProfile) -> Result<CapturedOutput> {
     let input: SearchSymbolsInput = parse_args(args)?;
+    let index_writes = match profile {
+        McpProfile::Full => IndexWrites::Allowed,
+        McpProfile::ReadOnly => IndexWrites::Refused,
+    };
     capture(app, move |a| async move {
-        crate::cli::commands::search::execute(
-            SearchArgs {
-                command: SearchCommand::Symbols {
-                    query: input.query,
-                    path: input.path,
-                    language: input.language,
-                    kind: input.kind,
-                    workspace_symbols: false,
-                    body: input.body,
-                    signature: input.signature,
-                    limit: input.limit,
-                },
-            },
+        crate::cli::commands::search::execute_symbol_search(
             &a,
+            SymbolQuery {
+                query: &input.query,
+                language: input.language.as_deref(),
+                kind: input.kind.as_deref(),
+                paths: input.path.as_deref(),
+                workspace_symbols: false,
+                source: SymbolSource::new(input.body, input.signature),
+                limit: input.limit.unwrap_or(a.config().search.limit),
+                index_writes,
+            },
         )
         .await
     })

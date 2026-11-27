@@ -16,7 +16,7 @@ pub(crate) use ast::{ast_query_error, parse_ast_language};
 pub use ast::{execute_ast_search, execute_list_nodes};
 pub use content::execute_content_search;
 pub use index::execute_index_command;
-pub use symbols::{SymbolQuery, execute_symbol_search};
+pub use symbols::{IndexWrites, SymbolQuery, execute_symbol_search};
 
 #[derive(Args, Debug)]
 #[command(
@@ -165,6 +165,7 @@ pub async fn execute(args: SearchArgs, app: &App) -> Result<()> {
                     workspace_symbols,
                     source: SymbolSource::new(body, signature),
                     limit,
+                    index_writes: IndexWrites::Allowed,
                 },
             )
             .await

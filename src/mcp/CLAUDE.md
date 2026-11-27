@@ -20,7 +20,7 @@ Tests in `tools/mod.rs` enumerate the required tool names and check the lockstep
 
 ## Mutating tools advertise themselves — twice, in lockstep
 
-Mutation is one fact stated two ways: the typed `annotations.read_only_hint` (constructed via `ToolDefinition::read_only` / `ToolDefinition::mutating` — there is no neutral constructor, so the decision can't be skipped) and the literal word `Mutates` in the description for human reviewers. A biconditional test over the whole catalog enforces that they agree in both directions. The read-only profile (`mcp serve --profile read-only`) filters on the typed hint, never on description text, and gates `tools/call` as well as `tools/list` — a hidden tool that still dispatched would make the boundary cosmetic.
+Mutation is one fact stated two ways: the typed `annotations.read_only_hint` (constructed via `ToolDefinition::read_only` / `ToolDefinition::mutating` — there is no neutral constructor, so the decision can't be skipped) and the literal word `Mutates` in the description for human reviewers. A biconditional test over the whole catalog enforces that they agree in both directions. The read-only profile (`mcp serve --profile read-only`) filters on the typed hint, never on description text, and gates `tools/call` as well as `tools/list` — a hidden tool that still dispatched would make the boundary cosmetic. It writes nothing through a visible tool either: `search_symbols` carries the profile in its request (`IndexWrites`), and builds no missing index under this one.
 
 ## The instructions playbook stays honest by test
 

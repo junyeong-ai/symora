@@ -84,7 +84,7 @@ pub async fn dispatch(
         check_unknown_arguments(tool, &arguments)?;
     }
 
-    let captured = handlers::dispatch(name, arguments, app)
+    let captured = handlers::dispatch(name, arguments, app, profile)
         .await
         .map_err(OutputError::from)?;
     // A body that is one JSON object doubles as `structuredContent`.
@@ -129,6 +129,61 @@ mod tests {
             result.structured.unwrap()["error"]["code"],
             "invalid_argument"
         );
+    }
+
+    /// A read-only server writes nothing, so its symbol search leaves a git
+    /// work tree no index was built for as it found it, and says why the
+    /// index took no part. The full profile's search builds one there, which
+    /// is what makes the read-only half a test of the gate rather than of an
+    /// environment where no build could run.
+    #[tokio::test]
+    async fn a_read_only_search_builds_no_index_where_a_full_one_does() {
+        for (profile, builds) in [(McpProfile::Full, true), (McpProfile::ReadOnly, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let init = std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap();
+            assert!(init.success());
+            std::fs::write(dir.path().join("lib.rs"), "pub fn helper_alpha() {}\n").unwrap();
+            let app = App::new_at(
+                dir.path().to_path_buf(),
+                crate::cli::OutputOptions::default(),
+                crate::app::Wiring {
+                    use_daemon: false,
+                    deterministic: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let answer = dispatch(
+                "search_symbols",
+                serde_json::json!({"query": "helper_alpha"}),
+                &app,
+                profile,
+            )
+            .await
+            .unwrap()
+            .structured
+            .unwrap();
+            assert!(answer.get("error").is_none(), "{profile:?}: {answer}");
+            assert_eq!(
+                dir.path().join(".symora").exists(),
+                builds,
+                "{profile:?}: {answer}"
+            );
+            match builds {
+                true => assert_eq!(answer["items"][0]["backend"], "index", "{answer}"),
+                false => assert!(
+                    answer["hints"][0]
+                        .as_str()
+                        .is_some_and(|hint| hint.contains("read-only MCP server")),
+                    "{answer}"
+                ),
+            }
+        }
     }
 
     #[cfg(unix)]

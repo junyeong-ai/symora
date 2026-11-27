@@ -129,6 +129,7 @@ struct SymbolSearch<'a> {
     within: &'a [PathBuf],
     source: SymbolSource,
     limit: usize,
+    index_writes: IndexWrites,
 }
 
 impl<'a> SymbolSearch<'a> {
@@ -170,6 +171,18 @@ pub struct SymbolQuery<'a> {
     pub workspace_symbols: bool,
     pub source: SymbolSource,
     pub limit: usize,
+    pub index_writes: IndexWrites,
+}
+
+/// Whether a symbol search may write the index it reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexWrites {
+    /// It builds a missing index in a git work tree: the command line, and an
+    /// MCP server's full profile.
+    Allowed,
+    /// It writes nothing, as a read-only MCP server promises. A build someone
+    /// else runs is still waited for, since waiting writes nothing.
+    Refused,
 }
 
 pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Result<()> {
@@ -182,6 +195,7 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
         workspace_symbols,
         source,
         limit,
+        index_writes,
     } = request;
 
     let query = query.trim();
@@ -248,6 +262,7 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
         within: &within,
         source,
         limit,
+        index_writes,
     };
 
     // `*` wildcards are the file-tree matcher's syntax; neither the LIKE index
@@ -282,6 +297,7 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
 
     match read_index(
         app,
+        search.index_writes,
         query,
         candidate_budget(limit),
         kind,
@@ -433,6 +449,7 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
     // part leaves nothing to answer with.
     let page = match read_index(
         app,
+        search.index_writes,
         seed,
         usize::MAX,
         kind,
@@ -449,6 +466,15 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
                      which the project root is not ({outside_work_tree})"
                 ))
                 .with_hint("Run 'symora search index build', then retry the wildcard query"),
+            );
+            return Ok(());
+        }
+        Err(IndexAbsence::ReadOnly) => {
+            ctx.print_error(
+                OutputError::not_found(
+                    "Search index not built, and a search on a read-only MCP server builds none",
+                )
+                .with_hint("Run 'symora search index build' outside this server, or search through a full-profile server, then retry the wildcard query"),
             );
             return Ok(());
         }
@@ -678,6 +704,7 @@ async fn execute_workspace_symbol_search(
             let (searched, rows) = store_path_query(&pattern, limit);
             read_index(
                 app,
+                search.index_writes,
                 searched,
                 rows,
                 kind,
@@ -1074,7 +1101,8 @@ const BUILD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_milli
 /// work tree, the search builds the index first — the same incremental build
 /// `search index build` runs, written to `.symora/` — rather than leave the
 /// answer to language servers, whose zero after a long wait reads as absence.
-/// Anywhere else the build is left to the caller ([`outside_work_tree`]). A
+/// Anywhere else the build is left to the caller ([`outside_work_tree`]), as
+/// it is where the search may write nothing ([`IndexWrites::Refused`]). A
 /// build already running is waited for rather than raced: the read finds it
 /// rebuilding and looks again.
 ///
@@ -1091,6 +1119,7 @@ const BUILD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_milli
 /// an in-process run take the same ones and answer from the same index.
 async fn read_index(
     app: &App,
+    writes: IndexWrites,
     query: &str,
     rows: usize,
     kind: Option<SymbolKind>,
@@ -1136,6 +1165,9 @@ async fn read_index(
                 // The budget went on a build that stopped without completing.
                 if spent() {
                     return Err(unfinished());
+                }
+                if writes == IndexWrites::Refused {
+                    return Err(IndexAbsence::ReadOnly);
                 }
                 if let Some(why) = outside_work_tree(app.root()).await {
                     return Err(IndexAbsence::NotBuilt {
@@ -1969,6 +2001,7 @@ mod tests {
             within: &[],
             source: SymbolSource::Location,
             limit,
+            index_writes: IndexWrites::Allowed,
         }
     }
 

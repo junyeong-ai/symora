@@ -63,11 +63,12 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           needs no second call. A language coverage_gaps lists was not covered, \
                           so a match's absence there proves nothing: search it with \
                           search_content or search_ast, or fix what its reason names. In a git \
-                          work tree the first search builds the index in .symora/ within its \
-                          lsp.timeout_secs budget and answers from it; where the budget runs out \
-                          first, a hint says so, and the next search continues the build or \
-                          build_index finishes it. Elsewhere a hint says no index took part and \
-                          build_index builds one.",
+                          work tree the first search (not on a read-only server, which writes \
+                          nothing) builds the index in .symora/ within its lsp.timeout_secs \
+                          budget and answers from it; where the budget runs out first, a hint \
+                          says so, and the next search continues the build or build_index \
+                          finishes it. Elsewhere a hint says no index took part and build_index \
+                          builds one.",
             {
                 let mut schema = schema_object(
                     &[

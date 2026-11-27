@@ -431,8 +431,9 @@ pub enum WorkspaceSearchRoute {
     /// `--workspace-symbols` explicitly skipped the index.
     Forced,
     /// No build has completed, and the search started none: it builds one
-    /// only for a repository's work tree. The live lookup is the fallback,
-    /// the zero is workspace-only, and building the index is the remedy.
+    /// only for a repository's work tree, and never on a read-only MCP
+    /// server. The live lookup is the fallback, the zero is workspace-only,
+    /// and building the index is the remedy.
     IndexNotBuilt,
     /// No build completed within the search's budget, so the index had no
     /// completed state to answer from. The live lookup is the fallback, and
@@ -871,12 +872,12 @@ pub fn with_coverage_disclosure<T>(
 /// A symbol search reads an index only once one has had its build: in a
 /// repository's work tree it builds one where no build has completed, and
 /// anywhere it waits for the build that owns one, within its own budget.
-/// What is left to answer around is a tree the search would not build for, a
-/// budget that ran out before a build completed, a build of its own that
-/// failed, or a store it could not read — each routes the live lookup that
-/// answers in the index's place and says what the absence cost. A daemon that
-/// was never reached is none of them: the store said nothing, so it is
-/// reported as itself.
+/// What is left to answer around is a tree or a server the search would not
+/// build for, a budget that ran out before a build completed, a build of its
+/// own that failed, or a store it could not read — each routes the live
+/// lookup that answers in the index's place and says what the absence cost.
+/// A daemon that was never reached is none of them: the store said nothing,
+/// so it is reported as itself.
 ///
 /// Every route that falls back to live symbols derives both from here, so two
 /// surfaces meeting the same store state cannot prescribe opposite remedies —
@@ -890,6 +891,10 @@ pub enum IndexAbsence {
         /// Why the root is not in a work tree, in git's own words.
         outside_work_tree: String,
     },
+    /// No build has completed, and the search may start none: it runs on a
+    /// read-only MCP server, which writes nothing, so the build is left to
+    /// the CLI or a full-profile server.
+    ReadOnly,
     /// No build completed within the search's budget, `lsp.timeout_secs`: its
     /// own build, or one it found running, was unfinished when the budget ran
     /// out. The build goes on — a daemon's runs on past its caller's budget,
@@ -910,7 +915,7 @@ impl IndexAbsence {
     /// there is nothing to route around.
     pub fn route(&self) -> Option<WorkspaceSearchRoute> {
         match self {
-            Self::NotBuilt { .. } => Some(WorkspaceSearchRoute::IndexNotBuilt),
+            Self::NotBuilt { .. } | Self::ReadOnly => Some(WorkspaceSearchRoute::IndexNotBuilt),
             Self::Unfinished { .. } => Some(WorkspaceSearchRoute::IndexRebuilding),
             Self::BuildFailed(_) | Self::Unreadable(_) => {
                 Some(WorkspaceSearchRoute::IndexUnreadable)
@@ -935,6 +940,15 @@ impl IndexAbsence {
                      work tree, which the project root is not ({outside_work_tree}), so the index \
                      took no part in this answer"
                 ),
+                "symora search index build".to_string(),
+            )),
+            // `build_index` is hidden there, so the build is named as the
+            // command run elsewhere, which the server's agent asks for.
+            Self::ReadOnly => Some((
+                "No search index has been built here, and a search on a read-only MCP server \
+                 builds none, so the index took no part in this answer; 'symora search index \
+                 build' run outside this server, or a full-profile server's search, builds it"
+                    .to_string(),
                 "symora search index build".to_string(),
             )),
             Self::Unfinished { budget_secs } => Some((
@@ -972,7 +986,7 @@ impl IndexAbsence {
     /// The failure as the error a route that cannot answer around it reports.
     pub fn into_error(self) -> StoreError {
         match self {
-            Self::NotBuilt { .. } => StoreError::NotInitialized,
+            Self::NotBuilt { .. } | Self::ReadOnly => StoreError::NotInitialized,
             Self::Unfinished { .. } => StoreError::Rebuilding,
             Self::BuildFailed(error) | Self::Unreadable(error) | Self::Unreachable(error) => error,
         }
