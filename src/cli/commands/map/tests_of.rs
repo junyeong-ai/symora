@@ -188,6 +188,7 @@ pub(super) fn tests_of(
         return Ok(found);
     };
     found.hints.extend(names.problem.clone());
+    let mut importers = Vec::new();
     for record in records {
         if record.rel_path == target.rel_path
             || !record.is_test
@@ -202,34 +203,49 @@ pub(super) fn tests_of(
             found.items.push(listed(record, TestEvidence::SamePackage));
             continue;
         }
-        if std::fs::metadata(&record.abs_path).is_ok_and(|m| m.len() > max_file_bytes) {
-            continue;
-        }
-        let content = match std::fs::read_to_string(&record.abs_path) {
-            Ok(content) => content,
-            Err(e) => {
-                if crate::infra::hides_text(&e) {
-                    found.unread.push(record.abs_path.clone());
-                }
-                continue;
-            }
-        };
-        // A necessary condition, not a judgement: an import naming the file
-        // spells every word of one of these, unless it is relative and
-        // written below the file's directory, where `.` and `..` can name it
-        // bare. Only the files passing it are parsed.
-        if !names
-            .needles
-            .iter()
-            .any(|words| words.iter().all(|word| content.contains(word.as_str())))
-            && !(names.relative && record.parent.starts_with(&target.parent))
-        {
-            continue;
-        }
-        if let Some(evidence) = names.named_by(record, &content, &paths) {
-            found.items.push(listed(record, evidence));
-        }
+        importers.push(record);
     }
+    // Each worker parses with a reader of its own: one shared reader holds
+    // one parser per language behind a lock, and a module most of a suite
+    // imports leaves a few hundred test files to parse.
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(8)
+        .min(importers.len())
+        .max(1);
+    let read: Vec<(Vec<TestFileOutput>, Vec<PathBuf>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|worker| {
+                let (importers, names, paths, target) = (&importers, &names, &paths, target);
+                scope.spawn(move || {
+                    let extractor = ImportExtractor::new();
+                    let mut items = Vec::new();
+                    let mut unread = Vec::new();
+                    for record in importers.iter().skip(worker).step_by(workers) {
+                        match names.read(record, target, &extractor, paths, max_file_bytes) {
+                            Ok(Some(evidence)) => items.push(listed(record, evidence)),
+                            Ok(None) => {}
+                            Err(path) => unread.push(path),
+                        }
+                    }
+                    (items, unread)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    for (items, unread) in read {
+        found.items.extend(items);
+        found.unread.extend(unread);
+    }
+    found.unread.sort();
     found.items.sort_by(|a, b| {
         a.evidence
             .cmp(&b.evidence)
@@ -398,14 +414,48 @@ impl Names {
         Some(names)
     }
 
+    /// Read `importer` and the evidence it holds that it names the target;
+    /// `Err` with its path where it could not be read. A file over the
+    /// size limit is outside the domain, as search leaves it.
+    fn read(
+        &self,
+        importer: &FileRecord,
+        target: &FileRecord,
+        extractor: &ImportExtractor,
+        paths: &HashSet<&str>,
+        max_file_bytes: u64,
+    ) -> Result<Option<TestEvidence>, PathBuf> {
+        if std::fs::metadata(&importer.abs_path).is_ok_and(|m| m.len() > max_file_bytes) {
+            return Ok(None);
+        }
+        let content = match std::fs::read_to_string(&importer.abs_path) {
+            Ok(content) => content,
+            Err(e) if crate::infra::hides_text(&e) => return Err(importer.abs_path.clone()),
+            Err(_) => return Ok(None),
+        };
+        // A necessary condition, not a judgement: an import naming the file
+        // spells every word of one of these, unless it is relative and
+        // written below the file's directory, where `.` and `..` can name it
+        // bare. Only the files passing it are parsed.
+        if !self
+            .needles
+            .iter()
+            .any(|words| words.iter().all(|word| content.contains(word.as_str())))
+            && !(self.relative && importer.parent.starts_with(&target.parent))
+        {
+            return Ok(None);
+        }
+        Ok(self.named_by(importer, &content, extractor, paths))
+    }
+
     /// The evidence an importer's `content` holds that it names the target.
     fn named_by(
         &self,
         importer: &FileRecord,
         content: &str,
+        extractor: &ImportExtractor,
         paths: &HashSet<&str>,
     ) -> Option<TestEvidence> {
-        let extractor = ImportExtractor::shared();
         let importer_dir = &importer.parent;
         if self.reading == Reading::Python {
             return extractor
