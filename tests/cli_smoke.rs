@@ -2706,6 +2706,46 @@ fn call_hierarchy_asks_the_server_for_every_changed_symbol() {
     );
 }
 
+/// `context --tests` names each test that references the target once, at
+/// the first reference it holds, the innermost callable holding it; a
+/// test-file reference outside every callable, an import, names none.
+#[cfg(unix)]
+#[test]
+fn context_names_each_test_holding_a_reference_once() {
+    let tests = "from shapes import target\n\n\nclass TestShapes:\n    def test_twice(self):\n        \
+                 assert target() == target()\n\n\ndef test_once():\n    assert target()\n";
+    let Some(dir) = reference_served_repo(&[
+        (
+            "shapes.py",
+            "def target() -> int:\n    return 1\n",
+            "def target() -> int:\n    return 1\n",
+        ),
+        ("test_shapes.py", tests, tests),
+    ]) else {
+        return;
+    };
+    let out = symora()
+        .args(["context", "shapes.py:1", "--tests"])
+        .current_dir(dir.path())
+        .env("SYMORA_NO_DAEMON", "1")
+        .output()
+        .expect("symora binary should exist");
+    let page: serde_json::Value = common::parse_response(&out.stdout).unwrap();
+    let named: Vec<(&str, u64)> = page["tests"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{page}"))
+        .iter()
+        .map(|test| {
+            (
+                test["name"].as_str().unwrap(),
+                test["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(named, [("test_twice", 6), ("test_once", 10)], "{page}");
+    assert_eq!(page["tests"]["count"], 2, "{page}");
+}
+
 /// Without call hierarchy, `callers` reads a function's callers off its
 /// references, and a class's not at all: what references a type annotates,
 /// imports or passes it, and none of those is a call, so the class reads

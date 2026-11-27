@@ -1,5 +1,4 @@
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -7,14 +6,12 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::analysis::LocationAnalysis;
+use crate::cli::analysis::{LocationAnalysis, callables_holding};
 use crate::cli::response::{
     BodyOmission, CallHierarchyOutput, LocationOutput, RefOutput, Section, TargetOutput,
     TestOutput, TypeInfoOutput,
 };
-use crate::cli::utils::{
-    enclosing_callable, find_named_at_position, find_symbol_at_position, shell_arg,
-};
+use crate::cli::utils::{find_named_at_position, find_symbol_at_position, shell_arg};
 use crate::cli::{LocationArg, OutputError};
 
 use super::common::{anchor_of, lsp_error_at};
@@ -552,7 +549,8 @@ fn is_unsupported_lsp_feature(error: &str) -> bool {
 }
 
 /// The distinct tests that exercise the target: for each reference the scope
-/// classified as test code, the callable it runs in.
+/// classified as test code, the callable it runs in, as callers are read off
+/// references ([`callables_holding`]).
 ///
 /// The alternative — scanning backwards for annotation text — cannot tell
 /// `test(` in a spec file from a call to a function named `test`, and every
@@ -571,35 +569,26 @@ async fn fetch_tests(
     root: &Path,
     limit: usize,
 ) -> Section<TestOutput> {
-    let mut items = Vec::new();
-    let mut seen: HashSet<(PathBuf, u32, u32)> = HashSet::new();
     let mut symbols_by_file: HashMap<PathBuf, Vec<Symbol>> = HashMap::new();
-
     for r in test_refs {
-        let symbols = match symbols_by_file.entry(r.file.clone()) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(
-                lsp.find_symbols(&r.file, FindSymbolsOptions::default().with_depth(10))
-                    .await
-                    .unwrap_or_default(),
-            ),
-        };
-
-        let Some(symbol) = enclosing_callable(symbols, r.line, Some(r.column)) else {
-            continue;
-        };
-        let declared = &symbol.location;
-        if !seen.insert((declared.file.clone(), declared.line, declared.column)) {
-            continue;
+        if !symbols_by_file.contains_key(&r.file) {
+            let symbols = lsp
+                .find_symbols(&r.file, FindSymbolsOptions::default().with_depth(10))
+                .await
+                .unwrap_or_default();
+            symbols_by_file.insert(r.file.clone(), symbols);
         }
-        items.push(TestOutput {
-            name: symbol
-                .name_path
-                .clone()
-                .unwrap_or_else(|| symbol.name.clone()),
-            location: LocationOutput::from_location(r, root),
-        });
     }
+    let mut items: Vec<TestOutput> = callables_holding(test_refs.iter().copied(), |file| {
+        symbols_by_file.get(file).map(Vec::as_slice)
+    })
+    .expect("every test file's symbols were read")
+    .into_iter()
+    .map(|(test, reference)| TestOutput {
+        name: test.name_path.clone().unwrap_or_else(|| test.name.clone()),
+        location: LocationOutput::from_location(reference, root),
+    })
+    .collect();
 
     let found = items.len();
     items.truncate(limit);

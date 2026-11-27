@@ -765,41 +765,56 @@ fn usages_of(references: Vec<Location>, root: &Path, declared: &[ParsedLocation]
     usages
 }
 
-/// The callers references name: each function, method or constructor whose
-/// code holds one of `references`, once, with the first reference it holds
-/// as its call site, in the order of the references. A reference outside
+/// The callables holding `references`: each function, method or
+/// constructor whose code holds one, the innermost, once, with the first
+/// reference it holds, in the order of the references. A reference outside
 /// every callable — an import or annotation at module level, a statement in
-/// a class body — names none. A reference inside one is a call or a use of
-/// the symbol as a value there, a callback it registers, which these do not
-/// tell apart: they are the callers a call hierarchy names where it counts
-/// every use inside a callable, as rust-analyzer's does, and more than one
-/// that counts calls alone, as pyright's does.
+/// a class body — is held by none.
 ///
 /// `declarations` gives each referencing file's symbols; `None` where it has
-/// none for one, which leaves that reference's caller unknown.
+/// none for one, which leaves what holds that reference unknown.
+pub fn callables_holding<'a, 'r>(
+    references: impl IntoIterator<Item = &'r Location>,
+    declarations: impl Fn(&Path) -> Option<&'a [Symbol]>,
+) -> Option<Vec<(&'a Symbol, &'r Location)>> {
+    let mut seen = HashSet::new();
+    let mut holding = Vec::new();
+    for reference in references {
+        let symbols = declarations(&reference.file)?;
+        let Some(callable) = enclosing_callable(symbols, reference.line, Some(reference.column))
+        else {
+            continue;
+        };
+        let declared = &callable.location;
+        if seen.insert((declared.file.clone(), declared.line, declared.column)) {
+            holding.push((callable, reference));
+        }
+    }
+    Some(holding)
+}
+
+/// The callers references name: the callables holding them
+/// ([`callables_holding`]), each at the first reference it holds as its
+/// call site. A reference inside one is a call or a use of the symbol as a
+/// value there, a callback it registers, which these do not tell apart:
+/// they are the callers a call hierarchy names where it counts every use
+/// inside a callable, as rust-analyzer's does, and more than one that counts
+/// calls alone, as pyright's does.
 pub fn callers_from_references<'a>(
     references: &[Location],
     declarations: impl Fn(&Path) -> Option<&'a [Symbol]>,
 ) -> Option<Vec<CallHierarchyItem>> {
-    let mut seen = HashSet::new();
-    let mut callers = Vec::new();
-    for reference in references {
-        let symbols = declarations(&reference.file)?;
-        let Some(caller) = enclosing_callable(symbols, reference.line, Some(reference.column))
-        else {
-            continue;
-        };
-        let declared = &caller.location;
-        if seen.insert((declared.file.clone(), declared.line, declared.column)) {
-            callers.push(CallHierarchyItem {
+    Some(
+        callables_holding(references, declarations)?
+            .into_iter()
+            .map(|(caller, reference)| CallHierarchyItem {
                 name: caller.name.clone(),
                 kind: caller.kind,
-                location: declared.clone(),
+                location: caller.location.clone(),
                 call_site: Some(reference.clone()),
-            });
-        }
-    }
-    Some(callers)
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
