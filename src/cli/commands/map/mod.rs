@@ -46,10 +46,6 @@ pub enum MapCommand {
         #[arg(long, default_value_t = defaults::MAP_FILE_DEPTH)]
         depth: u32,
 
-        /// Maximum related files to show
-        #[arg(long, default_value_t = defaults::MAP_FILE_RELATED_LIMIT)]
-        related_limit: usize,
-
         /// Maximum tests to show
         #[arg(long, default_value_t = defaults::MAP_FILE_TESTS_LIMIT)]
         tests_limit: usize,
@@ -62,7 +58,6 @@ struct FileRecord {
     rel_path: String,
     language: Language,
     is_test: bool,
-    stem: String,
     parent: String,
     top_dir: String,
 }
@@ -147,15 +142,6 @@ struct MapFileOutput {
     /// which, and the section's hint says what its reading leaves out.
     tests: Section<TestFileOutput>,
     symbols: Section<SymbolOutput>,
-    related_files: Vec<RelatedFileOutput>,
-}
-
-#[derive(Debug, Serialize)]
-struct RelatedFileOutput {
-    file: String,
-    language: String,
-    score: i32,
-    reasons: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -188,9 +174,8 @@ pub async fn execute(args: MapArgs, app: &App) -> Result<()> {
         MapCommand::File {
             path,
             depth,
-            related_limit,
             tests_limit,
-        } => execute_file(app, &path, depth, related_limit, tests_limit).await,
+        } => execute_file(app, &path, depth, tests_limit).await,
     }
 }
 
@@ -278,13 +263,7 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
     Ok(())
 }
 
-async fn execute_file(
-    app: &App,
-    path: &str,
-    depth: u32,
-    related_limit: usize,
-    tests_limit: usize,
-) -> Result<()> {
+async fn execute_file(app: &App, path: &str, depth: u32, tests_limit: usize) -> Result<()> {
     let ctx = &app.output;
     let mut scan = scan_project_files(app);
     let Some(target) = find_record(&scan.records, path, app.root()) else {
@@ -349,7 +328,6 @@ async fn execute_file(
         Err(e) => (None, None, Section::error(e)),
     };
 
-    let related_files = collect_related_files(&target, records, related_limit);
     let siblings = records
         .iter()
         .filter(|r| r.parent == target.parent && r.rel_path != target.rel_path)
@@ -374,7 +352,6 @@ async fn execute_file(
         ),
         tests,
         symbols,
-        related_files,
     });
     Ok(())
 }
@@ -481,18 +458,12 @@ fn build_file_record(path: &Path, app: &App) -> Option<FileRecord> {
     let top_dir = rel
         .split_once('/')
         .map_or_else(|| ".".to_string(), |(directory, _)| directory.to_string());
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_string();
 
     Some(FileRecord {
         abs_path: path.to_path_buf(),
         rel_path: rel,
         language,
         is_test: app.test_scope().is_test_file(path),
-        stem,
         parent,
         top_dir,
     })
@@ -589,95 +560,6 @@ fn classify_entrypoint(record: &FileRecord, file_name: &str) -> Option<(&'static
 
 fn path_depth(path: &str) -> usize {
     path.split('/').count()
-}
-
-fn collect_related_files(
-    target: &FileRecord,
-    records: &[FileRecord],
-    limit: usize,
-) -> Vec<RelatedFileOutput> {
-    if limit == 0 {
-        return Vec::new();
-    }
-    let mut results = collect_related_file_candidates(target, records);
-    results.truncate(limit);
-    results
-}
-
-fn collect_related_file_candidates(
-    target: &FileRecord,
-    records: &[FileRecord],
-) -> Vec<RelatedFileOutput> {
-    let target_norm_stem = normalize_stem(&target.stem);
-    let mut results = Vec::new();
-
-    for candidate in records {
-        if candidate.rel_path == target.rel_path {
-            continue;
-        }
-
-        let mut score = 0;
-        let mut reasons = Vec::new();
-        let candidate_norm_stem = normalize_stem(&candidate.stem);
-
-        if candidate_norm_stem == target_norm_stem {
-            score += 14;
-            reasons.push("same stem".to_string());
-        }
-        if candidate.parent == target.parent {
-            score += 8;
-            reasons.push("same directory".to_string());
-        }
-        if candidate.top_dir == target.top_dir && candidate.parent != target.parent {
-            score += 4;
-            reasons.push("same top-level area".to_string());
-        }
-        if candidate.is_test != target.is_test && candidate_norm_stem == target_norm_stem {
-            score += 8;
-            reasons.push("matching test/source names".to_string());
-        }
-
-        let shared_tokens = shared_stem_tokens(&target_norm_stem, &candidate_norm_stem);
-        if shared_tokens > 0 {
-            score += shared_tokens * 2;
-            reasons.push("shared name tokens".to_string());
-        }
-
-        if score > 0 {
-            results.push(RelatedFileOutput {
-                file: candidate.rel_path.clone(),
-                language: candidate.language.lsp_id().to_string(),
-                score,
-                reasons,
-            });
-        }
-    }
-
-    results.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.file.cmp(&b.file)));
-    results
-}
-
-fn normalize_stem(stem: &str) -> String {
-    let stem = stem.strip_prefix("test_").unwrap_or(stem);
-    ["_test", ".test", ".spec", "-test", "-spec"]
-        .iter()
-        .find_map(|suffix| stem.strip_suffix(suffix))
-        .unwrap_or(stem)
-        .to_string()
-}
-
-fn shared_stem_tokens(a: &str, b: &str) -> i32 {
-    let a_tokens: HashSet<_> = split_tokens(a).into_iter().collect();
-    let b_tokens: HashSet<_> = split_tokens(b).into_iter().collect();
-    a_tokens.intersection(&b_tokens).count() as i32
-}
-
-fn split_tokens(value: &str) -> Vec<String> {
-    value
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|part| !part.is_empty())
-        .map(|part| part.to_ascii_lowercase())
-        .collect()
 }
 
 fn build_focus_symbols(symbols: &[Symbol], root: &Path) -> Vec<FocusSymbolOutput> {
@@ -796,7 +678,7 @@ fn map_summary_next_commands(entrypoints: &[EntryPointOutput]) -> Vec<String> {
     };
     let file = shell_arg(&entrypoint.file);
     vec![
-        format!("symora map file --related-limit 5 -- {file}"),
+        format!("symora map file -- {file}"),
         format!("symora symbols --depth 1 -- {file}"),
     ]
 }
@@ -835,14 +717,5 @@ mod tests {
             blocked.missing_target(root, "notes.txt").code,
             crate::cli::errors::ErrorCode::Io
         );
-    }
-
-    #[test]
-    fn normalizes_test_suffixes() {
-        assert_eq!(normalize_stem("foo_test"), "foo");
-        assert_eq!(normalize_stem("test_foo"), "foo");
-        assert_eq!(normalize_stem("foo_test_runner"), "foo_test_runner");
-        assert_eq!(normalize_stem("foo.spec"), "foo");
-        assert_eq!(normalize_stem("foo-test"), "foo");
     }
 }

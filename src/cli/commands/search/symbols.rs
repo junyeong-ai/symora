@@ -1786,10 +1786,7 @@ fn symbol_search_next_commands(
             shell_arg(symbol_key),
             shell_arg(&first.file)
         ));
-        commands.push(format!(
-            "symora map file --related-limit 5 -- {}",
-            shell_arg(&first.file)
-        ));
+        commands.push(format!("symora map file -- {}", shell_arg(&first.file)));
         if !looks_like_symbol_path(query) {
             commands.push(format!(
                 "symora search symbols{}{} --kind={}{} -- {}",

@@ -535,7 +535,7 @@ mod tests {
         assert!(
             check_unknown_arguments(
                 tool("get_file_overview"),
-                &json!({"path": "a.rs", "depth": 2, "related_limit": 4}),
+                &json!({"path": "a.rs", "depth": 2, "tests_limit": 4}),
             )
             .is_ok()
         );

@@ -119,7 +119,7 @@ symora map summary
 {
   "root": "/home/dev/shopflow",
   "next_commands": [
-    "symora map file --related-limit 5 -- 'src/main.ts'",
+    "symora map file -- 'src/main.ts'",
     "symora symbols --depth 1 -- 'src/main.ts'"
   ],
   "total_files": 84,

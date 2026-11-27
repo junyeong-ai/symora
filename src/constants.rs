@@ -34,10 +34,8 @@ pub mod defaults {
     /// Top-level directories and entrypoints `map summary` lists.
     pub const MAP_SUMMARY_LIMIT: usize = 10;
 
-    /// Symbol depth and related-file count `map file` shows: one level of
-    /// members, and enough neighbours to find a file's tests and siblings.
+    /// Symbol depth `map file` shows: one level of members.
     pub const MAP_FILE_DEPTH: u32 = 1;
-    pub const MAP_FILE_RELATED_LIMIT: usize = 8;
 
     /// Tests `map file` lists: enough for a module most of a suite imports
     /// to show where its tests are without the list filling the response.
