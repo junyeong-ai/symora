@@ -242,6 +242,10 @@ struct PendingRequestGuard {
     pending: Arc<std::sync::Mutex<HashMap<RequestId, PendingRequest>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     timeout: Duration,
+    /// Whether the server is told when the request is abandoned
+    /// ([`LspClient::cancels`]); otherwise its answer, when it comes, finds
+    /// no one waiting and is dropped.
+    cancel: bool,
 }
 
 impl Drop for PendingRequestGuard {
@@ -252,7 +256,7 @@ impl Drop for PendingRequestGuard {
             .expect("pending requests lock poisoned")
             .remove(&RequestId::Number(self.id))
             .is_some();
-        if abandoned {
+        if abandoned && self.cancel {
             send_cancellation(
                 &self.runtime,
                 Arc::clone(&self.stdin),
@@ -371,10 +375,26 @@ pub struct LspClient {
     file_watching: bool,
     watched_files: std::sync::Mutex<WatchRegistry>,
     watched_backlog: Arc<std::sync::Mutex<Backlog>>,
+    /// What the server calls itself: the `serverInfo.name` of its
+    /// initialize result or, from one that sends none, the product its
+    /// startup log names ([`announced_product`]).
+    server_name: std::sync::Mutex<Option<String>>,
     /// Kept only for a language whose server is offered pull diagnostics.
     pull_providers: std::sync::Mutex<PullProviders>,
     /// The settings snapshot used for this session's configuration replies.
     settings: RwLock<Option<serde_json::Value>>,
+}
+
+/// The product a "<product> language server <version> starting" log line
+/// names. pyright sends no `serverInfo`; this line, which it logs before it
+/// answers initialize ("Pyright language server 1.1.414 starting"), is the
+/// one place it names itself.
+fn announced_product(message: &str) -> Option<&str> {
+    let (product, version) = message
+        .strip_suffix(" starting")?
+        .split_once(" language server ")?;
+    let single_word = |part: &str| !part.is_empty() && !part.contains(char::is_whitespace);
+    (single_word(product) && single_word(version)).then_some(product)
 }
 
 /// Walk a dotted configuration section path ("python.analysis") through
@@ -425,6 +445,7 @@ impl LspClient {
             file_watching,
             watched_files: std::sync::Mutex::new(WatchRegistry::default()),
             watched_backlog: Arc::default(),
+            server_name: std::sync::Mutex::new(None),
             pull_providers: std::sync::Mutex::new(PullProviders::default()),
             settings: RwLock::new(None),
         })
@@ -604,6 +625,10 @@ impl LspClient {
                 .declare(&result.capabilities);
         }
 
+        if let Some(info) = &result.server_info {
+            *self.server_name.lock().expect("server name lock poisoned") = Some(info.name.clone());
+        }
+
         // Store capabilities
         *self.capabilities.write().await = Some(result);
 
@@ -740,6 +765,7 @@ impl LspClient {
             pending: Arc::clone(&self.pending),
             stdin: Arc::clone(&self.stdin),
             timeout: self.config.request_timeout().min(CANCELLATION_TIMEOUT),
+            cancel: self.cancels(method),
         };
 
         // Build and send request
@@ -770,6 +796,29 @@ impl LspClient {
             },
             Err(_) => Err(LspError::RequestCancelled),
         }
+    }
+
+    /// Whether an abandoned `method` request is cancelled. Every one is,
+    /// except a find-references to pyright (1.1.414) or its fork
+    /// basedpyright (1.40.2). Each cancels its previous find-references
+    /// when the next arrives, through a source that a find-references
+    /// cancelled before the server took it up leaves without a token to
+    /// cancel; from then on every find-references fails with "this._token.
+    /// cancel is not a function" until the process is replaced. pyright
+    /// does not stop a find-references it is already running when told to,
+    /// so the cancellation buys nothing there; left alone, the abandoned one
+    /// runs to its end and its answer is dropped.
+    fn cancels(&self, method: &str) -> bool {
+        method != "textDocument/references"
+            || !self
+                .server_name
+                .lock()
+                .expect("server name lock poisoned")
+                .as_deref()
+                .is_some_and(|name| {
+                    name.eq_ignore_ascii_case("pyright")
+                        || name.eq_ignore_ascii_case("basedpyright")
+                })
     }
 
     pub async fn cancel_request(&self, id: u64) {
@@ -957,6 +1006,14 @@ impl LspClient {
                     "experimental/serverStatus" => self.observe_server_status(&params),
                     "window/logMessage" | "window/showMessage" => {
                         if let Some(msg) = params.get("message").and_then(|m| m.as_str()) {
+                            if !self.initialized()
+                                && let Some(product) = announced_product(msg)
+                            {
+                                self.server_name
+                                    .lock()
+                                    .expect("server name lock poisoned")
+                                    .get_or_insert_with(|| product.to_string());
+                            }
                             let msg_type = params.get("type").and_then(|t| t.as_u64());
                             match Self::classify_log_level(self.language, msg, msg_type) {
                                 LogLevel::Error => {

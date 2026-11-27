@@ -754,8 +754,11 @@ pub(crate) mod tests {
     /// reading before it answers `initialize`, so the client's `initialized`
     /// meets a closed pipe. `stall` is `watch` reading nothing after it
     /// registers until the test resumes it ([`FakeServer::resume`]), as a
-    /// server busy with one long request reads nothing. Any of them holds
-    /// its answer while the test holds the start ([`FakeServer::hold`]).
+    /// server busy with one long request reads nothing. `record` writes
+    /// down everything it is sent, as do `pyright`, which names itself as
+    /// pyright does, in its startup log, and `basedpyright`, which names
+    /// itself as basedpyright does, in `serverInfo`. Any of them holds its
+    /// answer while the test holds the start ([`FakeServer::hold`]).
     #[cfg(unix)]
     pub(crate) mod server_lifetime {
         use super::*;
@@ -788,14 +791,20 @@ if [ "$2" = env ]; then
 fi
 case "$2" in
   reject) body='{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"no workspace"}}' ;;
-  serve|watch|stall|exits|deaf|env) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
+  serve|watch|stall|exits|deaf|env|record|pyright) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
+  basedpyright) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{},"serverInfo":{"name":"basedpyright","version":"1.40.2"}}}' ;;
   hang) exec sleep 600 ;;
 esac
 IFS= read -r _
 [ "$3" = 0 ] || sleep "$3"
 while [ -e "${1%/*}/hold" ]; do sleep 0.05; done
 [ "$2" = deaf ] && exec 0<&-
+if [ "$2" = pyright ]; then
+  log='{"jsonrpc":"2.0","method":"window/logMessage","params":{"type":3,"message":"Pyright language server 1.1.414 starting"}}'
+  printf 'Content-Length: %s\r\n\r\n%s' "${#log}" "$log"
+fi
 printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+case "$2" in record|pyright|basedpyright) exec cat 3>&1 >"$4" ;; esac
 if [ "$2" = watch ] || [ "$2" = stall ]; then
   body='{"jsonrpc":"2.0","id":"w1","method":"client/registerCapability","params":{"registrations":[{"id":"go-files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.go"}]}}]}}'
   printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
@@ -909,6 +918,23 @@ exec sleep 600
             /// Let a `stall` server read its input again.
             fn resume(&self) {
                 std::fs::write(self.dir.path().join("resume"), "").unwrap();
+            }
+
+            /// The ids of the requests the client told a recording server
+            /// it cancelled, in the order it told them.
+            fn cancelled_ids(&self) -> Vec<u64> {
+                let received = std::fs::read_to_string(self.received()).unwrap_or_default();
+                let marker = "\"method\":\"$/cancelRequest\",\"params\":{\"id\":";
+                received
+                    .match_indices(marker)
+                    .map(|(at, _)| {
+                        let digits: String = received[at + marker.len()..]
+                            .chars()
+                            .take_while(char::is_ascii_digit)
+                            .collect();
+                        digits.parse().unwrap()
+                    })
+                    .collect()
             }
 
             /// Everything the client wrote to a `watch` server after it
@@ -1447,6 +1473,42 @@ exec sleep 600
 
             drop((client, again, manager));
             fake.assert_all_gone().await;
+        }
+
+        /// An abandoned find-references is left to finish on a server of
+        /// the pyright family, whichever way it names itself, and cancelled
+        /// on any other; every other abandoned request is cancelled on all.
+        #[tokio::test]
+        async fn find_references_is_left_to_finish_only_on_a_pyright_family_server() {
+            // Ids: initialize 1, find-references 2, hover 3.
+            for (behavior, cancelled) in [
+                ("pyright", vec![3]),
+                ("basedpyright", vec![3]),
+                ("record", vec![2, 3]),
+            ] {
+                let fake = FakeServer::new();
+                let manager = fake.manager_watching(behavior, 0, FileWatch::Off);
+                let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+                for method in ["textDocument/references", "textDocument/hover"] {
+                    let sent = format!("\"method\":\"{method}\"");
+                    let request = client.request::<serde_json::Value>(method, None);
+                    tokio::pin!(request);
+                    bounded(async {
+                        tokio::select! {
+                            _ = &mut request => panic!("{method} answered"),
+                            () = fake.until_received(&sent) => {}
+                        }
+                    })
+                    .await;
+                }
+                // Abandoned in turn on one runtime thread, the two are told in
+                // turn: the hover's cancellation follows any the other had.
+                bounded(fake.until_received("\"params\":{\"id\":3}")).await;
+                assert_eq!(fake.cancelled_ids(), cancelled, "{behavior}");
+
+                drop((client, manager));
+                fake.assert_all_gone().await;
+            }
         }
 
         #[tokio::test]
