@@ -699,31 +699,43 @@ fn glob_set(globs: &[String]) -> Option<globset::GlobSet> {
     set.build().ok()
 }
 
-/// The globs a `pnpm-workspace.yaml` lists under `packages`, read as YAML:
-/// a block or a flow sequence, on one line or several. `Err` says why it is
-/// no workspace file pnpm reads — not YAML, `packages` no list of globs.
+/// What pnpm reads of a `pnpm-workspace.yaml` to find its projects: the
+/// `packages` of pnpm 12's `WorkspaceManifest`.
+#[derive(serde::Deserialize)]
+struct PnpmWorkspace {
+    #[serde(default)]
+    packages: Option<Vec<String>>,
+}
+
+/// The globs a `pnpm-workspace.yaml` lists under `packages`, read as pnpm
+/// 12's `parse_workspace_manifest` reads them: with serde-saphyr and its
+/// default options, so a scalar that is no string is the glob it spells,
+/// and an empty entry refuses the file. `Err` says why it is no workspace
+/// file pnpm reads. pnpm alone retries a file that does not parse with its
+/// `${…}` placeholders replaced, so one that parses only then is refused
+/// here, and said.
 fn pnpm_workspace_globs(yaml: &str) -> Result<Vec<String>, String> {
-    let documents = yaml_rust2::YamlLoader::load_from_str(yaml).map_err(|e| e.to_string())?;
-    let Some(document) = documents.first() else {
-        return Ok(Vec::new());
-    };
-    if document.as_hash().is_none() {
-        return Err("it is no mapping".to_string());
+    let globs = serde_saphyr::from_str::<Option<PnpmWorkspace>>(yaml)
+        .map_err(|e| yaml_error(&e))?
+        .and_then(|manifest| manifest.packages)
+        .unwrap_or_default();
+    if globs.iter().any(String::is_empty) {
+        return Err(EMPTY_PACKAGE.to_string());
     }
-    let packages = &document["packages"];
-    if packages.is_badvalue() || packages.is_null() {
-        return Ok(Vec::new());
-    }
-    packages
-        .as_vec()
-        .ok_or("its packages are no list")?
-        .iter()
-        .map(|glob| {
-            glob.as_str()
-                .map(str::to_string)
-                .ok_or_else(|| "its packages hold a value that is no glob".to_string())
-        })
-        .collect()
+    Ok(globs)
+}
+
+const EMPTY_PACKAGE: &str =
+    "an entry of packages is empty, which pnpm refuses as \"Missing or empty package\"";
+
+/// A YAML manifest's parse failure as serde-saphyr words it for the file's
+/// author, not for the program calling it, on one line ending in the line
+/// and column it names: what a hint carries.
+pub(super) fn yaml_error(error: &serde_saphyr::Error) -> String {
+    error.render_with_options(serde_saphyr::render_options! {
+        formatter: &serde_saphyr::UserMessageFormatter,
+        snippets: serde_saphyr::SnippetMode::Off,
+    })
 }
 
 #[cfg(test)]
@@ -732,38 +744,76 @@ mod tests {
 
     #[test]
     fn pnpm_lists_its_packages_as_a_block_or_a_flow() {
+        let globs = |yaml: &str| pnpm_workspace_globs(yaml).unwrap();
         assert_eq!(
-            pnpm_workspace_globs(
+            globs(
                 "packages:\n  - 'apps/*'\n  # c\n  - \"libs/**\"\n  - '!libs/x'\ncatalog:\n  a: 1\n"
-            )
-            .unwrap(),
+            ),
             vec!["apps/*", "libs/**", "!libs/x"]
         );
+        assert_eq!(globs("packages: ['a/*', \"b\"]\n"), vec!["a/*", "b"]);
         assert_eq!(
-            pnpm_workspace_globs("packages: ['a/*', \"b\"]\n").unwrap(),
-            vec!["a/*", "b"]
-        );
-        assert_eq!(
-            pnpm_workspace_globs("packages: [\n  \"packages/*\",\n  'tools/*' # c\n  ]\n").unwrap(),
+            globs("packages: [\n  \"packages/*\",\n  'tools/*' # c\n  ]\n"),
             vec!["packages/*", "tools/*"]
         );
+        // Each as pnpm 12.23.0 reads it: a flow sequence's lines at the
+        // margin, a byte-order mark, a merge key, and a scalar that is no
+        // string taken for the glob it spells.
         assert_eq!(
-            pnpm_workspace_globs("catalog:\n  a: 1\n").unwrap(),
-            Vec::<String>::new()
+            globs("packages: [\n  \"packages/*\"\n]\n"),
+            vec!["packages/*"]
         );
-        assert_eq!(pnpm_workspace_globs("").unwrap(), Vec::<String>::new());
-        // YAML 1.2 indents a flow sequence's lines past the key holding it,
-        // so a `]` at the margin is refused, and said, though pnpm 12.23.0
-        // reads the file; refused too are YAML cut short and `packages`
-        // that is no list of globs.
+        assert_eq!(globs("packages: [\n'a/*',\n'b/*'\n]\n"), vec!["a/*", "b/*"]);
+        assert_eq!(globs("\u{feff}packages:\n  - 'a/*'\n"), vec!["a/*"]);
+        assert_eq!(
+            globs("base: &b\n  packages: ['a/*']\n<<: *b\n"),
+            vec!["a/*"]
+        );
+        assert_eq!(globs("packages: [1]\n"), vec!["1"]);
+        for none in ["catalog:\n  a: 1\n", "packages:\n", "# c\n", ""] {
+            assert_eq!(globs(none), Vec::<String>::new(), "{none:?}");
+        }
+        // And each as it refuses it: a tab for indentation, a duplicate key,
+        // a second document, YAML cut short, `packages` no list of globs,
+        // an empty entry.
         for broken in [
-            "packages: [\n  \"packages/*\"\n]\n",
+            "packages:\n\t- 'a/*'\n",
+            "packages: ['a/*']\npackages: ['b/*']\n",
+            "packages: ['a/*']\n---\npackages: ['b/*']\n",
             "packages: [\n  'a/*'\n",
             "packages: 3\n",
-            "packages: [1]\n",
+            "packages: [['a/*']]\n",
+            "packages: ['a/*', ~]\n",
+            "packages: ['a/*', '']\n",
             "- a\n",
         ] {
             assert!(pnpm_workspace_globs(broken).is_err(), "{broken:?}");
         }
+        // Each refusal worded for the file's author, where it stands.
+        for (broken, said) in [
+            (
+                "packages: ['a/*']\npackages: ['b/*']\n",
+                "duplicate mapping key `packages` is not allowed here at line 2, column 1",
+            ),
+            (
+                "packages:\n\t- 'a/*'\n",
+                "tabs disallowed within this context (block indentation) at line 2, column 2",
+            ),
+            (
+                "packages: [\n  'a/*'\n",
+                "unclosed bracket '[' at line 1, column 11",
+            ),
+            ("packages:\n  - ''\n", EMPTY_PACKAGE),
+        ] {
+            assert_eq!(
+                pnpm_workspace_globs(broken).unwrap_err(),
+                said,
+                "{broken:?}"
+            );
+        }
+        // Where this departs from pnpm, said rather than guessed: a flow
+        // sequence pnpm reads only by retrying with its `${…}` placeholder
+        // replaced is refused here.
+        assert!(pnpm_workspace_globs("packages: [${DIR}/*]\n").is_err());
     }
 }

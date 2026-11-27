@@ -5907,18 +5907,41 @@ fn map_summary_lists_the_packages_workspace_manifests_declare() {
     let broken = json_ok(root, &["--deterministic", "map", "summary"]);
     assert!(says(&broken, "go.work could not be parsed"), "{broken}");
 
-    // A pnpm-workspace.yaml declares a workspace whether or not it parses:
-    // its root is still a package, and what it lists is said to be unread.
+    // A flow sequence closed at the margin, which pnpm reads.
     let pnpm = tempfile::tempdir().unwrap();
     std::fs::write(pnpm.path().join("package.json"), "{\"name\": \"root\"}\n").unwrap();
+    std::fs::create_dir_all(pnpm.path().join("packages/a")).unwrap();
+    std::fs::write(
+        pnpm.path().join("packages/a/package.json"),
+        "{\"name\": \"@x/a\"}\n",
+    )
+    .unwrap();
     std::fs::write(
         pnpm.path().join("pnpm-workspace.yaml"),
         "packages: [\n  \"packages/*\"\n]\n",
     )
     .unwrap();
+    let listed = json_ok(pnpm.path(), &["--deterministic", "map", "summary"]);
+    assert_eq!(
+        packages(&listed),
+        [". root package.json 0", "packages/a @x/a package.json 0"],
+        "{listed}"
+    );
+
+    // A pnpm-workspace.yaml declares a workspace whether or not it parses:
+    // its root is still a package, and what it lists is said to be unread.
+    std::fs::write(
+        pnpm.path().join("pnpm-workspace.yaml"),
+        "packages:\n\t- \"packages/*\"\n",
+    )
+    .unwrap();
     let broken = json_ok(pnpm.path(), &["--deterministic", "map", "summary"]);
     assert!(
-        says(&broken, "pnpm-workspace.yaml could not be parsed"),
+        says(
+            &broken,
+            "pnpm-workspace.yaml could not be parsed (tabs disallowed within this context \
+             (block indentation) at line 2, column 2), so what it declares is not listed."
+        ),
         "{broken}"
     );
     assert_eq!(broken["packages"]["items"][0]["name"], "root", "{broken}");

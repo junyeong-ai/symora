@@ -41,10 +41,13 @@ toml = "1.2.3"
 # MCP installer's Codex config — the canonical crate for surgical TOML editing.
 toml_edit = "0.25.21"
 # YAML for the manifests `map` reads (`pnpm-workspace.yaml`, `pubspec.yaml`):
-# a whole parser, since reading lines takes a flow sequence written over
-# several of them for none. The smallest maintained one: serde_yaml is
-# archived. Without default features it reads UTF-8 alone, which these are.
-yaml-rust2 = { version = "0.13.2", default-features = false }
+# the parser and version pnpm 12.23.0 reads its workspace file with, so a
+# file pnpm reads is one this reads alike — a flow sequence closed at the
+# margin, a byte-order mark — and one it refuses (a duplicate key, a second
+# document) is refused. pub's package:yaml is no Rust crate; this comes
+# nearest it too, with the options `pubspec_name` sets. Deserializing alone,
+# without the serializer.
+serde-saphyr = { version = "2.2.0", default-features = false, features = ["deserialize"] }
 
 # Version pinning — the requirement grammar `--check-version` accepts, and
 # the ordering rules a hand-rolled comparison gets wrong on pre-releases.

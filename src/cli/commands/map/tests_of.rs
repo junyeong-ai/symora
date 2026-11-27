@@ -738,11 +738,8 @@ fn dart_package_uri(rel_path: &str, root: &Path) -> Result<Option<String>, Strin
             ));
         }
     };
-    let documents = yaml_rust2::YamlLoader::load_from_str(&content)
-        .map_err(|e| unread_manifest(&relative, &e.to_string(), "package: imports"))?;
-    let Some(name) = documents
-        .first()
-        .and_then(|pubspec| pubspec["name"].as_str())
+    let Some(name) =
+        pubspec_name(&content).map_err(|e| unread_manifest(&relative, &e, "package: imports"))?
     else {
         return Ok(None);
     };
@@ -750,6 +747,29 @@ fn dart_package_uri(rel_path: &str, root: &Path) -> Result<Option<String>, Strin
         "package:{name}/{}",
         components[lib + 1..].join("/")
     )))
+}
+
+/// What `map` reads of a `pubspec.yaml`: the package's name.
+#[derive(serde::Deserialize)]
+struct Pubspec {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// The name a `pubspec.yaml` declares, read as near as serde-saphyr comes to
+/// pub, which reads it with package:yaml: a merge key is an ordinary key
+/// there, so it names nothing. Where this still departs from `dart pub get`
+/// (3.14.1): `name: 123` and `name: true` read as the names they spell,
+/// where pub refuses a name that is no string, and a line indented by a tab
+/// inside a flow collection is refused here, where pub reads it. `Err`
+/// says why it would not read.
+fn pubspec_name(yaml: &str) -> Result<Option<String>, String> {
+    let options = serde_saphyr::options! {
+        merge_keys: serde_saphyr::options::MergeKeyPolicy::AsOrdinary,
+    };
+    serde_saphyr::from_str_with_options::<Option<Pubspec>>(yaml, options)
+        .map(|pubspec| pubspec.and_then(|p| p.name))
+        .map_err(|e| super::workspace::yaml_error(&e))
 }
 
 fn unread_manifest(path: &str, error: &str, what: &str) -> String {
@@ -762,6 +782,55 @@ mod tests {
 
     fn paths<'a>(files: &[&'a str]) -> HashSet<&'a str> {
         files.iter().copied().collect()
+    }
+
+    /// Each as `dart pub get` 3.14.1 reads it: a flow mapping's lines at the
+    /// margin, a byte-order mark, a tab after the colon; a merge key names
+    /// nothing; a duplicate key and a second document are refused.
+    #[test]
+    fn a_pubspec_names_its_package_as_pub_reads_it() {
+        let name = |yaml: &str| pubspec_name(yaml).unwrap();
+        let named = Some("dart_pkg".to_string());
+        assert_eq!(name("name: dart_pkg\n"), named);
+        assert_eq!(
+            name("{name: dart_pkg, environment: {sdk: ^3.0.0}}\n"),
+            named
+        );
+        assert_eq!(
+            name("name: dart_pkg\nenvironment: {\nsdk: ^3.0.0\n}\n"),
+            named
+        );
+        assert_eq!(name("\u{feff}name: dart_pkg\n"), named);
+        assert_eq!(name("name:\tdart_pkg\n"), named);
+        assert_eq!(name("base: &b\n  name: dart_pkg\n<<: *b\n"), None);
+        assert_eq!(name("name:\n"), None);
+        assert_eq!(name(""), None);
+        for broken in [
+            "name: a_pkg\nname: dart_pkg\n",
+            "name: dart_pkg\n---\nname: other\n",
+            "name: dart_pkg\nenvironment:\n\tsdk: ^3.0.0\n",
+            "name: dart_pkg\nenvironment: {\n  sdk: ^3.0.0\n",
+        ] {
+            assert!(pubspec_name(broken).is_err(), "{broken:?}");
+        }
+        for (broken, said) in [
+            (
+                "name: a_pkg\nname: dart_pkg\n",
+                "duplicate mapping key `name` is not allowed here at line 2, column 1",
+            ),
+            (
+                "name: dart_pkg\nenvironment: {\n  sdk: ^3.0.0\n",
+                "unclosed bracket '{' at line 2, column 14",
+            ),
+        ] {
+            assert_eq!(pubspec_name(broken).unwrap_err(), said, "{broken:?}");
+        }
+        // Where this departs from pub, said here and at `pubspec_name`: pub
+        // refuses a name that is no string and reads a tab-indented line
+        // inside a flow collection.
+        assert_eq!(name("name: 123\n"), Some("123".to_string()));
+        assert_eq!(name("name: true\n"), Some("true".to_string()));
+        assert!(pubspec_name("name: dart_pkg\nenvironment: {\n\tsdk: ^3.0.0\n}\n").is_err());
     }
 
     /// A module's name is spelled by the packages enclosing it, counting up
