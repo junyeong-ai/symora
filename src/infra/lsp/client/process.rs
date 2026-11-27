@@ -26,6 +26,8 @@ pub(super) struct ServerProcess {
 impl ServerProcess {
     pub(super) fn spawn(command: &mut Command) -> io::Result<Self> {
         #[cfg(unix)]
+        crate::infra::fd_limit::restore_for_child(command.as_std_mut());
+        #[cfg(unix)]
         // SAFETY: `setsid` is async-signal-safe, which `pre_exec` requires.
         unsafe {
             command.pre_exec(|| match libc::setsid() {

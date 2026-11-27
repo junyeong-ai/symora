@@ -152,6 +152,20 @@ async fn async_main() -> anyhow::Result<bool> {
         *edit_payload(&mut cli.command).unwrap() = input;
     }
 
+    // A process that serves until stopped holds every project it serves;
+    // see `fd_limit` for why only those raise their open-file limit.
+    #[cfg(unix)]
+    if matches!(
+        &cli.command,
+        Commands::Daemon(DaemonArgs {
+            command: DaemonCommand::Serve
+        }) | Commands::Mcp(McpArgs {
+            command: McpCommand::Serve { .. },
+        })
+    ) {
+        symora::infra::fd_limit::raise();
+    }
+
     #[cfg(unix)]
     let use_daemon = std::env::var(symora::constants::env::NO_DAEMON)
         .ok()

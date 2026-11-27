@@ -1,5 +1,7 @@
 pub mod ast;
 pub mod deadline;
+#[cfg(unix)]
+pub mod fd_limit;
 pub mod file_filter;
 pub mod file_lock;
 pub mod lsp;

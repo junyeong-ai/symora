@@ -357,6 +357,9 @@ impl DaemonClient {
             // job that started it, Ctrl-C or a hangup, off a daemon that
             // outlives it.
             .process_group(0);
+        // A daemon raises its own open-file limit from the one it is handed,
+        // and hands that one to the servers it starts.
+        crate::infra::fd_limit::restore_for_child(command.as_std_mut());
         command
     }
 

@@ -323,15 +323,17 @@ fn run_with_timeout(
     root: &Path,
     timeout: Duration,
 ) -> Option<std::process::Output> {
-    let mut child = Command::new(&launch.command)
+    let mut command = Command::new(&launch.command);
+    command
         .args(&launch.args)
         .envs(&launch.env)
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .ok()?;
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    crate::infra::fd_limit::restore_for_child(&mut command);
+    let mut child = command.spawn().ok()?;
 
     let deadline = std::time::Instant::now() + timeout;
     loop {
