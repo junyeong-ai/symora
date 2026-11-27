@@ -31,7 +31,7 @@ use crate::services::test_scope::TestScope;
 
 /// Where a symbol-level query anchors: the declaration the input position
 /// addresses, resolved once and the same way for every surface — references,
-/// callers, callees, implementations, type hierarchy, impact, context.
+/// callers, callees, implementations, impact, context.
 ///
 /// An explicit column is a precise address. On a symbol's name it is that
 /// symbol; anywhere else it is the token there — a call, a type, a receiver,
@@ -828,7 +828,7 @@ mod tests {
 
     use crate::models::lsp::{
         ApplyActionResult, CallHierarchyItem, CodeAction, Definition, HoverInfo, Indexed,
-        PrepareRenameResult, RenameResult, TypeHierarchyItem,
+        PrepareRenameResult, RenameResult,
     };
     use crate::models::symbol::SymbolKind;
 
@@ -1044,22 +1044,6 @@ mod tests {
             _line: u32,
             _column: u32,
         ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
-            unreachable!()
-        }
-        async fn supertypes(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-            unreachable!()
-        }
-        async fn subtypes(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
             unreachable!()
         }
         async fn code_actions(

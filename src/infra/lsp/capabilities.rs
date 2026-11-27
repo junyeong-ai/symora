@@ -25,8 +25,6 @@ pub enum LspFeature {
     OutgoingCalls,
     /// textDocument/codeAction
     CodeActions,
-    /// typeHierarchy/supertypes + typeHierarchy/subtypes
-    TypeHierarchy,
 }
 
 impl LspFeature {
@@ -44,7 +42,6 @@ impl LspFeature {
             Self::IncomingCalls => "incoming calls",
             Self::OutgoingCalls => "outgoing calls",
             Self::CodeActions => "code actions",
-            Self::TypeHierarchy => "type hierarchy",
         }
     }
 }
@@ -66,9 +63,7 @@ pub fn get_support_level(language: Language, feature: LspFeature) -> SupportLeve
     use SupportLevel::*;
 
     match (language, feature) {
-        // Rust (rust-analyzer) - excellent support, but no type hierarchy: it
-        // does not advertise typeHierarchyProvider and answers -32601.
-        (Language::Rust, TypeHierarchy) => None,
+        // Rust (rust-analyzer) - excellent support
         (Language::Rust, _) => Full,
 
         // C/C++ (clangd) - excellent support
@@ -85,13 +80,11 @@ pub fn get_support_level(language: Language, feature: LspFeature) -> SupportLeve
         (Language::TypeScript | Language::JavaScript, Hover | Rename) => Partial,
         (Language::TypeScript | Language::JavaScript, FindImplementations) => Partial,
         (Language::TypeScript | Language::JavaScript, GotoTypeDefinition) => Partial,
-        (Language::TypeScript | Language::JavaScript, TypeHierarchy) => None,
         (Language::TypeScript | Language::JavaScript, _) => Partial,
 
         // Python (pyright) - slow on large projects
         (Language::Python, FindImplementations) => None,
         (Language::Python, IncomingCalls | OutgoingCalls) => None,
-        (Language::Python, TypeHierarchy) => None,
         (Language::Python, _) => Partial,
 
         // Java (jdtls) - excellent support
@@ -103,7 +96,6 @@ pub fn get_support_level(language: Language, feature: LspFeature) -> SupportLeve
         (Language::Kotlin, FindImplementations) => None,
         (Language::Kotlin, GotoTypeDefinition) => Partial,
         (Language::Kotlin, IncomingCalls | OutgoingCalls) => None,
-        (Language::Kotlin, TypeHierarchy) => None,
         (Language::Kotlin, Rename) => Partial,
         (Language::Kotlin, _) => Full,
 
@@ -111,7 +103,6 @@ pub fn get_support_level(language: Language, feature: LspFeature) -> SupportLeve
         (Language::PHP, Rename) => None,
         (Language::PHP, FindImplementations) => None,
         (Language::PHP, IncomingCalls | OutgoingCalls) => None,
-        (Language::PHP, TypeHierarchy) => None,
         (Language::PHP, _) => Full,
 
         // C# (csharp-ls) - requires installation
@@ -161,18 +152,6 @@ pub fn get_alternative_suggestion(language: Language, feature: LspFeature) -> St
             "Outgoing calls not supported by clangd. Try: symora refs <location>".into()
         }
 
-        // Type hierarchy: a trait's implementations are its subtypes, and a
-        // type's impl blocks name the traits it implements.
-        (Language::Rust, TypeHierarchy) => {
-            "Try: symora implementations <location> or symora search ast \"(impl_item)\" -l rust"
-                .into()
-        }
-        (_, TypeHierarchy)
-            if get_support_level(language, FindImplementations) != SupportLevel::None =>
-        {
-            "Try: symora implementations <location>".into()
-        }
-
         // Default
         _ => "This feature may not be available for this language.".into(),
     }
@@ -214,7 +193,6 @@ mod tests {
             IncomingCalls,
             OutgoingCalls,
             CodeActions,
-            TypeHierarchy,
         ];
         for language in Language::all() {
             for feature in features {

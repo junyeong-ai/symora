@@ -162,24 +162,6 @@ async fn dispatch_project(
             .await
         }
 
-        methods::SUPERTYPES => {
-            handle_position(params, Arc::clone(&ctx), |ctx, f, l, c| async move {
-                to_json(wire::TypeHierarchyResponse::from(
-                    ctx.lsp.supertypes(&f, l, c).await?,
-                ))
-            })
-            .await
-        }
-
-        methods::SUBTYPES => {
-            handle_position(params, Arc::clone(&ctx), |ctx, f, l, c| async move {
-                to_json(wire::TypeHierarchyResponse::from(
-                    ctx.lsp.subtypes(&f, l, c).await?,
-                ))
-            })
-            .await
-        }
-
         methods::PREPARE_RENAME => {
             handle_position(params, Arc::clone(&ctx), |ctx, f, l, c| async move {
                 let result = ctx.lsp.prepare_rename(&f, l, c).await?;

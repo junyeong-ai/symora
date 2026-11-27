@@ -24,8 +24,6 @@ const ALL_SUBCOMMANDS: &[&str] = &[
     "implementations",
     "callers",
     "callees",
-    "supertypes",
-    "subtypes",
     "hover",
     "context",
     "impact",
@@ -5023,15 +5021,15 @@ fn code_action_ranges_remain_bound_to_the_request_content() {
     }
 }
 
-/// A server that rejects type hierarchy as MethodNotFound, under a language
-/// the static table lists as supporting it, is reported like any other
-/// unsupported feature: the server named and a command to run instead, not a
-/// bare JSON-RPC error.
+/// A server that rejects an implementation lookup as MethodNotFound, under a
+/// language the static table lists as supporting it, is reported like any
+/// other unsupported feature: the server and the feature named, with the
+/// table's alternative as the hint, not a bare JSON-RPC error.
 #[test]
 #[cfg(unix)]
-fn a_type_hierarchy_the_server_does_not_implement_names_an_alternative() {
+fn an_implementation_lookup_the_server_does_not_implement_is_unsupported() {
     if Command::new("python3").arg("--version").output().is_err() {
-        eprintln!("type-hierarchy protocol fixture requires python3");
+        eprintln!("method-not-found protocol fixture requires python3");
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -5053,19 +5051,20 @@ fn a_type_hierarchy_the_server_does_not_implement_names_an_alternative() {
         toml::to_string(&config).unwrap(),
     )
     .unwrap();
-    for command in ["supertypes", "subtypes"] {
-        let output = run_in(root.path(), &[command, "main.go:2:6"]);
-        let payload: serde_json::Value = common::parse_response(&output.stdout).unwrap();
-        assert!(!output.status.success(), "{payload}");
-        assert_eq!(payload["error"]["code"], "unsupported", "{payload}");
-        let message = payload["error"]["message"].as_str().unwrap();
-        assert!(
-            message.contains("does not support 'type hierarchy'"),
-            "{payload}"
-        );
-        let hint = payload["error"]["hint"].as_str().unwrap();
-        assert!(hint.contains("symora implementations"), "{payload}");
-    }
+    let output = run_in(root.path(), &["implementations", "main.go:2:6"]);
+    let payload: serde_json::Value = common::parse_response(&output.stdout).unwrap();
+    assert!(!output.status.success(), "{payload}");
+    assert_eq!(payload["error"]["code"], "unsupported", "{payload}");
+    let message = payload["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("does not support 'find implementations'"),
+        "{payload}"
+    );
+    let suggestion = symora::infra::lsp::get_alternative_suggestion(
+        symora::models::symbol::Language::Go,
+        symora::infra::lsp::LspFeature::FindImplementations,
+    );
+    assert_eq!(payload["error"]["hint"], suggestion, "{payload}");
 }
 
 /// What a language server started stops with it when a command run without
@@ -6025,7 +6024,7 @@ fn typedef_lists_every_type_the_server_names() {
         .unwrap();
     };
     // Another feature's limit does not reach typedef.
-    configure("type_hierarchy_limit = 1");
+    configure("impl_limit = 1");
 
     let listed = json_ok(
         root.path(),

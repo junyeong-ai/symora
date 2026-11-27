@@ -20,7 +20,7 @@ use crate::error::LspError;
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, Definition, FindSymbolsOptions, HoverInfo,
-    Indexed, PrepareRenameResult, RenameResult, TypeHierarchyItem,
+    Indexed, PrepareRenameResult, RenameResult,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -119,20 +119,6 @@ pub trait LspService: Send + Sync {
         line: u32,
         column: u32,
     ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError>;
-
-    async fn supertypes(
-        &self,
-        file: &Path,
-        line: u32,
-        column: u32,
-    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError>;
-
-    async fn subtypes(
-        &self,
-        file: &Path,
-        line: u32,
-        column: u32,
-    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError>;
 
     async fn code_actions(
         &self,

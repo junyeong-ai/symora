@@ -255,7 +255,7 @@ pub(crate) mod test_support {
     use crate::error::LspError;
     use crate::models::lsp::{
         ApplyActionResult, CodeAction, FindSymbolsOptions, HoverInfo, Indexed, PrepareRenameResult,
-        RenameResult, TypeHierarchyItem,
+        RenameResult,
     };
     use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 
@@ -416,22 +416,6 @@ pub(crate) mod test_support {
             _column: u32,
             _new_name: &str,
         ) -> Result<Indexed<Option<RenameResult>>, LspError> {
-            unreachable!()
-        }
-        async fn supertypes(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-            unreachable!()
-        }
-        async fn subtypes(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
             unreachable!()
         }
         async fn code_actions(

@@ -511,7 +511,6 @@ async fn fetch_types(
                         .map(|s| s.kind.to_string())
                         .unwrap_or_else(|| "type".to_string()),
                     location: LocationOutput::from_location(type_loc, root),
-                    detail: None,
                     body: None,
                     body_omitted: None,
                 });
@@ -604,7 +603,6 @@ mod tests {
     use crate::error::LspError;
     use crate::models::lsp::{
         ApplyActionResult, CodeAction, HoverInfo, Indexed, PrepareRenameResult, RenameResult,
-        TypeHierarchyItem,
     };
     use crate::models::symbol::{Language, Location, SymbolKind};
 
@@ -826,22 +824,6 @@ mod tests {
         ) -> Result<crate::models::lsp::Indexed<Vec<CallHierarchyItem>>, LspError> {
             unreachable!()
         }
-        async fn supertypes(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<crate::models::lsp::Indexed<Vec<TypeHierarchyItem>>, LspError> {
-            unreachable!()
-        }
-        async fn subtypes(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<crate::models::lsp::Indexed<Vec<TypeHierarchyItem>>, LspError> {
-            unreachable!()
-        }
         async fn code_actions(
             &self,
             _file: &Path,
@@ -891,7 +873,6 @@ mod tests {
                 snippet: None,
                 degraded_column: None,
             },
-            detail: None,
             body: None,
             body_omitted: None,
         }

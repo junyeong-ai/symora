@@ -175,8 +175,6 @@ pub mod methods {
     pub const DIAGNOSTICS: &str = "diagnostics";
     pub const INCOMING_CALLS: &str = "incoming_calls";
     pub const OUTGOING_CALLS: &str = "outgoing_calls";
-    pub const SUPERTYPES: &str = "supertypes";
-    pub const SUBTYPES: &str = "subtypes";
     pub const CODE_ACTIONS: &str = "code_actions";
     pub const APPLY_CODE_ACTION: &str = "apply_code_action";
     pub const PREPARE_RENAME: &str = "prepare_rename";
@@ -209,8 +207,6 @@ pub mod methods {
             DIAGNOSTICS => Some("textDocument/publishDiagnostics"),
             INCOMING_CALLS => Some("callHierarchy/incomingCalls"),
             OUTGOING_CALLS => Some("callHierarchy/outgoingCalls"),
-            SUPERTYPES => Some("typeHierarchy/supertypes"),
-            SUBTYPES => Some("typeHierarchy/subtypes"),
             CODE_ACTIONS => Some("textDocument/codeAction"),
             APPLY_CODE_ACTION => Some("codeAction/resolve"),
             PREPARE_RENAME => Some("textDocument/prepareRename"),

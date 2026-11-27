@@ -481,56 +481,6 @@ pub struct ApplyActionResponse {
     pub changes: Vec<FileChange>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TypeHierarchyResponse {
-    pub count: usize,
-    pub items: Vec<TypeHierarchyItem>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub indexing: Option<lsp::IndexingDegradation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TypeHierarchyItem {
-    pub name: String,
-    pub kind: String,
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-    /// Disclosed degraded column, kept across the wire so daemon and in-process
-    /// supertypes/subtypes agree (invariant 3) — a type hierarchy item is a
-    /// cross-file result that can degrade on an unreadable line.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub degraded_column: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-impl From<&lsp::TypeHierarchyItem> for TypeHierarchyItem {
-    fn from(item: &lsp::TypeHierarchyItem) -> Self {
-        Self {
-            name: item.name.clone(),
-            kind: item.kind.to_string(),
-            file: item.location.file.display().to_string(),
-            line: item.location.line,
-            column: item.location.column,
-            degraded_column: item.location.degraded_column,
-            detail: item.detail.clone(),
-        }
-    }
-}
-
-impl From<TypeHierarchyItem> for lsp::TypeHierarchyItem {
-    fn from(val: TypeHierarchyItem) -> Self {
-        Self {
-            name: val.name,
-            kind: SymbolKind::parse_or_default(&val.kind),
-            location: symbol::Location::point(PathBuf::from(val.file), val.line, val.column)
-                .with_degraded_column(val.degraded_column == Some(true)),
-            detail: val.detail,
-        }
-    }
-}
-
 impl From<CodeAction> for lsp::CodeAction {
     fn from(val: CodeAction) -> Self {
         Self {
@@ -576,12 +526,6 @@ impl_vec_response!(
     Location
 );
 impl_vec_response!(CallsResponse, calls, lsp::CallHierarchyItem, CallItem);
-impl_vec_response!(
-    TypeHierarchyResponse,
-    items,
-    lsp::TypeHierarchyItem,
-    TypeHierarchyItem
-);
 
 impl DefinitionResponse {
     pub fn from_definition(def: lsp::Indexed<Option<lsp::Definition>>) -> Self {
@@ -698,7 +642,7 @@ impl CodeActionsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::lsp::{CallHierarchyItem as LspCallItem, TypeHierarchyItem as LspTypeItem};
+    use crate::models::lsp::CallHierarchyItem as LspCallItem;
     use crate::models::symbol::{Location as SymLocation, Symbol as SymSymbol, SymbolKind};
 
     /// The computation-time indexing marker must survive the daemon wire
@@ -1108,75 +1052,6 @@ mod tests {
 
         let back: LspCallItem = wire.into();
         assert_eq!(back.kind, SymbolKind::Constructor);
-    }
-
-    // ---------------------------------------------------------------
-    // TypeHierarchyItem roundtrip tests
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn type_hierarchy_item_roundtrip_with_detail() {
-        // A degraded column on a supertypes/subtypes result must survive the
-        // wire so daemon and in-process disclose it identically.
-        let loc =
-            SymLocation::point(PathBuf::from("src/models.rs"), 15, 4).with_degraded_column(true);
-
-        let original = LspTypeItem {
-            name: "Animal".to_string(),
-            kind: SymbolKind::Interface,
-            location: loc,
-            detail: Some("crate::models".to_string()),
-        };
-
-        let wire = TypeHierarchyItem::from(&original);
-        let back: LspTypeItem = wire.into();
-
-        assert_eq!(back.name, "Animal");
-        assert_eq!(back.kind, SymbolKind::Interface);
-        assert_eq!(back.location.file, PathBuf::from("src/models.rs"));
-        assert_eq!(back.location.line, 15);
-        assert_eq!(back.location.column, 4);
-        assert_eq!(back.location.degraded_column, Some(true));
-        assert_eq!(back.detail, Some("crate::models".to_string()));
-    }
-
-    #[test]
-    fn type_hierarchy_item_roundtrip_without_detail() {
-        let loc = SymLocation::point(PathBuf::from("src/types.rs"), 8, 1);
-
-        let original = LspTypeItem {
-            name: "Dog".to_string(),
-            kind: SymbolKind::Class,
-            location: loc,
-            detail: None,
-        };
-
-        let wire = TypeHierarchyItem::from(&original);
-        let back: LspTypeItem = wire.into();
-
-        assert_eq!(back.name, "Dog");
-        assert_eq!(back.kind, SymbolKind::Class);
-        assert_eq!(back.location.file, PathBuf::from("src/types.rs"));
-        assert_eq!(back.location.line, 8);
-        assert_eq!(back.location.column, 1);
-        assert_eq!(back.detail, None);
-    }
-
-    #[test]
-    fn type_hierarchy_item_kind_roundtrip() {
-        let loc = SymLocation::point(PathBuf::from("test.rs"), 1, 1);
-        let original = LspTypeItem {
-            name: "MyStruct".to_string(),
-            kind: SymbolKind::Struct,
-            location: loc,
-            detail: None,
-        };
-
-        let wire = TypeHierarchyItem::from(&original);
-        assert_eq!(wire.kind, "struct");
-
-        let back: LspTypeItem = wire.into();
-        assert_eq!(back.kind, SymbolKind::Struct);
     }
 
     #[test]

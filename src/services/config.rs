@@ -243,7 +243,6 @@ struct RawLspConfig {
     typedef_limit: Option<usize>,
     symbol_limit: Option<usize>,
     calls_limit: Option<usize>,
-    type_hierarchy_limit: Option<usize>,
     tests_limit: Option<usize>,
     diagnostics_wait_ms: Option<u64>,
     /// Raw [lsp.servers.<lang>] stanzas. Kept as TOML tables so
@@ -312,7 +311,6 @@ fn merge_raw_lsp(base: RawLspConfig, overlay: RawLspConfig) -> RawLspConfig {
         typedef_limit: overlay.typedef_limit.or(base.typedef_limit),
         symbol_limit: overlay.symbol_limit.or(base.symbol_limit),
         calls_limit: overlay.calls_limit.or(base.calls_limit),
-        type_hierarchy_limit: overlay.type_hierarchy_limit.or(base.type_hierarchy_limit),
         tests_limit: overlay.tests_limit.or(base.tests_limit),
         diagnostics_wait_ms: overlay.diagnostics_wait_ms.or(base.diagnostics_wait_ms),
         servers: {
@@ -377,10 +375,6 @@ fn resolve_config(raw: RawSymoraConfig, ignored_keys: Vec<String>) -> SymoraConf
                 .unwrap_or_else(defaults::typedef_limit),
             symbol_limit: raw.lsp.symbol_limit.unwrap_or_else(defaults::symbol_limit),
             calls_limit: raw.lsp.calls_limit.unwrap_or_else(defaults::calls_limit),
-            type_hierarchy_limit: raw
-                .lsp
-                .type_hierarchy_limit
-                .unwrap_or_else(defaults::type_hierarchy_limit),
             tests_limit: raw.lsp.tests_limit.unwrap_or_else(defaults::tests_limit),
             diagnostics_wait_ms: raw
                 .lsp

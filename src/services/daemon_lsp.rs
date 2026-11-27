@@ -9,13 +9,12 @@ use crate::daemon::wire::{
     ApplyActionResponse, CallsResponse, CodeActionsResponse, DefinitionResponse,
     DiagnosticsResponse, HoverResponse, ImplementationsResponse, PrepareRenameResponse,
     ReferencesResponse, RenameResponse, SymbolsResponse, TypeDefinitionsResponse,
-    TypeHierarchyResponse,
 };
 use crate::error::LspError;
 use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity, DiagnosticTag, DiagnosticsReport};
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, Definition, FindSymbolsOptions, HoverInfo,
-    Indexed, Position, PrepareRenameResult, Range, RenameResult, TypeHierarchyItem,
+    Indexed, Position, PrepareRenameResult, Range, RenameResult,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 use crate::services::lsp::LspService;
@@ -278,34 +277,6 @@ impl LspService for DaemonLspService {
 
         Ok(Indexed::new(
             response.calls.into_iter().map(Into::into).collect(),
-            response.indexing,
-        ))
-    }
-
-    async fn supertypes(
-        &self,
-        file: &Path,
-        line: u32,
-        column: u32,
-    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-        let result = self.client.supertypes(file, line, column).await?;
-        let response: TypeHierarchyResponse = parse(result)?;
-        Ok(Indexed::new(
-            response.items.into_iter().map(Into::into).collect(),
-            response.indexing,
-        ))
-    }
-
-    async fn subtypes(
-        &self,
-        file: &Path,
-        line: u32,
-        column: u32,
-    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-        let result = self.client.subtypes(file, line, column).await?;
-        let response: TypeHierarchyResponse = parse(result)?;
-        Ok(Indexed::new(
-            response.items.into_iter().map(Into::into).collect(),
             response.indexing,
         ))
     }

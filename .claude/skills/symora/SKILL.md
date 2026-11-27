@@ -3,7 +3,7 @@ name: symora
 metadata:
   version: 0.37.1
 description: Provides symbol discovery, semantic navigation, static impact analysis, and symbol-aware edits through the symora CLI. Use when locating code, tracing references or callers, reviewing changes, or editing or renaming a known declaration.
-allowed-tools: Bash(symora search *), Bash(symora symbols *), Bash(symora map *), Bash(symora def *), Bash(symora refs *), Bash(symora typedef *), Bash(symora implementations *), Bash(symora callers *), Bash(symora callees *), Bash(symora supertypes *), Bash(symora subtypes *), Bash(symora hover *), Bash(symora context *), Bash(symora impact *), Bash(symora diff-impact *), Bash(symora diagnostics *), Bash(symora edit *), Bash(symora rename *), Bash(symora actions *), Bash(symora doctor *), Bash(symora daemon restart --project*)
+allowed-tools: Bash(symora search *), Bash(symora symbols *), Bash(symora map *), Bash(symora def *), Bash(symora refs *), Bash(symora typedef *), Bash(symora implementations *), Bash(symora callers *), Bash(symora callees *), Bash(symora hover *), Bash(symora context *), Bash(symora impact *), Bash(symora diff-impact *), Bash(symora diagnostics *), Bash(symora edit *), Bash(symora rename *), Bash(symora actions *), Bash(symora doctor *), Bash(symora daemon restart --project*)
 ---
 
 # Symora
@@ -30,7 +30,7 @@ symora diff-impact
 
 Lines and Unicode-scalar columns are 1-indexed. Every result states its own position flat as `file`, `line`, `column`, the name start to pass back; a span adds `end_line` (inclusive) and `end_column` (exclusive) where the source states them, and a related position (`call_site`, `definition`, `target`) is a nested object of the same shape.
 
-- For `refs`, callers/callees, implementations, type hierarchy, context, and impact: `file:line` addresses the declaration on that line or its enclosing symbol. An explicit column addresses the exact token and resolves usages through their definitions. Header keywords/whitespace may address that declaration; empty body positions address nothing.
+- For `refs`, callers/callees, implementations, context, and impact: `file:line` addresses the declaration on that line or its enclosing symbol. An explicit column addresses the exact token and resolves usages through their definitions. Header keywords/whitespace may address that declaration; empty body positions address nothing.
 - `def`, hover, typedef, and rename are position-exact; an omitted column means 1. Take name positions from actual results. `typedef` lists every type the server names there, in its order: `Vec<Order>` names both `Vec` and `Order`, so read past the first item.
 - A `--symbol` path is a bare name, a `Class/method` suffix, a `*/method` wildcard, or an exact `name_path`. A trailing `[kind]` selects one kind among same-named declarations (`Svc[class]`, not its constructors); a segment written wholly in brackets is a name (`Cache/[key]`). Kinds come from whichever source answered, and the index and a server can differ (pyright reports `MAX_SIZE` as `constant`, the index as `variable`). Take a kind from `symbols <file>` for the file you act on, and treat a zero under `--kind` as unverified.
 - Read the echoed target. `anchor_status` is absent when a declaration resolved; `binding` is a declaration absent from the document-symbol tree, such as a local, a parameter, or one the server's outline omits; `not_a_symbol` and `unavailable` resolved nothing, so the counts are about no declaration. Source edits address declarations, not body tokens.

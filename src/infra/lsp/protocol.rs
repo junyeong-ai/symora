@@ -325,8 +325,6 @@ pub struct TextDocumentClientCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub moniker: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub type_hierarchy: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub inline_value: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inlay_hint: Option<Value>,
@@ -389,8 +387,6 @@ pub struct ServerCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_hierarchy_provider: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub type_hierarchy_provider: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub implementation_provider: Option<Value>,
     /// Pull diagnostics declared at initialize ([`DiagnosticOptions`]).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -440,13 +436,12 @@ impl ServerCapabilities {
     /// the field is present and not `false`. Per LSP, an absent provider and
     /// `false` mean the same thing (no support), so this collapses to one
     /// binary signal — the only distinction symora acts on. Defined for the
-    /// features whose handlers consult live capabilities (call hierarchy, type
-    /// hierarchy, implementation); every other feature returns false.
+    /// features whose handlers consult live capabilities (call hierarchy,
+    /// implementation); every other feature returns false.
     pub fn advertises(&self, feature: super::capabilities::LspFeature) -> bool {
         use super::capabilities::LspFeature;
         let provider = match feature {
             LspFeature::IncomingCalls | LspFeature::OutgoingCalls => &self.call_hierarchy_provider,
-            LspFeature::TypeHierarchy => &self.type_hierarchy_provider,
             LspFeature::FindImplementations => &self.implementation_provider,
             _ => return false,
         };
@@ -895,7 +890,7 @@ mod tests {
             ..Default::default()
         };
         assert!(impl_caps.advertises(LspFeature::FindImplementations));
-        assert!(!impl_caps.advertises(LspFeature::TypeHierarchy));
+        assert!(!impl_caps.advertises(LspFeature::IncomingCalls));
         // A feature with no live-capability gate never reports advertised.
         assert!(!impl_caps.advertises(LspFeature::Hover));
     }

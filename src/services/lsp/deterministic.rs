@@ -141,24 +141,6 @@ impl LspService for DeterministicLspService {
         declined()
     }
 
-    async fn supertypes(
-        &self,
-        _file: &Path,
-        _line: u32,
-        _column: u32,
-    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-        declined()
-    }
-
-    async fn subtypes(
-        &self,
-        _file: &Path,
-        _line: u32,
-        _column: u32,
-    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-        declined()
-    }
-
     async fn code_actions(
         &self,
         _file: &Path,
@@ -257,8 +239,6 @@ mod tests {
             "outgoing_calls",
             s.outgoing_calls(f, 1, 1).await.map(|_| ()),
         );
-        declined_by("supertypes", s.supertypes(f, 1, 1).await.map(|_| ()));
-        declined_by("subtypes", s.subtypes(f, 1, 1).await.map(|_| ()));
         declined_by("code_actions", s.code_actions(f, 1, 1).await.map(|_| ()));
         let action = CodeAction {
             expected_hash: None,

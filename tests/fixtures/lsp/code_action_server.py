@@ -258,7 +258,7 @@ while True:
         send(request_id, workspace_edit() if operation == "textDocument/rename" else {
             "title": "Rename first token", "edit": workspace_edit()
         })
-    elif mode == "method-not-found" and method == "textDocument/prepareTypeHierarchy":
+    elif mode == "method-not-found" and method == "textDocument/implementation":
         # rust-analyzer's answer to a request it does not implement.
         send(message["id"], error={"code": -32601, "message": "unknown request"})
         continue

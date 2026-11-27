@@ -21,7 +21,5 @@ pub mod rename;
 pub mod search;
 pub mod selfcmd;
 pub mod setup;
-pub mod subtypes;
-pub mod supertypes;
 pub mod symbols;
 pub mod typedef;

@@ -225,7 +225,7 @@ impl Anchor {
 
 /// Resolve a command's location argument to its anchor — see
 /// [`resolve_anchor`]. Symbol-level commands — references, callers, callees,
-/// implementations, type hierarchy, impact, context — all route through the
+/// implementations, impact, context — all route through the
 /// same rules, so a position means the same thing on every surface; the
 /// position-exact commands (def, hover, typedef, rename) read the raw
 /// position, and the anchor agrees with them by construction. `options`
@@ -314,15 +314,15 @@ where
 /// Where a list query's answers are found.
 #[derive(Clone, Copy)]
 pub enum Reach {
-    /// Across the project — implementations, subtypes.
+    /// Across the project — implementations.
     Inbound,
-    /// In the declaration itself — callees, supertypes.
+    /// In the declaration itself — callees.
     Outbound,
 }
 
 /// Execute a command that returns `Indexed<Vec<T>>` from an LSP call,
-/// wrapping in `Section`. Used by implementations, callees, supertypes,
-/// subtypes — all cross-file graph queries, so each carries the
+/// wrapping in `Section`. Used by implementations and callees — both
+/// cross-file graph queries, so each carries the
 /// workspace-indexing degradation marker captured when the query ran.
 pub async fn execute_list<T, O, F, Fut, M>(
     app: &App,
@@ -398,7 +398,7 @@ mod tests {
     /// A position in another project is answered from this one: its
     /// references are the ones found from here, and saying so is what keeps
     /// a zero from reading as "nothing uses it". A query read from the
-    /// declaration itself — callees, supertypes — is the file's own answer
+    /// declaration itself — callees — is the file's own answer
     /// wherever it lives, and says nothing.
     #[test]
     fn a_position_outside_the_project_says_whose_answer_it_is() {

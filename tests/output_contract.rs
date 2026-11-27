@@ -29,7 +29,7 @@ use symora::cli::response::{
     TestCoverageOutput, TestOutput, TypeInfoOutput, fit_to_char_budget,
 };
 use symora::models::diagnostic::DiagnosticsStatus;
-use symora::models::lsp::{CallHierarchyItem, IndexingDegradation, TypeHierarchyItem};
+use symora::models::lsp::{CallHierarchyItem, IndexingDegradation};
 use symora::models::symbol::{Language, Location, Symbol, SymbolKind};
 
 fn root() -> PathBuf {
@@ -618,27 +618,14 @@ fn ref_output_minimal() {
     assert_json_snapshot!(out);
 }
 
-#[test]
-fn type_info_output_with_detail() {
-    let item = TypeHierarchyItem {
-        name: "Iterator".to_string(),
-        kind: SymbolKind::Interface,
-        location: Location::point(root().join("src/iter.rs"), 5, 11),
-        detail: Some("trait".to_string()),
-    };
-    let out = TypeInfoOutput::from_item(&item, &root());
-    assert_json_snapshot!(out);
-}
-
-/// `body` appears on the type item only when `context --with-bodies`
-/// admitted it — every other producer leaves it `None` (omitted).
+/// `body` appears on a type item only when `context --with-bodies`
+/// admitted it; otherwise it is omitted.
 #[test]
 fn type_info_output_with_body() {
     let out = TypeInfoOutput {
         name: "Config".to_string(),
         kind: "struct".to_string(),
         location: sample_location(5, 12),
-        detail: None,
         body: Some("struct Config { path: PathBuf }".to_string()),
         body_omitted: None,
     };

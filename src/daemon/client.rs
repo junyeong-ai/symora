@@ -583,8 +583,6 @@ impl DaemonClient {
         hover => methods::HOVER,
         incoming_calls => methods::INCOMING_CALLS,
         outgoing_calls => methods::OUTGOING_CALLS,
-        supertypes => methods::SUPERTYPES,
-        subtypes => methods::SUBTYPES,
         prepare_rename => methods::PREPARE_RENAME,
         code_actions => methods::CODE_ACTIONS,
     }

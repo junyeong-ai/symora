@@ -6,7 +6,7 @@ use crate::infra::lsp::LspFeature;
 use crate::infra::lsp::protocol::{
     CallHierarchyIncomingCall, CallHierarchyOutgoingCall, LspCallHierarchyItem,
 };
-use crate::models::lsp::{CallHierarchyItem, Indexed, TypeHierarchyItem, path_to_uri};
+use crate::models::lsp::{CallHierarchyItem, Indexed, path_to_uri};
 
 use super::converters::*;
 use super::helpers::*;
@@ -151,93 +151,6 @@ async fn call_hierarchy(
                             .collect()
                     ))
                 }
-            }
-        })
-        .await
-}
-
-pub(super) async fn supertypes(
-    service: &DefaultLspService,
-    file: &Path,
-    line: u32,
-    column: u32,
-) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-    type_hierarchy(service, file, line, column, "typeHierarchy/supertypes").await
-}
-
-pub(super) async fn subtypes(
-    service: &DefaultLspService,
-    file: &Path,
-    line: u32,
-    column: u32,
-) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-    type_hierarchy(service, file, line, column, "typeHierarchy/subtypes").await
-}
-
-async fn type_hierarchy(
-    service: &DefaultLspService,
-    file: &Path,
-    line: u32,
-    column: u32,
-    method: &str,
-) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-    let max_file_size = service.max_file_size_bytes();
-    let file = file.to_path_buf();
-    let manager = Arc::clone(&service.manager);
-    let method = method.to_string();
-
-    service
-        .execute_with_retry(&file, |client| {
-            let file = file.clone();
-            let manager = Arc::clone(&manager);
-            let method = method.clone();
-            async move {
-                check_feature_support_live(&manager, &client, &file, LspFeature::TypeHierarchy).await?;
-
-                let content = read_file_validated(&file, max_file_size).await?;
-                let uri = path_to_uri(&file);
-                client.sync_document(&uri, &content).await?;
-                let waited = ensure_indexed(&client, &file, manager.root()).await;
-                let indexing = client.indexing_query(waited);
-
-                let prepare_params = serde_json::json!({
-                    "textDocument": { "uri": uri },
-                    "position": to_lsp_position(line, column, &content, client.position_encoding().await)
-                });
-
-                let items: Option<Vec<serde_json::Value>> = client
-                    .request("textDocument/prepareTypeHierarchy", Some(prepare_params))
-                    .await
-                    .map_err(|err| {
-                        unsupported_if_unimplemented(err, &manager, &file, LspFeature::TypeHierarchy)
-                    })?;
-
-                let items = items.unwrap_or_default();
-                if items.is_empty() {
-                    // Post-flight null-gap: a server that doesn't advertise type
-                    // hierarchy returning empty is unsupported, not "no types".
-                    if !client.feature_advertised(LspFeature::TypeHierarchy).await {
-                        return Err(unsupported_error(&manager, &file, LspFeature::TypeHierarchy));
-                    }
-                    return Ok(indexing.finish(vec![]));
-                }
-
-                let follow_params = serde_json::json!({ "item": items.first().unwrap() });
-
-                let results: Option<Vec<serde_json::Value>> =
-                    client.request(&method, Some(follow_params)).await.map_err(|err| {
-                        unsupported_if_unimplemented(err, &manager, &file, LspFeature::TypeHierarchy)
-                    })?;
-
-                let mut conv = PositionConverter::new(client.position_encoding().await)
-                    .with_content(&file, &content);
-                Ok(indexing.finish(
-                    results
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|item| parse_type_hierarchy_item(&item, &mut conv))
-                        .collect()
-                ))
             }
         })
         .await

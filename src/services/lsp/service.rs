@@ -12,8 +12,7 @@ use crate::infra::lsp::{HealthMonitor, LspClient, LspManager};
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, Definition, FindSymbolsOptions, HoverInfo,
-    Indexed, IndexingDegradation, PrepareRenameResult, RenameResult, TypeHierarchyItem,
-    path_to_uri,
+    Indexed, IndexingDegradation, PrepareRenameResult, RenameResult, path_to_uri,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -220,24 +219,6 @@ impl LspService for DefaultLspService {
         column: u32,
     ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
         hierarchy::outgoing_calls(self, file, line, column).await
-    }
-
-    async fn supertypes(
-        &self,
-        file: &Path,
-        line: u32,
-        column: u32,
-    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-        hierarchy::supertypes(self, file, line, column).await
-    }
-
-    async fn subtypes(
-        &self,
-        file: &Path,
-        line: u32,
-        column: u32,
-    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-        hierarchy::subtypes(self, file, line, column).await
     }
 
     async fn code_actions(

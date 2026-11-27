@@ -156,27 +156,12 @@ pub struct TypeInfoOutput {
     pub kind: String,
     #[serde(flatten)]
     pub location: LocationOutput,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
     /// Complete verbatim source body, set only by `context --with-bodies`
     /// type attachment — absent everywhere else.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_omitted: Option<super::BodyOmission>,
-}
-
-impl TypeInfoOutput {
-    pub fn from_item(item: &crate::models::lsp::TypeHierarchyItem, root: &Path) -> Self {
-        Self {
-            name: item.name.clone(),
-            kind: item.kind.to_string(),
-            location: LocationOutput::from_location(&item.location, root),
-            detail: item.detail.clone(),
-            body: None,
-            body_omitted: None,
-        }
-    }
 }
 
 macro_rules! discloses_indexing {

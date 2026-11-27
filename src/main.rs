@@ -289,8 +289,6 @@ async fn execute_scoped(command: Commands, app: &App) -> anyhow::Result<()> {
         Commands::Implementations(args) => commands::implementations::execute(args, app).await,
         Commands::Callers(args) => commands::callers::execute(args, app).await,
         Commands::Callees(args) => commands::callees::execute(args, app).await,
-        Commands::Supertypes(args) => commands::supertypes::execute(args, app).await,
-        Commands::Subtypes(args) => commands::subtypes::execute(args, app).await,
         Commands::Hover(args) => commands::hover::execute(args, app).await,
 
         // Context

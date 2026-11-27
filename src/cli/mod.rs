@@ -33,7 +33,7 @@ use commands::{
     doctor::DoctorArgs, edit::EditArgs, hover::HoverArgs, impact::ImpactArgs,
     implementations::ImplementationsArgs, map::MapArgs, mcp::McpArgs, refs::RefsArgs,
     rename::RenameArgs, search::SearchArgs, selfcmd::SelfcmdArgs, setup::SetupArgs,
-    subtypes::SubtypesArgs, supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs,
+    symbols::SymbolsArgs, typedef::TypedefArgs,
 };
 
 const LONG_ABOUT: &str = r#"
@@ -158,10 +158,6 @@ pub enum Commands {
     Callers(CallersArgs),
     /// Find callees (outgoing calls)
     Callees(CalleesArgs),
-    /// Find parent types (supertypes)
-    Supertypes(SupertypesArgs),
-    /// Find child types (subtypes)
-    Subtypes(SubtypesArgs),
     /// Get hover information
     Hover(HoverArgs),
 

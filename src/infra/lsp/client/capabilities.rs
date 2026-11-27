@@ -198,9 +198,6 @@ pub(super) fn client_capabilities(language: Language, file_watching: bool) -> Cl
         moniker: Some(serde_json::json!({
             "dynamicRegistration": false
         })),
-        type_hierarchy: Some(serde_json::json!({
-            "dynamicRegistration": false
-        })),
         inline_value: Some(serde_json::json!({
             "dynamicRegistration": false
         })),

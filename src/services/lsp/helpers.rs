@@ -4,17 +4,14 @@ use std::collections::HashSet;
 
 use crate::error::LspError;
 use crate::infra::file_filter::{FileFilter, matches_default_pattern};
-use crate::infra::lsp::protocol::{
-    LspLocation, LspSymbolKind, Position, PositionEncoding, error_codes,
-};
+use crate::infra::lsp::protocol::{LspLocation, Position, PositionEncoding, error_codes};
 use crate::infra::lsp::{
     LspClient, LspFeature, LspManager, SupportLevel, get_alternative_suggestion, get_support_level,
 };
-use crate::models::lsp::{TypeHierarchyItem, uri_to_path};
+use crate::models::lsp::uri_to_path;
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 
-use super::converters::convert_symbol_kind;
-use super::position::{PositionConverter, scalar_to_wire};
+use super::position::scalar_to_wire;
 
 pub(super) async fn read_file_validated(
     file: &Path,
@@ -341,41 +338,6 @@ pub(super) fn parse_location_response(result: &serde_json::Value) -> Option<Vec<
             .ok()
             .map(|l| vec![l])
     }
-}
-
-pub(super) fn parse_type_hierarchy_item(
-    item: &serde_json::Value,
-    conv: &mut PositionConverter,
-) -> Option<TypeHierarchyItem> {
-    let name = item.get("name")?.as_str()?.to_string();
-    // One LSP-taxonomy decoder for the whole crate: the numeric code becomes
-    // a typed `LspSymbolKind`, then `convert_symbol_kind` maps it like every
-    // other LSP path. An out-of-range code degrades to Variable.
-    let uri = item.get("uri")?.as_str()?;
-    let path = uri_to_path(uri);
-    let kind = serde_json::from_value::<LspSymbolKind>(item.get("kind")?.clone())
-        .map(|kind| convert_symbol_kind(kind, &path))
-        .unwrap_or(SymbolKind::Variable);
-    let range = item.get("selectionRange")?;
-    let start = range.get("start")?;
-    let line0 = start.get("line")?.as_u64()? as u32;
-    let wire_char = start.get("character")?.as_u64()? as u32;
-    // Disclose a degraded column like every other inbound reader: a type
-    // hierarchy item is a cross-file result, so an unreadable target line must
-    // surface the wire-offset guess rather than present it as a transcoded
-    // truth (invariant 4).
-    let (column, degraded) = conv.scalar_column_disclosed(&path, line0, wire_char);
-    let detail = item
-        .get("detail")
-        .and_then(|d| d.as_str())
-        .map(String::from);
-
-    Some(TypeHierarchyItem {
-        name,
-        kind,
-        location: Location::point(path, line0 + 1, column).with_degraded_column(degraded),
-        detail,
-    })
 }
 
 pub(super) fn create_file_level_symbol(file: &Path) -> Symbol {

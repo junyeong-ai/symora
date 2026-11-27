@@ -75,9 +75,6 @@ pub struct LspConfig {
     #[serde(default = "defaults::calls_limit")]
     pub calls_limit: usize,
 
-    #[serde(default = "defaults::type_hierarchy_limit")]
-    pub type_hierarchy_limit: usize,
-
     #[serde(default = "defaults::tests_limit")]
     pub tests_limit: usize,
 
@@ -113,7 +110,6 @@ impl Default for LspConfig {
             typedef_limit: defaults::typedef_limit(),
             symbol_limit: defaults::symbol_limit(),
             calls_limit: defaults::calls_limit(),
-            type_hierarchy_limit: defaults::type_hierarchy_limit(),
             tests_limit: defaults::tests_limit(),
             diagnostics_wait_ms: defaults::diagnostics_wait_ms(),
             servers: std::collections::BTreeMap::new(),
@@ -177,9 +173,6 @@ pub(crate) mod defaults {
         100
     }
     pub fn calls_limit() -> usize {
-        100
-    }
-    pub fn type_hierarchy_limit() -> usize {
         100
     }
     pub fn tests_limit() -> usize {

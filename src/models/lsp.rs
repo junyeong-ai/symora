@@ -148,16 +148,6 @@ pub struct CallHierarchyItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TypeHierarchyItem {
-    pub name: String,
-    pub kind: SymbolKind,
-    pub location: Location,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeAction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_hash: Option<u64>,

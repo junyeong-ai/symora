@@ -42,8 +42,7 @@ pub(super) fn ruby_init_options(root: &Path) -> Value {
             "codeLens": true,
             "definition": true,
             "workspaceSymbol": true,
-            "signatureHelp": true,
-            "typeHierarchy": true
+            "signatureHelp": true
         },
         "formatter": "auto",
         "linters": ["rubocop"],
