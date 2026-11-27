@@ -1027,9 +1027,9 @@ fn declaration_of<'a>(declared: &'a [Symbol], row: &SymbolResultOutput) -> Optio
 }
 
 /// The single language to scope an index `search_symbols` query to: `Some` only
-/// for an explicit, recognized `--lang`. An absent or unknown `--lang` leaves
-/// the query unscoped, so `--lang rust` no longer returns indexed symbols from
-/// other languages.
+/// for an explicit, recognized `--lang`, so `--lang rust` returns no indexed
+/// symbols of another language. An absent or unknown `--lang` leaves the query
+/// unscoped.
 fn explicit_index_language(language: Option<&str>) -> Option<Language> {
     let lang = Language::parse_or_default(language?);
     (lang != Language::Unknown).then_some(lang)

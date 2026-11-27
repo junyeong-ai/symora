@@ -2400,11 +2400,10 @@ fn a_deletion_takes_none_of_the_caps_room() {
     );
 }
 
-/// A cap reached in the changed code leaves every changed file disclosed: a
-/// changed Markdown file, which 0.37.1 listed among the unmeasured files, is
-/// listed still, as is the code the cap stopped before reading and the file
-/// it stopped in. Each file is a row or an unmeasured file with its cause in
-/// the hints, never neither.
+/// A cap reached in the changed code leaves every changed file disclosed: the
+/// changed Markdown file is listed among the unmeasured files, and so are the
+/// code the cap stopped before reading and the file it stopped in. Each file
+/// is a row or an unmeasured file with its cause in the hints, never neither.
 #[test]
 fn a_cap_reached_in_code_leaves_every_changed_file_disclosed() {
     let dir = tempfile::tempdir().unwrap();
