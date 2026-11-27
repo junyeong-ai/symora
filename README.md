@@ -512,7 +512,7 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 
 `setup mcp`는 전체 도구를 노출하는 서버를 연결합니다. read-only 서버로 쓰려면 호스트 설정의 인자에 `--profile read-only`를 추가하세요.
 
-`mcp tools`는 `tools/list`가 돌려주는 것과 같은 카탈로그를 출력하므로, 서버를 띄우지 않고도 기계가 읽을 수 있는 기능 목록을 얻을 수 있습니다. 입력 스키마는 모든 도구에, 출력 스키마는 그것을 선언한 도구에 실리며, 출력 스키마는 대응하는 CLI 명령의 JSON에도 그대로 적용됩니다. 무언가를 쓰는 도구는 두 곳에 표시되고(description의 `Mutates`, `annotations.readOnlyHint: false`), 그중 소스를 고치는 도구는 모두 `dry_run`을 지원합니다(인덱스만 다시 만드는 `build_index`는 제외). MCP 2026-07-28 사양의 요청별 메타데이터 흐름과 그 이전 사양의 initialize 흐름을 모두 지원합니다. HTTP는 loopback 주소에만 바인딩하며 원격 연결은 인증 프록시를 통해 구성하세요.
+`mcp tools`는 `tools/list`가 돌려주는 것과 같은 카탈로그를 출력하므로, 서버를 띄우지 않고도 기계가 읽을 수 있는 기능 목록을 얻을 수 있습니다. 입력 스키마는 모든 도구에, 출력 스키마는 그것을 선언한 도구에 실리며, 출력 스키마는 대응하는 CLI 명령의 JSON에도 그대로 적용됩니다. 소스를 고치거나 요청받아 인덱스를 빌드하는 도구는 두 곳에 표시되고(description의 `Mutates`, `annotations.readOnlyHint: false`), 그중 소스를 고치는 도구는 모두 `dry_run`을 지원합니다(인덱스만 다시 만드는 `build_index`는 제외). `search_symbols`는 read-only 도구지만 git 작업 트리에서는 CLI처럼 첫 검색이 없는 인덱스를 빌드하므로, read-only 서버도 `.symora/`를 쓸 수 있습니다. MCP 2026-07-28 사양의 요청별 메타데이터 흐름과 그 이전 사양의 initialize 흐름을 모두 지원합니다. HTTP는 loopback 주소에만 바인딩하며 원격 연결은 인증 프록시를 통해 구성하세요.
 
 ---
 
