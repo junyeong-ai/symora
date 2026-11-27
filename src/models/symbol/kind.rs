@@ -81,7 +81,7 @@ symbol_kinds! {
         Operator => "operator",
         TypeParameter => "type_parameter",
         // A block that adds members or conformances to a type declared
-        // elsewhere: a Rust `impl`, a Swift `extension`. LSP has no kind for
+        // elsewhere: a Rust `impl`, a Swift or Dart `extension`. LSP has no kind for
         // it, so rust-analyzer sends one as an object and sourcekit-lsp as a
         // namespace (`convert_symbol_kind`), though it declares neither a
         // value nor a namespace.
@@ -90,7 +90,7 @@ symbol_kinds! {
     aliases {
         // rust-analyzer reports traits as Interface.
         "trait" => Interface,
-        // What Swift calls the block.
+        // What Swift and Dart call the block.
         "extension" => Impl,
         "enummember" => EnumMember,
         "typeparameter" => TypeParameter,

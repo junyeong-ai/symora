@@ -299,7 +299,7 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 
 소스 편집은 프로젝트 내 쓰기를 직렬화하고, 읽은 내용이 달라졌으면 적용을 거부합니다. language server가 열지 않은 파일에 대해서는, 서버가 현재 내용을 기준으로 편집을 계산했는지 Symora가 검증할 수 없습니다. 파일 교체는 원자적이지만 여러 파일 전체가 하나의 트랜잭션은 아닙니다. 외부 편집기와의 동시 변경을 피하고 오류에 이미 적용되었다고 나온 파일을 검토하세요.
 
-> **대상 지정은 유연하지만 안전합니다.** `--symbol`은 단순 이름, `Class/method` 꼴의 끝부분 경로, `*/method` 와일드카드, 또는 정확한 `name_path`로 매칭되고, 끝에 붙인 `[kind]`는 같은 이름의 선언 가운데 그 종류만 고릅니다(생성자가 아닌 클래스를 고르는 `Svc[class]`). 다른 곳에 선언된 타입에 멤버나 준수를 덧붙이는 블록(Rust `impl`, Swift `extension`)은 `impl` 종류이고 그 타입의 이름을 가지며, 머리(`impl Display for Circle`)가 시그니처입니다. 그래서 그 멤버는 `Circle/fmt`이고, `Circle[impl]`은 타입이 아닌 블록들을 고릅니다. 전체가 대괄호인 세그먼트는 계산된 멤버의 이름처럼 이름 자체입니다(`Cache/[key]`). 이름이 모호하면 `edit`은 추측하지 않고 거부하며, 후보마다 선언된 위치를 알려 줍니다.
+> **대상 지정은 유연하지만 안전합니다.** `--symbol`은 단순 이름, `Class/method` 꼴의 끝부분 경로, `*/method` 와일드카드, 또는 정확한 `name_path`로 매칭되고, 끝에 붙인 `[kind]`는 같은 이름의 선언 가운데 그 종류만 고릅니다(생성자가 아닌 클래스를 고르는 `Svc[class]`). 다른 곳에 선언된 타입에 멤버나 준수를 덧붙이는 블록(Rust `impl`, Swift·Dart `extension`)은 `impl` 종류이고 그 타입의 이름(Dart extension은 자신의 이름)을 가지며, 머리(`impl Display for Circle`)가 시그니처입니다. 그래서 그 멤버는 `Circle/fmt`이고, `Circle[impl]`은 타입이 아닌 블록들을 고릅니다. 전체가 대괄호인 세그먼트는 계산된 멤버의 이름처럼 이름 자체입니다(`Cache/[key]`). 이름이 모호하면 `edit`은 추측하지 않고 거부하며, 후보마다 선언된 위치를 알려 줍니다.
 > ```json
 > { "error": { "code": "invalid_argument",
 >   "message": "Symbol path 'reserve' matches 2 symbols in src/services/inventory.ts",

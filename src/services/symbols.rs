@@ -5215,11 +5215,12 @@ fn node_kind(node: Node) -> SymbolKind {
         | "companion_object"
         | "object_definition"
         | "package_object"
-        | "extension_declaration"
         | "extension_type_declaration"
         | "class" => SymbolKind::Class,
 
-        "impl_item" => SymbolKind::Impl,
+        // A Dart extension adds members to the type it is `on` under a name
+        // of its own, where an extension type declares a type.
+        "impl_item" | "extension_declaration" => SymbolKind::Impl,
 
         "struct_item" | "struct_specifier" | "struct_type" | "struct_declaration"
         | "union_item" | "union_specifier" => SymbolKind::Struct,
@@ -7646,7 +7647,7 @@ external final int topExternal, otherExternal;
                 "field:Blank/_",
                 "field:Blank/kept",
                 "method:Blank/run",
-                "class:Ext",
+                "impl:Ext",
                 "field:Ext/limit",
                 "method:Ext/ext",
                 "class:Meters",
@@ -11753,7 +11754,7 @@ void topLevel() {}
             ("C/==", SymbolKind::Method),
             ("M", SymbolKind::Interface),
             ("M/mixed", SymbolKind::Method),
-            ("X", SymbolKind::Class),
+            ("X", SymbolKind::Impl),
             ("X/extended", SymbolKind::Method),
             ("typed", SymbolKind::Function),
             ("untyped", SymbolKind::Function),
