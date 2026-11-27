@@ -748,9 +748,10 @@ pub(crate) mod tests {
         const START_BUDGET_SECS: u64 = 10;
 
         /// The budget of a test that waits a hanging start or an unanswered
-        /// request out in full: the fake records itself and answers
-        /// `initialize` within milliseconds, so this leaves it ample time
-        /// while the wait costs the suite little.
+        /// request out in full, short so the wait costs the suite little. An
+        /// idle machine starts the fake within milliseconds; a loaded one
+        /// can take longer than this, so such a test runs through
+        /// [`waited_out`].
         const WAITED_OUT_SECS: u64 = 3;
 
         const FAKE_SERVER: &str = r#"#!/bin/sh
@@ -768,7 +769,7 @@ case "$2" in
   hang) exec sleep 600 ;;
 esac
 IFS= read -r _
-sleep "$3"
+[ "$3" = 0 ] || sleep "$3"
 while [ -e "${1%/*}/hold" ]; do sleep 0.05; done
 [ "$2" = deaf ] && exec 0<&-
 printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
@@ -809,11 +810,6 @@ exec sleep 600
             ) -> Arc<LspManager> {
                 let budget = START_BUDGET_SECS + u64::from(delay_secs);
                 self.budgeted(behavior, delay_secs, file_watch, budget)
-            }
-
-            /// A pool like [`Self::manager`]'s under [`WAITED_OUT_SECS`].
-            fn waited_out(&self, behavior: &str) -> Arc<LspManager> {
-                self.budgeted(behavior, 0, FileWatch::On, WAITED_OUT_SECS)
             }
 
             fn budgeted(
@@ -923,6 +919,12 @@ exec sleep 600
                 !Self::stat(pid).is_empty()
             }
 
+            /// Whether a server this fake was asked to run got far enough to
+            /// record itself.
+            pub(crate) fn started(&self) -> bool {
+                !self.pids().is_empty()
+            }
+
             /// Whether a server this fake started is still running.
             pub(crate) fn serving(&self) -> bool {
                 self.pids().into_iter().any(Self::alive)
@@ -955,6 +957,22 @@ exec sleep 600
                     );
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
+            }
+        }
+
+        /// Runs `scenario` under [`WAITED_OUT_SECS`] and, when it returns
+        /// `false` because its fake had not [started](FakeServer::started) by
+        /// the time its start ended, once more under [`START_BUDGET_SECS`].
+        /// The scenario judges that from the fake, never from what the pool
+        /// answered, so a pool that gives up before its server starts fails
+        /// under either budget.
+        pub(crate) async fn waited_out(scenario: impl AsyncFn(u64) -> bool) {
+            if !scenario(WAITED_OUT_SECS).await {
+                assert!(
+                    scenario(START_BUDGET_SECS).await,
+                    "the start ended before its server recorded itself, \
+                     even under the full start budget"
+                );
             }
         }
 
@@ -1097,31 +1115,39 @@ exec sleep 600
 
         #[tokio::test]
         async fn request_timeout_and_cancellation_release_and_refresh_use() {
-            let fake = FakeServer::new();
-            let manager = fake.waited_out("serve");
-            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
-            let stamp = client.usage().last_used;
-            let request = client.request::<serde_json::Value>("textDocument/hover", None);
-            let mut request = Box::pin(request);
-            tokio::select! {
-                _ = &mut request => panic!("request answered"),
-                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
-            }
-            assert!(client.usage().in_flight);
-            drop(request);
-            assert!(!client.usage().in_flight);
-            assert!(client.usage().last_used > stamp);
-            assert_eq!(manager.cleanup_idle(Duration::from_millis(10)).await, 0);
-            let stamp = client.usage().last_used;
-            assert!(matches!(
-                bounded(client.request::<serde_json::Value>("textDocument/hover", None)).await,
-                Err(LspError::Timeout(_))
-            ));
-            assert!(!client.usage().in_flight);
-            assert!(client.usage().last_used > stamp);
-            assert_eq!(manager.cleanup_idle(Duration::from_millis(10)).await, 0);
-            assert_eq!(bounded(manager.cleanup_idle(Duration::ZERO)).await, 1);
-            fake.assert_all_gone().await;
+            waited_out(async |budget| {
+                let fake = FakeServer::new();
+                let manager = fake.budgeted("serve", 0, FileWatch::On, budget);
+                let client = bounded(manager.get_client(Language::Go)).await;
+                if !fake.started() {
+                    return false;
+                }
+                let client = client.unwrap();
+                let stamp = client.usage().last_used;
+                let request = client.request::<serde_json::Value>("textDocument/hover", None);
+                let mut request = Box::pin(request);
+                tokio::select! {
+                    _ = &mut request => panic!("request answered"),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+                assert!(client.usage().in_flight);
+                drop(request);
+                assert!(!client.usage().in_flight);
+                assert!(client.usage().last_used > stamp);
+                assert_eq!(manager.cleanup_idle(Duration::from_millis(10)).await, 0);
+                let stamp = client.usage().last_used;
+                assert!(matches!(
+                    bounded(client.request::<serde_json::Value>("textDocument/hover", None)).await,
+                    Err(LspError::Timeout(_))
+                ));
+                assert!(!client.usage().in_flight);
+                assert!(client.usage().last_used > stamp);
+                assert_eq!(manager.cleanup_idle(Duration::from_millis(10)).await, 0);
+                assert_eq!(bounded(manager.cleanup_idle(Duration::ZERO)).await, 1);
+                fake.assert_all_gone().await;
+                true
+            })
+            .await;
         }
 
         #[tokio::test]
@@ -1165,33 +1191,40 @@ exec sleep 600
 
         #[tokio::test]
         async fn an_abandoned_start_neither_leaks_nor_blocks_the_next_caller() {
-            let fake = FakeServer::new();
-            let manager = fake.waited_out("hang");
-            // Abandoned once the server has run, so the leak check below is
-            // about a process that existed rather than one the start budget
-            // killed before it could record itself.
-            let finished = bounded(async {
-                let start = manager.get_client(Language::Go);
-                tokio::pin!(start);
-                loop {
-                    tokio::select! {
-                        result = &mut start => break Some(result),
-                        () = tokio::time::sleep(Duration::from_millis(20)) => {
-                            if !fake.pids().is_empty() {
-                                break None;
+            waited_out(async |budget| {
+                let fake = FakeServer::new();
+                let manager = fake.budgeted("hang", 0, FileWatch::On, budget);
+                // Abandoned once the server has run, so the leak check below is
+                // about a process that existed rather than one the start budget
+                // killed before it could record itself.
+                let finished = bounded(async {
+                    let start = manager.get_client(Language::Go);
+                    tokio::pin!(start);
+                    loop {
+                        tokio::select! {
+                            result = &mut start => break Some(result),
+                            () = tokio::time::sleep(Duration::from_millis(20)) => {
+                                if fake.started() {
+                                    break None;
+                                }
                             }
                         }
                     }
+                })
+                .await;
+                if !fake.started() {
+                    return false;
                 }
+                assert!(
+                    finished.is_none(),
+                    "a hanging start finished before it was abandoned"
+                );
+
+                assert!(bounded(manager.get_client(Language::Go)).await.is_err());
+                fake.assert_all_gone().await;
+                true
             })
             .await;
-            assert!(
-                finished.is_none(),
-                "a hanging start finished before it was abandoned"
-            );
-
-            assert!(bounded(manager.get_client(Language::Go)).await.is_err());
-            fake.assert_all_gone().await;
         }
 
         #[tokio::test]

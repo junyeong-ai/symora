@@ -418,61 +418,66 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_stops_unused_servers_in_a_leased_project() {
-        use crate::infra::lsp::manager::tests::server_lifetime::FakeServer;
+        use crate::infra::lsp::manager::tests::server_lifetime::{FakeServer, waited_out};
         use crate::infra::lsp::watch::FileWatch;
         use crate::services::lsp::{DefaultLspService, LspService};
 
-        let fake = FakeServer::new();
-        let root = fake.dir.path();
-        let file = root.join("main.go");
-        std::fs::write(&file, "package main\n").unwrap();
-        let mut config = crate::models::config::SymoraConfig::default();
-        config.lsp.timeout_secs = 1;
-        config
-            .lsp
-            .servers
-            .insert("go".to_string(), fake.server("serve", 0));
-        let mut ctx = ProjectContext::new(root);
-        ctx.lsp = Arc::new(DefaultLspService::new(
-            root,
-            Arc::new(crate::config::LspRuntimeConfig::from(&config)),
-            FileWatch::Off,
-        ));
-        let ctx = Arc::new(ctx);
-        let server = DaemonServer::new(DaemonRuntimeConfig {
-            socket_path: root.join("daemon.sock"),
-            pid_path: root.join("daemon.pid"),
-            lock_path: root.join("daemon.lock"),
-            bind_lock_path: root.join("daemon.bind.lock"),
-            idle_timeout: Duration::ZERO,
-            max_concurrent: 1,
-        });
-        server
-            .projects
-            .write()
-            .await
-            .insert(root.to_path_buf(), Arc::clone(&ctx));
-        let lease = get_context(&server.projects, root.to_str().unwrap())
-            .await
-            .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_secs(15), ctx.lsp.hover(&file, 1, 1))
+        waited_out(async |budget| {
+            let fake = FakeServer::new();
+            let root = fake.dir.path();
+            let file = root.join("main.go");
+            std::fs::write(&file, "package main\n").unwrap();
+            let mut config = crate::models::config::SymoraConfig::default();
+            config.lsp.timeout_secs = budget;
+            config
+                .lsp
+                .servers
+                .insert("go".to_string(), fake.server("serve", 0));
+            let mut ctx = ProjectContext::new(root);
+            ctx.lsp = Arc::new(DefaultLspService::new(
+                root,
+                Arc::new(crate::config::LspRuntimeConfig::from(&config)),
+                FileWatch::Off,
+            ));
+            let ctx = Arc::new(ctx);
+            let server = DaemonServer::new(DaemonRuntimeConfig {
+                socket_path: root.join("daemon.sock"),
+                pid_path: root.join("daemon.pid"),
+                lock_path: root.join("daemon.lock"),
+                bind_lock_path: root.join("daemon.bind.lock"),
+                idle_timeout: Duration::ZERO,
+                max_concurrent: 1,
+            });
+            server
+                .projects
+                .write()
                 .await
-                .unwrap()
-                .is_err()
-        );
-        assert!(
-            fake.serving(),
-            "the hover started no server for cleanup to stop"
-        );
-        tokio::time::timeout(Duration::from_secs(15), server.cleanup_idle_servers())
-            .await
-            .unwrap();
-        assert!(Arc::ptr_eq(
-            server.projects.read().await.get(root).unwrap(),
-            &lease
-        ));
-        fake.assert_all_gone().await;
+                .insert(root.to_path_buf(), Arc::clone(&ctx));
+            let lease = get_context(&server.projects, root.to_str().unwrap())
+                .await
+                .unwrap();
+            let hover = tokio::time::timeout(Duration::from_secs(30), ctx.lsp.hover(&file, 1, 1))
+                .await
+                .unwrap();
+            if !fake.started() {
+                return false;
+            }
+            assert!(hover.is_err());
+            assert!(
+                fake.serving(),
+                "the hover started no server for cleanup to stop"
+            );
+            tokio::time::timeout(Duration::from_secs(30), server.cleanup_idle_servers())
+                .await
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                server.projects.read().await.get(root).unwrap(),
+                &lease
+            ));
+            fake.assert_all_gone().await;
+            true
+        })
+        .await;
     }
 
     #[tokio::test]
