@@ -10,7 +10,7 @@ use crate::cli::commands::common::parse_symbol_kind;
 use crate::cli::response::disclosure::{CoverageReason, LowerBound};
 use crate::cli::response::{ReferenceCount, Section, SymbolOutput, SymbolSource};
 use crate::cli::{FileSymbols, OutputError, resolve_project_file};
-use crate::constants::defaults::SYMBOL_REFS_CONCURRENCY;
+use crate::constants::defaults::REFERENCE_COUNT_CONCURRENCY;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Symbol, SymbolFilter, SymbolKind};
 
@@ -193,7 +193,7 @@ async fn count_references(
                 .await;
             (key, ReferenceCount::of(&outcome, app.test_scope()))
         })
-        .buffered(SYMBOL_REFS_CONCURRENCY)
+        .buffered(REFERENCE_COUNT_CONCURRENCY)
         .collect()
         .await
 }

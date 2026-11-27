@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Args;
+use futures::StreamExt;
 use serde::Serialize;
 
 use crate::app::App;
@@ -12,6 +13,7 @@ use crate::cli::response::{
 };
 use crate::cli::utils::{members_at_deletion, members_at_line, shell_arg};
 use crate::cli::{FileSymbols, SymbolBackend, declared_in};
+use crate::constants::defaults::REFERENCE_COUNT_CONCURRENCY;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
 use crate::services::symbols::{SymbolExtractor, TypeHeaders};
@@ -366,21 +368,50 @@ fn symbol_change_type(
 struct HunkAnalysis {
     changes: Vec<ChangedSymbolImpact>,
     unmeasured: Vec<PathBuf>,
+    /// Work was left undone because the cap was reached.
+    capped: bool,
+}
+
+/// A changed symbol's row, in the order it is reported: settled where the
+/// diff alone answers it (a deletion), or a symbol of the current tree whose
+/// references are still to be asked of the language server.
+enum Row {
+    Settled(ChangedSymbolImpact),
+    Live {
+        /// The file's declarations it was read from, in [`Plan::answers`].
+        answer: usize,
+        file: PathBuf,
+        symbol: Symbol,
+        change_type: ChangeType,
+    },
+}
+
+/// The rows a diff's hunks were assigned to, before any reference is asked.
+struct Plan {
+    rows: Vec<Row>,
+    answers: Vec<FileSymbols>,
+    unmeasured: Vec<PathBuf>,
     max_symbols: usize,
     /// Work was left undone because the cap was reached.
     capped: bool,
 }
 
-impl HunkAnalysis {
+impl Plan {
     /// Whether another changed symbol may be reported. When none may, the
     /// analysis is recorded as having stopped short.
     fn has_room(&mut self) -> bool {
-        let full = self.max_symbols > 0 && self.changes.len() >= self.max_symbols;
+        let full = self.max_symbols > 0 && self.rows.len() >= self.max_symbols;
         self.capped |= full;
         !full
     }
 }
 
+/// The diff's changed symbols, their live rows measured with a bounded
+/// number of reference queries in flight, as `symbols --refs` measures a
+/// file's: asked one after another, each row waits on every query before
+/// it, and a server that answers in parallel spends the shared
+/// `lsp.timeout_secs` budget on one query at a time. Rows keep the order
+/// they were planned in.
 async fn analyze_hunks(
     app: &App,
     hunks: &[DiffHunk],
@@ -388,18 +419,64 @@ async fn analyze_hunks(
     include_callers: bool,
     max_symbols: usize,
 ) -> HunkAnalysis {
+    let Plan {
+        rows,
+        answers,
+        unmeasured,
+        capped,
+        ..
+    } = plan_hunks(app, hunks, preimage_ref, max_symbols).await;
+    let answers = &answers;
+    let changes = futures::stream::iter(rows)
+        .map(|row| async move {
+            match row {
+                Row::Settled(impact) => impact,
+                Row::Live {
+                    answer,
+                    file,
+                    symbol,
+                    change_type,
+                } => {
+                    analyze_symbol_impact(
+                        app,
+                        &answers[answer],
+                        &file,
+                        &symbol,
+                        change_type,
+                        include_callers,
+                    )
+                    .await
+                }
+            }
+        })
+        .buffered(REFERENCE_COUNT_CONCURRENCY)
+        .collect()
+        .await;
+    HunkAnalysis {
+        changes,
+        unmeasured,
+        capped,
+    }
+}
+
+/// Each changed symbol's row, in file order, bounded by `--max-symbols`.
+async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbols: usize) -> Plan {
     let root = app.output.root();
     let mut file_hunks: BTreeMap<&PathBuf, Vec<&DiffHunk>> = BTreeMap::new();
     for hunk in hunks {
         file_hunks.entry(&hunk.file).or_default().push(hunk);
     }
 
-    let mut analysis = HunkAnalysis {
-        changes: Vec::new(),
+    let mut analysis = Plan {
+        rows: Vec::new(),
+        answers: Vec::new(),
         unmeasured: Vec::new(),
         max_symbols,
         capped: false,
     };
+    // Kept apart from `analysis` until every file is read: a file's
+    // declarations are borrowed from here while its rows join the plan.
+    let mut answers: Vec<FileSymbols> = Vec::new();
     for (file, hunks) in file_hunks {
         if !analysis.has_room() {
             break;
@@ -418,17 +495,24 @@ async fn analyze_hunks(
             None
         };
         let served = if file_exists {
-            Some(declared_in(app, file, FindSymbolsOptions::default()).await)
+            declared_in(app, file, FindSymbolsOptions::default())
+                .await
+                .ok()
+                .map(|read| {
+                    answers.push(read);
+                    answers.len() - 1
+                })
         } else {
             None
         };
-        let declarations: Option<(&FileSymbols, &[Symbol])> = match &served {
-            Some(Ok(read)) if read.backend == SymbolBackend::Ast => {
-                on_disk.as_ref().map(|now| (read, now.members.as_slice()))
+        let declarations: Option<(usize, &[Symbol])> = served.and_then(|answer| {
+            let read = &answers[answer];
+            if read.backend == SymbolBackend::Ast {
+                on_disk.as_ref().map(|now| (answer, now.members.as_slice()))
+            } else {
+                Some((answer, read.symbols.as_slice()))
             }
-            Some(Ok(read)) => Some((read, read.symbols.as_slice())),
-            _ => None,
-        };
+        });
         let current_symbols = declarations.map(|(_, symbols)| symbols);
         let no_headers = TypeHeaders::default();
         let headers_now = on_disk.as_ref().map_or(&no_headers, |now| &now.headers);
@@ -453,11 +537,11 @@ async fn analyze_hunks(
                     if !analysis.has_room() {
                         break;
                     }
-                    analysis.changes.push(unresolved_deletion(
+                    analysis.rows.push(Row::Settled(unresolved_deletion(
                         DeletionResolution::PreimageUnavailable,
                         hunk,
                         root,
-                    ));
+                    )));
                 }
             }
             Some(Preimage::Parsed(before)) => {
@@ -481,8 +565,8 @@ async fn analyze_hunks(
                         }
                         deleted.push(identity(symbol));
                         analysis
-                            .changes
-                            .push(deleted_row(symbol, &hunk.old_file, root));
+                            .rows
+                            .push(Row::Settled(deleted_row(symbol, &hunk.old_file, root)));
                     }
                     let enclosing: Vec<&Symbol> = current_symbols
                         .map(|current| {
@@ -490,11 +574,11 @@ async fn analyze_hunks(
                         })
                         .unwrap_or_default();
                     if enclosing.is_empty() && declared.is_empty() {
-                        analysis.changes.push(unresolved_deletion(
+                        analysis.rows.push(Row::Settled(unresolved_deletion(
                             DeletionResolution::NoSymbolInRange,
                             hunk,
                             root,
-                        ));
+                        )));
                     }
                     modified_by_removal.extend(enclosing);
                 }
@@ -561,9 +645,11 @@ async fn analyze_hunks(
                                 if !analysis.has_room() {
                                     break;
                                 }
-                                analysis
-                                    .changes
-                                    .push(deleted_row(symbol, &hunk.old_file, root));
+                                analysis.rows.push(Row::Settled(deleted_row(
+                                    symbol,
+                                    &hunk.old_file,
+                                    root,
+                                )));
                             }
                         }
                     }
@@ -588,16 +674,12 @@ async fn analyze_hunks(
                         if !analysis.has_room() {
                             break;
                         }
-                        let impact = analyze_symbol_impact(
-                            app,
+                        analysis.rows.push(Row::Live {
                             answer,
-                            file,
-                            sym,
-                            ChangeType::Modified,
-                            include_callers,
-                        )
-                        .await;
-                        analysis.changes.push(impact);
+                            file: file.clone(),
+                            symbol: sym.clone(),
+                            change_type: ChangeType::Modified,
+                        });
                     }
                 }
             }
@@ -649,15 +731,17 @@ async fn analyze_hunks(
                     hunk.line_count,
                 );
 
-                let impact =
-                    analyze_symbol_impact(app, answer, file, sym, change_type, include_callers)
-                        .await;
-
-                analysis.changes.push(impact);
+                analysis.rows.push(Row::Live {
+                    answer,
+                    file: file.clone(),
+                    symbol: sym.clone(),
+                    change_type,
+                });
             }
         }
     }
 
+    analysis.answers = answers;
     analysis
 }
 
