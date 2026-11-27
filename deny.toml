@@ -3,8 +3,10 @@ feature-depth = 1
 
 [advisories]
 yanked = "deny"
-# Report unmaintained direct dependencies; inspect transitive notices upstream.
-unmaintained = "workspace"
+# Unmaintained crates are denied wherever they sit in the tree: a transitive
+# one ships in the binary as surely as a direct one, and scoping the check to
+# direct dependencies is what kept chrono (RUSTSEC-2026-0543) unreported.
+unmaintained = "all"
 
 [licenses]
 confidence-threshold = 0.95
