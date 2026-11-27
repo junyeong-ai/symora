@@ -18,10 +18,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           absent where none declares a workspace), and the entrypoints its \
                           manifests declare (Cargo targets, Python scripts and __main__.py, \
                           package.json bin and main, Go main packages), each with a kind of bin, \
-                          lib, script or main_module and its name — never a file merely named \
-                          like one. hints name a manifest that did not parse and a declared \
-                          entrypoint naming no file. Cheap orientation step before deeper \
-                          queries.",
+                          lib, script or main_module and its name where it has one — never a \
+                          file merely named like one. hints name a manifest that did not parse \
+                          and a declared entrypoint naming no file. Cheap orientation step \
+                          before deeper queries.",
             schema_object(&[], &[]),
         ),
         ToolDefinition::read_only(
