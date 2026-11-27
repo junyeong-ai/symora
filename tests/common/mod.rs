@@ -32,6 +32,8 @@ const QUALIFIERS: &[&str] = &[
     "body_omitted",
     "refs_status",
     "callers_status",
+    "refs_status_counts",
+    "callers_status_counts",
     "hints",
     "next_commands",
 ];

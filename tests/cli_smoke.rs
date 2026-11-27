@@ -2366,9 +2366,128 @@ fn a_cap_reached_on_removed_declarations_says_its_counts_are_a_lower_bound() {
     );
     assert_eq!(whole["incomplete"].as_bool(), None, "{whole}");
     // `--deterministic` counts no reference, so there is no total to state,
-    // only the reason none was taken.
+    // only the reason none was taken, for each row it was not.
     assert!(whole.get("total_references").is_none(), "{whole}");
-    assert_eq!(whole["refs_status"], "not_consulted", "{whole}");
+    assert_eq!(
+        whole["refs_status_counts"],
+        serde_json::json!({"not_consulted": 1}),
+        "{whole}"
+    );
+}
+
+/// A repository whose Python files `tests/fixtures/lsp/reference_server.py`
+/// serves, logging the methods it is asked to `log`, with `base` committed
+/// and `head` written over it in the working tree. `None` where python3 does
+/// not run, which the fake needs.
+#[cfg(unix)]
+fn reference_served_repo(
+    files: &[(&str, &str, &str)],
+    server_args: &[&str],
+) -> Option<tempfile::TempDir> {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("skipped: the reference fixture requires python3");
+        return None;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join(".git/info/exclude"), ".symora/\n").unwrap();
+    for (path, base, _) in files {
+        std::fs::write(repo.join(path), base).unwrap();
+        git(repo, &["add", "--", path]);
+    }
+    git(repo, &["commit", "-qm", "base"]);
+    for (path, _, head) in files {
+        std::fs::write(repo.join(path), head).unwrap();
+    }
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/reference_server.py");
+    let mut args = vec![
+        server.to_str().unwrap().to_string(),
+        repo.join(".symora/log").to_str().unwrap().to_string(),
+    ];
+    args.extend(server_args.iter().map(|arg| arg.to_string()));
+    let config = serde_json::json!({"lsp": {"servers": {
+        "python": {"command": "python3", "args": args},
+        "go": {"command": "/nonexistent/gopls"},
+    }}});
+    std::fs::create_dir(repo.join(".symora")).unwrap();
+    std::fs::write(
+        repo.join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    Some(dir)
+}
+
+/// `diff-impact` run in process, so the fake its configuration names is
+/// the server that answers.
+#[cfg(unix)]
+fn diff_impact_in_process(repo: &std::path::Path, args: &[&str]) -> serde_json::Value {
+    let out = symora()
+        .arg("diff-impact")
+        .args(args)
+        .current_dir(repo)
+        .env("SYMORA_NO_DAEMON", "1")
+        .output()
+        .expect("symora binary should exist");
+    assert!(
+        out.status.success(),
+        "{args:?} failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    common::parse_response(&out.stdout).expect("JSON on stdout")
+}
+
+/// The summary counts the rows of each reference status, so a row no server
+/// could count, here a Go file whose server is not installed, is one row
+/// among the counted ones rather than the status of the whole diff.
+#[cfg(unix)]
+#[test]
+fn the_summary_counts_the_rows_of_each_reference_status() {
+    let Some(dir) = reference_served_repo(
+        &[
+            (
+                "a.py",
+                "def one():\n    return 1\n\n\ndef two():\n    return one()\n",
+                "def one():\n    return 2\n\n\ndef two():\n    return one() + 1\n",
+            ),
+            (
+                "b.go",
+                "package b\n\nfunc Three() int { return 3 }\n",
+                "package b\n\nfunc Three() int { return 4 }\n",
+            ),
+        ],
+        &[],
+    ) else {
+        return;
+    };
+    let page = diff_impact_in_process(dir.path(), &[]);
+    let rows: Vec<(&str, Option<&str>)> = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|row| (row["name"].as_str().unwrap(), row["refs_status"].as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("one", None),
+            ("two", None),
+            ("Three", Some("server_not_installed"))
+        ],
+        "{page}"
+    );
+    assert_eq!(
+        page["refs_status_counts"],
+        serde_json::json!({"server_not_installed": 1}),
+        "{page}"
+    );
+    assert_eq!(page["total_references"], 1, "{page}");
+    assert!(page.get("refs_status").is_none(), "{page}");
 }
 
 /// A diff's changed symbols are read through the same reader every other

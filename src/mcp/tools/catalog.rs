@@ -641,7 +641,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ])),
         ToolDefinition::read_only(
             "get_diff_impact",
-            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals; test references are not execution coverage. With callers, a row's callers is a list with count, showing and truncated, absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind.",
+            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals; refs_status_counts and callers_status_counts count the rows of each status; test references are not execution coverage. With callers, a row's callers is a list with count, showing and truncated, absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind.",
             schema_object(&[
                 ("revision", "string", "One base revision, not a revision range; default HEAD"),
                 ("staged", "boolean", "Compare staged changes instead of the working tree"),
@@ -666,9 +666,17 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 "Sum of the measured rows' refs; absent when no row was measured",
             ),
             (
-                "refs_status",
-                "string",
-                "The strongest row refs_status, making total_references a lower bound",
+                "refs_status_counts",
+                "object",
+                "Rows per refs_status, { status: rows }, over the rows whose count is a lower \
+                 bound or was not taken, which make total_references and coverage lower \
+                 bounds; absent when every count is authoritative",
+            ),
+            (
+                "callers_status_counts",
+                "object",
+                "Rows per callers_status, { status: rows }; absent when every caller list \
+                 asked for is authoritative, and without callers",
             ),
             (
                 "coverage",

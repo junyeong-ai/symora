@@ -55,12 +55,19 @@ pub struct DiffImpactOutput {
     /// nothing, and a deleted symbol has no live references to count.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_references: Option<usize>,
-    /// The strongest `refs_status` among the changes, which makes
-    /// `total_references` a lower bound: a reason a row's count was not taken,
-    /// the failures first, else "indexing_degraded" where a count was taken
-    /// under degraded analysis. Omitted when every count is authoritative.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub refs_status: Option<&'static str>,
+    /// How many added and modified rows carry each `refs_status`: rows whose
+    /// count is a lower bound ("indexing_degraded") or was not taken (the
+    /// other reasons), which make `total_references` and `coverage` lower
+    /// bounds. Every status is counted, so one row a server cannot answer
+    /// does not stand for the rows it did. Omitted when every count is
+    /// authoritative.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub refs_status_counts: BTreeMap<&'static str, usize>,
+    /// How many rows carry each `callers_status`, as `refs_status_counts`
+    /// counts reference statuses. Omitted when every caller list asked for
+    /// is the server's authoritative answer, and without `--callers`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub callers_status_counts: BTreeMap<&'static str, usize>,
     pub coverage: DiffCoverage,
     /// Files whose changes could not be measured in full: nothing could read
     /// the symbols of their changed lines (removed lines are read by the
@@ -288,17 +295,8 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     // references to test.
     let measurable = changes.iter().filter(|c| c.refs.is_some()).count();
     let total_refs = (measurable > 0).then(|| changes.iter().filter_map(|c| c.refs).sum());
-    let refs_status = [
-        CoverageReason::Unavailable,
-        CoverageReason::TimedOut,
-        CoverageReason::ServerNotInstalled,
-        CoverageReason::NotConsulted,
-        CoverageReason::Unsupported,
-    ]
-    .map(CoverageReason::as_str)
-    .into_iter()
-    .chain([INDEXING_DEGRADED])
-    .find(|status| changes.iter().any(|c| c.refs_status == Some(*status)));
+    let refs_status_counts = status_counts(changes.iter().map(|c| c.refs_status));
+    let callers_status_counts = status_counts(changes.iter().map(|c| c.callers_status));
     let with_tests = changes
         .iter()
         .filter(|c| c.test_refs.is_some_and(|t| t > 0))
@@ -315,7 +313,8 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         changed_files_count: changed_files.len(),
         changed_symbols_count: changes.len(),
         total_references: total_refs,
-        refs_status,
+        refs_status_counts,
+        callers_status_counts,
         coverage: DiffCoverage {
             with_tests,
             without_tests,
@@ -330,6 +329,15 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         hints,
     });
     Ok(())
+}
+
+/// How many rows carry each status, the rows without one left out.
+fn status_counts<'a>(statuses: impl Iterator<Item = Option<&'a str>>) -> BTreeMap<&'a str, usize> {
+    let mut counts = BTreeMap::new();
+    for status in statuses.flatten() {
+        *counts.entry(status).or_insert(0) += 1;
+    }
+    counts
 }
 
 fn relative_display(file: &Path, root: &Path) -> String {
