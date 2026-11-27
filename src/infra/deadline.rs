@@ -34,13 +34,13 @@ pub async fn run<T>(
         return future.await;
     };
     if end <= Instant::now() {
-        return Err(LspError::Timeout(
+        return Err(LspError::timeout(
             "LSP work exhausted its shared time budget".to_string(),
         ));
     }
     tokio::time::timeout_at(end, DEADLINE.scope(Some(end), future))
         .await
-        .map_err(|_| LspError::Timeout("LSP work exceeded its shared time budget".to_string()))?
+        .map_err(|_| LspError::timeout("LSP work exceeded its shared time budget".to_string()))?
 }
 
 #[cfg(test)]

@@ -1624,7 +1624,7 @@ mod tests {
             }),
             "unsupported"
         );
-        assert_eq!(reason(LspError::Timeout("slow".to_string())), "timed_out");
+        assert_eq!(reason(LspError::timeout("slow".to_string())), "timed_out");
         assert_eq!(
             reason(LspError::ServerNotInstalled {
                 name: "x".to_string(),

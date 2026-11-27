@@ -273,7 +273,7 @@ mod tests {
 
         for transport in [
             || LspError::NotConnected,
-            || LspError::Timeout("took too long".to_string()),
+            || LspError::timeout("took too long".to_string()),
         ] {
             let direct = OutputError::from(transport());
             let through_store = OutputError::from(store_error(transport()));

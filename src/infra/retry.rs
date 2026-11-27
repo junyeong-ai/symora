@@ -100,7 +100,7 @@ mod tests {
             async move {
                 let attempt = c.fetch_add(1, Ordering::SeqCst);
                 if attempt < 2 {
-                    Err(LspError::Timeout("test".to_string()))
+                    Err(LspError::timeout("test".to_string()))
                 } else {
                     Ok(42)
                 }

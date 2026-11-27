@@ -46,8 +46,11 @@ pub(crate) fn parse_symbol_kind(text: &str) -> Result<SymbolKind, OutputError> {
 /// against it.
 pub(crate) fn lsp_error_at(err: LspError, file: &str) -> OutputError {
     let recoverable = err.is_recoverable();
+    // A server seen to have stopped reading answers no retry and no other
+    // LSP-backed command: its mapped hint names the one way past it.
+    let unread = matches!(&err, LspError::Timeout(timed_out) if timed_out.unread.is_some());
     let mapped: OutputError = err.into();
-    if !matches!(mapped.code, ErrorCode::Timeout | ErrorCode::LspUnavailable) {
+    if unread || !matches!(mapped.code, ErrorCode::Timeout | ErrorCode::LspUnavailable) {
         return mapped;
     }
     if recoverable {
@@ -571,6 +574,29 @@ mod tests {
             .expect("a rejected handshake still has a route");
         assert!(!hint.contains("symora symbols"));
         assert!(hint.contains("symora map file"));
+    }
+
+    /// A position-anchored timeout keeps the restart a server that stopped
+    /// reading needs, rather than the retry a slow one does.
+    #[test]
+    fn a_timeout_where_the_server_stopped_reading_keeps_its_restart() {
+        let unread = lsp_error_at(
+            LspError::Timeout(crate::error::TimedOut {
+                message: "ran out".into(),
+                unread: Some(crate::error::UnreadInput {
+                    language: crate::models::symbol::Language::Python,
+                    secs: 61,
+                }),
+            }),
+            "src/main.py",
+        );
+        assert!(matches!(unread.code, ErrorCode::Timeout));
+        let hint = unread.hint.expect("a stopped server has a remedy");
+        assert!(hint.contains("symora daemon restart --project"), "{hint}");
+
+        let slow = lsp_error_at(LspError::timeout("ran out"), "src/main.py");
+        let hint = slow.hint.expect("a slow server has a retry route");
+        assert!(hint.contains("symora symbols"), "{hint}");
     }
 
     /// A capability gap is not a transport failure and keeps the code the

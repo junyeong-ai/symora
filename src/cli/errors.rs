@@ -138,7 +138,22 @@ impl From<LspError> for OutputError {
             // daemon that replaced this one succeeds.
             LspError::ConnectionLost(_) => Self::new(ErrorCode::LspUnavailable, message)
                 .with_hint("The daemon was stopping or being replaced — retry."),
-            LspError::Timeout(_) => Self::new(ErrorCode::Timeout, message),
+            // A server that stopped reading stays until restarted, so retrying
+            // meets it again; one that was only slow answers once warm.
+            LspError::Timeout(timed_out) => {
+                Self::new(ErrorCode::Timeout, message).with_hint(match timed_out.unread {
+                    Some(unread) => format!(
+                        "The {:?} language server has taken none of its input for {}s, so a \
+                         retry meets the same server: run `symora daemon restart --project` to \
+                         start it afresh (MCP has no equivalent; a `symora mcp serve` running \
+                         without the daemon restarts with that process).",
+                        unread.language, unread.secs
+                    ),
+                    None => "The language server did not answer within `lsp.timeout_secs`; \
+                             retry once it has warmed up."
+                        .to_string(),
+                })
+            }
             // Same recovery contract as a timeout — the answer arrives once
             // the server warms up — so it shares the retryable code.
             LspError::Indexing { .. } => Self::new(ErrorCode::Timeout, message)

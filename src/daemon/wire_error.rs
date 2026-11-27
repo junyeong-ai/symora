@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::error::LspError;
+use crate::error::{LspError, TimedOut, UnreadInput};
 use crate::models::symbol::Language;
 
 /// Serializable mirror of [`LspError`]. The daemon attaches one of these to
@@ -44,6 +44,8 @@ pub enum WireLspError {
     },
     Timeout {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unread: Option<WireUnreadInput>,
     },
     RequestCancelled,
     ServerError {
@@ -68,6 +70,13 @@ pub enum WireLspError {
     Other {
         message: String,
     },
+}
+
+/// [`UnreadInput`] on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireUnreadInput {
+    language: Language,
+    secs: u64,
 }
 
 impl From<&LspError> for WireLspError {
@@ -113,8 +122,12 @@ impl From<&LspError> for WireLspError {
             LspError::Indexing { language } => Self::Indexing {
                 language: *language,
             },
-            LspError::Timeout(msg) => Self::Timeout {
-                message: msg.clone(),
+            LspError::Timeout(timed_out) => Self::Timeout {
+                message: timed_out.message.clone(),
+                unread: timed_out.unread.map(|unread| WireUnreadInput {
+                    language: unread.language,
+                    secs: unread.secs,
+                }),
             },
             LspError::RequestCancelled => Self::RequestCancelled,
             LspError::ServerError { code, message } => Self::ServerError {
@@ -185,7 +198,13 @@ impl From<WireLspError> for LspError {
                 established,
             },
             WireLspError::Indexing { language } => LspError::Indexing { language },
-            WireLspError::Timeout { message } => LspError::Timeout(message),
+            WireLspError::Timeout { message, unread } => LspError::Timeout(TimedOut {
+                message,
+                unread: unread.map(|unread| UnreadInput {
+                    language: unread.language,
+                    secs: unread.secs,
+                }),
+            }),
             WireLspError::RequestCancelled => LspError::RequestCancelled,
             WireLspError::ServerError { code, message } => LspError::ServerError { code, message },
             WireLspError::Protocol { message } => LspError::Protocol(message),
@@ -311,6 +330,31 @@ mod tests {
         match recovered {
             LspError::Indexing { language } => assert_eq!(language, Language::Rust),
             other => panic!("expected Indexing, got {other:?}"),
+        }
+    }
+
+    /// What the daemon saw of a server that stopped reading reaches the
+    /// client, which advises from it as a direct run would.
+    #[test]
+    fn timeout_round_trips_the_input_its_server_left_unread() {
+        for unread in [
+            None,
+            Some(UnreadInput {
+                language: Language::Python,
+                secs: 61,
+            }),
+        ] {
+            let recovered = round_trip(LspError::Timeout(TimedOut {
+                message: "ran out".to_string(),
+                unread,
+            }));
+            match recovered {
+                LspError::Timeout(timed_out) => {
+                    assert_eq!(timed_out.message, "ran out");
+                    assert_eq!(timed_out.unread, unread);
+                }
+                other => panic!("expected Timeout, got {other:?}"),
+            }
         }
     }
 

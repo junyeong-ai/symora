@@ -112,7 +112,7 @@ pub(super) async fn handle_connection(
                 },
             };
             if expires_at.is_some_and(|end| end <= tokio::time::Instant::now()) {
-                return Err(crate::error::LspError::Timeout(
+                return Err(crate::error::LspError::timeout(
                     "Caller time budget expired before dispatch".to_string(),
                 ));
             }
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(response.id, RequestId::Number(1));
         assert_eq!(
             response.error.unwrap().code,
-            crate::error::LspError::Timeout(String::new()).error_code()
+            crate::error::LspError::timeout(String::new()).error_code()
         );
         assert!(projects.read().await.is_empty());
 

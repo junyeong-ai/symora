@@ -1,4 +1,6 @@
 use std::io;
+use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -83,30 +85,69 @@ impl Transport {
     }
 }
 
+/// What the client sees of a server taking its input: whether a frame is
+/// waiting for the server to take it, and when the server last took any.
+/// A pipe takes what fits in its buffer, so "taken" is what the client can
+/// see: the pipe accepting bytes because the server made room for them.
+#[derive(Clone, Default)]
+pub struct Intake(Arc<std::sync::Mutex<IntakeState>>);
+
+#[derive(Default)]
+struct IntakeState {
+    waiting: bool,
+    last_taken: Option<Instant>,
+}
+
+impl Intake {
+    /// How long the server has taken none of its input, where a frame is
+    /// waiting for it and it has taken none since `since`, the start of the
+    /// work asking: a server that took nothing for all of that work, with
+    /// input in front of it, has stopped reading as far as the client can
+    /// tell. One that took some, or had nothing waiting, has not been seen
+    /// to.
+    pub fn untaken_since(&self, since: Instant) -> Option<std::time::Duration> {
+        let state = self.0.lock().expect("intake lock poisoned");
+        let last = state.last_taken;
+        (state.waiting && last.is_none_or(|taken| taken <= since))
+            .then(|| last.unwrap_or(since).elapsed())
+    }
+
+    fn set_waiting(&self, waiting: bool) {
+        self.0.lock().expect("intake lock poisoned").waiting = waiting;
+    }
+
+    fn took(&self) {
+        self.0.lock().expect("intake lock poisoned").last_taken = Some(Instant::now());
+    }
+}
+
 /// Write an LSP request to stdin
 pub async fn write_request(
     stdin: OwnedMutexGuard<Option<ChildStdin>>,
+    intake: &Intake,
     request: &Request,
 ) -> io::Result<()> {
     let json = serde_json::to_string(request)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    write_message(stdin, json).await
+    write_message(stdin, intake, json).await
 }
 
 /// Write an LSP notification to stdin
 pub async fn write_notification(
     stdin: OwnedMutexGuard<Option<ChildStdin>>,
+    intake: &Intake,
     notification: &Notification,
 ) -> io::Result<()> {
     let json = serde_json::to_string(notification)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    write_message(stdin, json).await
+    write_message(stdin, intake, json).await
 }
 
 pub async fn write_notifications(
     stdin: OwnedMutexGuard<Option<ChildStdin>>,
+    intake: &Intake,
     notifications: &[Notification],
 ) -> io::Result<()> {
     let mut frames = String::new();
@@ -114,27 +155,32 @@ pub async fn write_notifications(
         let json = serde_json::to_string(notification).map_err(io::Error::other)?;
         frames.push_str(&format!("Content-Length: {}\r\n\r\n{}", json.len(), json));
     }
-    write_frames(stdin, frames).await
+    write_frames(stdin, intake, frames).await
 }
 
 /// Write an LSP response to stdin (for server-initiated requests)
 pub async fn write_response(
     stdin: OwnedMutexGuard<Option<ChildStdin>>,
+    intake: &Intake,
     response: &super::protocol::Response,
 ) -> io::Result<()> {
     let json = serde_json::to_string(response)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    write_message(stdin, json).await
+    write_message(stdin, intake, json).await
 }
 
 /// Write a raw JSON message with LSP framing
-async fn write_message<W>(stdin: OwnedMutexGuard<Option<W>>, json: String) -> io::Result<()>
+async fn write_message<W>(
+    stdin: OwnedMutexGuard<Option<W>>,
+    intake: &Intake,
+    json: String,
+) -> io::Result<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let message = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
-    write_frames(stdin, message).await
+    write_frames(stdin, intake, message).await
 }
 
 /// Write whole frames, holding the stream until the server has taken them.
@@ -144,12 +190,18 @@ where
 /// than half sent. Nothing bounds how long the server takes to read them: a
 /// server busy with one long request reads nothing meanwhile, and a server
 /// slow to read has not exited. Only a failed write ends the stream, since a
-/// frame cut short there leaves nothing a later frame could follow.
-async fn write_frames<W>(mut stdin: OwnedMutexGuard<Option<W>>, message: String) -> io::Result<()>
+/// frame cut short there leaves nothing a later frame could follow. What the
+/// server takes, and when, is told to `intake` as the write goes.
+async fn write_frames<W>(
+    mut stdin: OwnedMutexGuard<Option<W>>,
+    intake: &Intake,
+    message: String,
+) -> io::Result<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     tracing::trace!(bytes = message.len(), "Writing LSP frames");
+    let intake = intake.clone();
     tokio::spawn(async move {
         let stream = stdin.as_mut().ok_or_else(|| {
             io::Error::new(
@@ -157,10 +209,29 @@ where
                 "Language server stdin is closed",
             )
         })?;
-        let mut result = stream.write_all(message.as_bytes()).await;
+        intake.set_waiting(true);
+        let mut result = Ok(());
+        let mut rest = message.as_bytes();
+        while !rest.is_empty() {
+            match stream.write(rest).await {
+                Ok(0) => {
+                    result = Err(io::ErrorKind::WriteZero.into());
+                    break;
+                }
+                Ok(taken) => {
+                    rest = &rest[taken..];
+                    intake.took();
+                }
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
         if result.is_ok() {
             result = stream.flush().await;
         }
+        intake.set_waiting(false);
         if result.is_err() {
             stdin.take();
         }
@@ -185,14 +256,21 @@ mod tests {
         let first = format!("Content-Length: {}\r\n\r\n{body}", body.len());
         let send = {
             let writer = Arc::clone(&writer);
-            tokio::spawn(async move { write_message(writer.lock_owned().await, body).await })
+            tokio::spawn(async move {
+                write_message(writer.lock_owned().await, &Intake::default(), body).await
+            })
         };
         let mut received = vec![0; first.len()];
         reader.read_exact(&mut received[..1]).await.unwrap();
         send.abort();
         assert!(send.await.unwrap_err().is_cancelled());
         let next = tokio::spawn(async move {
-            write_message(writer.lock_owned().await, "{}".to_string()).await
+            write_message(
+                writer.lock_owned().await,
+                &Intake::default(),
+                "{}".to_string(),
+            )
+            .await
         });
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -213,17 +291,28 @@ mod tests {
 
     /// A server that takes its input late — busy with one long request — is
     /// still sent the whole frame, and the stream stays open for the next.
+    /// Meanwhile the frame is seen waiting: untaken since the work began
+    /// before it, not since work that began after the server last took some.
     #[tokio::test]
     async fn a_frame_read_late_is_finished_after_its_caller_stops_waiting() {
         let (stream, mut reader) = tokio::io::duplex(1);
         let writer = Arc::new(Mutex::new(Some(stream)));
+        let intake = Intake::default();
         let frame = b"Content-Length: 2\r\n\r\n{}";
+        let began = Instant::now();
         let waited = tokio::time::timeout(
             Duration::from_millis(50),
-            write_message(Arc::clone(&writer).lock_owned().await, "{}".to_string()),
+            write_message(
+                Arc::clone(&writer).lock_owned().await,
+                &intake,
+                "{}".to_string(),
+            ),
         )
         .await;
         assert!(waited.is_err(), "a one-byte pipe holds no whole frame");
+        assert!(intake.untaken_since(began).is_none(), "it took a byte");
+        let after = Instant::now();
+        assert!(intake.untaken_since(after).is_some(), "it takes no more");
 
         let mut received = vec![0; frame.len()];
         tokio::time::timeout(Duration::from_secs(5), reader.read_exact(&mut received))
@@ -235,6 +324,7 @@ mod tests {
             .await
             .unwrap();
         assert!(stream.is_some(), "the stream outlives a slow read");
+        assert!(intake.untaken_since(after).is_none(), "nothing waits");
     }
 
     #[tokio::test]
@@ -242,9 +332,14 @@ mod tests {
         let (stream, reader) = tokio::io::duplex(1);
         drop(reader);
         let writer = Arc::new(Mutex::new(Some(stream)));
-        let error = write_message(Arc::clone(&writer).lock_owned().await, "{}".to_string())
-            .await
-            .unwrap_err();
+        let intake = Intake::default();
+        let error = write_message(
+            Arc::clone(&writer).lock_owned().await,
+            &intake,
+            "{}".to_string(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         assert!(writer.lock().await.is_none());
     }

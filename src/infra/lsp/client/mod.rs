@@ -16,7 +16,7 @@ use super::protocol::{
     Message, Notification, PositionEncoding, RegistrationParams, Request, RequestId, Response,
     ResponseError, UnregistrationParams, error_codes,
 };
-use super::transport::{Transport, write_notification, write_request, write_response};
+use super::transport::{Intake, Transport, write_notification, write_request, write_response};
 use super::watch::{Backlog, FileChange, WATCHED_FILES_METHOD, WatchRegistry};
 use crate::error::LspError;
 use crate::models::lsp::path_to_uri;
@@ -241,6 +241,7 @@ struct PendingRequestGuard {
     id: u64,
     pending: Arc<std::sync::Mutex<HashMap<RequestId, PendingRequest>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
+    intake: Intake,
     timeout: Duration,
     /// Whether the server is told when the request is abandoned
     /// ([`LspClient::cancels`]); otherwise its answer, when it comes, finds
@@ -260,6 +261,7 @@ impl Drop for PendingRequestGuard {
             send_cancellation(
                 &self.runtime,
                 Arc::clone(&self.stdin),
+                self.intake.clone(),
                 self.id,
                 self.timeout,
             );
@@ -270,6 +272,7 @@ impl Drop for PendingRequestGuard {
 fn send_cancellation(
     runtime: &tokio::runtime::Handle,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
+    intake: Intake,
     id: u64,
     timeout: Duration,
 ) -> tokio::task::JoinHandle<()> {
@@ -279,7 +282,7 @@ fn send_cancellation(
                 Notification::new("$/cancelRequest", Some(serde_json::json!({ "id": id })));
             let writer = stdin.lock_owned().await;
             if writer.is_some() {
-                write_notification(writer, &notification).await?;
+                write_notification(writer, &intake, &notification).await?;
             }
             Ok(())
         })
@@ -293,6 +296,7 @@ fn send_cancellation(
 async fn flush_watched_files(
     backlog: Arc<std::sync::Mutex<Backlog>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
+    intake: Intake,
     language: Language,
 ) {
     loop {
@@ -308,7 +312,7 @@ async fn flush_watched_files(
         let notification = Notification::new(WATCHED_FILES_METHOD, Some(params));
         let writer = Arc::clone(&stdin).lock_owned().await;
         let written = if writer.is_some() {
-            write_notification(writer, &notification).await
+            write_notification(writer, &intake, &notification).await
         } else {
             Err(std::io::ErrorKind::NotConnected.into())
         };
@@ -344,6 +348,8 @@ pub struct LspClient {
     /// server running forever.
     process: Mutex<Option<ServerProcess>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
+    /// What the client has seen of the server taking that input.
+    intake: Intake,
     usage: std::sync::Mutex<ClientUseState>,
     next_id: AtomicU64,
     pending: Arc<std::sync::Mutex<HashMap<RequestId, PendingRequest>>>,
@@ -419,6 +425,7 @@ impl LspClient {
             language,
             process: Mutex::new(None),
             stdin: Arc::new(Mutex::new(None)),
+            intake: Intake::default(),
             usage: std::sync::Mutex::new(ClientUseState {
                 in_flight: 0,
                 last_used: Instant::now(),
@@ -535,6 +542,12 @@ impl LspClient {
             Ok(stdin) => stdin.is_some(),
             Err(_) => true,
         }
+    }
+
+    /// How long the server has taken none of its input, where input is
+    /// waiting for it and it has taken none since `since` ([`Intake`]).
+    pub fn input_untaken_since(&self, since: Instant) -> Option<Duration> {
+        self.intake.untaken_since(since)
     }
 
     /// Check if server is running
@@ -654,7 +667,7 @@ impl LspClient {
         }
         admit();
         self.initialized.store(true, Ordering::Release);
-        super::transport::write_notifications(stdin_guard, &notifications)
+        super::transport::write_notifications(stdin_guard, &self.intake, &notifications)
             .await
             .map_err(|e| self.handshake_failure(e.into()))?;
 
@@ -764,6 +777,7 @@ impl LspClient {
             id,
             pending: Arc::clone(&self.pending),
             stdin: Arc::clone(&self.stdin),
+            intake: self.intake.clone(),
             timeout: self.config.request_timeout().min(CANCELLATION_TIMEOUT),
             cancel: self.cancels(method),
         };
@@ -778,7 +792,7 @@ impl LspClient {
             if stdin_guard.is_none() {
                 return Err(LspError::NotConnected);
             }
-            write_request(stdin_guard, &request).await?;
+            write_request(stdin_guard, &self.intake, &request).await?;
         }
 
         match rx.await {
@@ -829,6 +843,7 @@ impl LspClient {
         let sent = send_cancellation(
             &tokio::runtime::Handle::current(),
             Arc::clone(&self.stdin),
+            self.intake.clone(),
             id,
             self.config.request_timeout().min(CANCELLATION_TIMEOUT),
         );
@@ -844,7 +859,7 @@ impl LspClient {
             if stdin_guard.is_none() {
                 return Err(LspError::NotConnected);
             }
-            write_notification(stdin_guard, &notification).await?;
+            write_notification(stdin_guard, &self.intake, &notification).await?;
 
             Ok(())
         })
@@ -1499,10 +1514,11 @@ impl LspClient {
         // it — off the reader, which would otherwise stop draining a server
         // that cannot read until its own output is drained.
         let stdin = Arc::clone(&self.stdin);
+        let intake = self.intake.clone();
         tokio::spawn(async move {
             let stdin_guard = stdin.lock_owned().await;
             if stdin_guard.is_some()
-                && let Err(e) = write_response(stdin_guard, &response).await
+                && let Err(e) = write_response(stdin_guard, &intake, &response).await
             {
                 tracing::warn!("Failed to answer {} from server: {e}", request.method);
             }
@@ -1651,6 +1667,7 @@ impl LspClient {
             tokio::spawn(flush_watched_files(
                 Arc::clone(&self.watched_backlog),
                 Arc::clone(&self.stdin),
+                self.intake.clone(),
                 self.language,
             ));
         }

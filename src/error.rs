@@ -62,7 +62,7 @@ pub enum LspError {
     Indexing { language: Language },
 
     #[error("{0}")]
-    Timeout(String),
+    Timeout(TimedOut),
 
     #[error("Request cancelled")]
     RequestCancelled,
@@ -112,7 +112,38 @@ pub enum LspError {
     Json(#[from] serde_json::Error),
 }
 
+/// A budget that ran out, and what the client saw of the server meanwhile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimedOut {
+    pub message: String,
+    /// Set where the client saw the server take none of its input for the
+    /// whole of the work, with input waiting for it: retrying meets the
+    /// same server, and only a new one answers.
+    pub unread: Option<UnreadInput>,
+}
+
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// A language server that has left input unread: none of it taken for
+/// `secs`, the whole of the work that timed out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnreadInput {
+    pub language: Language,
+    pub secs: u64,
+}
+
 impl LspError {
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::Timeout(TimedOut {
+            message: message.into(),
+            unread: None,
+        })
+    }
+
     pub fn error_code(&self) -> i32 {
         match self {
             Self::ServerError { code, .. } => *code,
@@ -463,7 +494,7 @@ mod tests {
         assert!(runtime_gap.is_unsupported());
 
         // Transient failures are not capability statements.
-        assert!(!LspError::Timeout("t".to_string()).is_unsupported());
+        assert!(!LspError::timeout("t".to_string()).is_unsupported());
         let internal = LspError::server_error_friendly(-32603, "boom".to_string());
         assert!(!internal.is_unsupported());
     }
@@ -476,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_timeout_is_recoverable() {
-        let err = LspError::Timeout("test".to_string());
+        let err = LspError::timeout("test".to_string());
         assert!(err.is_recoverable());
         assert!(!err.needs_restart());
     }

@@ -15,6 +15,12 @@ use crate::daemon::server::DaemonRuntimeConfig;
 use crate::error::LspError;
 use crate::infra::file_lock::FileLock;
 
+/// The part of a caller's budget kept back from the daemon for its answer
+/// to come back in. A daemon given all of it runs out together with the
+/// caller, whose own wait then ends first, and the daemon's account of the
+/// timeout — what it saw of the server meanwhile — never arrives.
+const ANSWER_MARGIN: Duration = Duration::from_millis(250);
+
 pub(super) fn calculate_timeout(config: &LspRuntimeConfig, method: &str) -> Duration {
     // Daemon-only operations with fixed timeouts
     match method {
@@ -375,7 +381,7 @@ impl DaemonClient {
             tokio::time::sleep(poll_interval).await;
         }
 
-        Err(LspError::Timeout(
+        Err(LspError::timeout(
             "Daemon failed to start within timeout".to_string(),
         ))
     }
@@ -452,6 +458,7 @@ impl DaemonClient {
         if methods::to_lsp_method(method).is_some() {
             request.timeout_ms = Some(
                 crate::infra::deadline::remaining(timeout_duration)
+                    .saturating_sub(ANSWER_MARGIN)
                     .as_millis()
                     .try_into()
                     .unwrap_or(u64::MAX),
@@ -476,7 +483,7 @@ impl DaemonClient {
         let read = timeout(timeout_duration, reader.read_line(&mut line))
             .await
             .map_err(|_| {
-                LspError::Timeout(format!(
+                LspError::timeout(format!(
                     "Operation '{}' timed out after {}s",
                     method,
                     timeout_duration.as_secs()
@@ -856,7 +863,7 @@ impl DaemonClient {
 
         // Starting a replacement now would hand it a socket the old daemon
         // still owns, and it would exit rather than serve.
-        Err(LspError::Timeout(
+        Err(LspError::timeout(
             "Daemon did not stop within timeout".to_string(),
         ))
     }

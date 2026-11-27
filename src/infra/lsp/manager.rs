@@ -10,7 +10,7 @@ use tokio::sync::{OnceCell, mpsc, watch};
 use super::client::LspClient;
 use super::servers::{self, ServerConfig};
 use super::watch::{Batch, FileWatch, RawEvent, WorkspaceWatcher};
-use crate::error::LspError;
+use crate::error::{LspError, UnreadInput};
 use crate::models::symbol::Language;
 
 enum ClientState {
@@ -550,7 +550,8 @@ impl LspManager {
     {
         use crate::infra::retry::{RetryConfig, with_retry};
 
-        crate::infra::deadline::run(
+        let began = std::time::Instant::now();
+        let outcome = crate::infra::deadline::run(
             self.runtime_config.request_timeout(),
             with_retry(&RetryConfig::default(), || async {
                 let client = self.get_client(language).await?;
@@ -564,7 +565,30 @@ impl LspManager {
                 }
             }),
         )
-        .await
+        .await;
+        match outcome {
+            Err(LspError::Timeout(mut timed_out)) => {
+                timed_out.unread = self.unread_input(language, began);
+                Err(LspError::Timeout(timed_out))
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// The input `language`'s server has left unread since `began`, where
+    /// this pool keeps its servers until stopped. A server that will not
+    /// read is then kept, and every request meets it until the project is
+    /// restarted; a pool that answers one command and exits takes it down
+    /// with it, and the next command starts another.
+    fn unread_input(&self, language: Language, began: std::time::Instant) -> Option<UnreadInput> {
+        if self.file_watch != FileWatch::On {
+            return None;
+        }
+        let untaken = self.peek_client(language)?.input_untaken_since(began)?;
+        Some(UnreadInput {
+            language,
+            secs: untaken.as_secs(),
+        })
     }
 }
 
@@ -1472,6 +1496,75 @@ exec sleep 600
             assert_eq!(fake.pids().len(), 1);
 
             drop((client, again, manager));
+            fake.assert_all_gone().await;
+        }
+
+        /// The remedy a hover's timeout carries. The pool's servers start
+        /// under the full start budget; only the hover is held to the short
+        /// one it is waited out under.
+        async fn hover_hint(manager: &Arc<LspManager>) -> String {
+            let hover = manager.execute_with_retry(Language::Go, |client| async move {
+                client
+                    .request::<serde_json::Value>("textDocument/hover", None)
+                    .await
+            });
+            let error = bounded(crate::infra::deadline::scope(
+                Duration::from_secs(WAITED_OUT_SECS),
+                hover,
+            ))
+            .await
+            .unwrap_err();
+            let output = crate::cli::errors::OutputError::from(error);
+            assert_eq!(output.code, crate::cli::errors::ErrorCode::Timeout);
+            output.hint.expect("a timeout carries a remedy")
+        }
+
+        /// A request that times out while the server has taken none of its
+        /// input, with input waiting for it, says so and names the restart:
+        /// the server is kept, so a retry meets it again.
+        #[tokio::test]
+        async fn a_timeout_where_the_server_stopped_reading_names_the_restart() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("stall", 0);
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            // Several times what a pipe holds, so the watch fills it.
+            let name = "n".repeat(200);
+            for index in 0..400 {
+                std::fs::write(fake.dir.path().join(format!("{name}{index}.go")), "").unwrap();
+            }
+            bounded(async {
+                while client
+                    .input_untaken_since(std::time::Instant::now())
+                    .is_none()
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+
+            let hint = hover_hint(&manager).await;
+            assert!(hint.contains("has taken none of its input"), "{hint}");
+            assert!(hint.contains("symora daemon restart --project"), "{hint}");
+
+            fake.resume();
+            drop((client, manager));
+            fake.assert_all_gone().await;
+        }
+
+        /// A request that times out while the server took what it was sent
+        /// says to retry once the server is warm: nothing showed it stopped
+        /// reading, only that it had not answered yet.
+        #[tokio::test]
+        async fn a_timeout_where_the_server_took_its_input_advises_a_retry() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("serve", 0);
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+
+            let hint = hover_hint(&manager).await;
+            assert!(hint.contains("retry once it has warmed up"), "{hint}");
+            assert!(!hint.contains("restart"), "{hint}");
+
+            drop((client, manager));
             fake.assert_all_gone().await;
         }
 

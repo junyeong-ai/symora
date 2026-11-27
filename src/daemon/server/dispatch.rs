@@ -63,7 +63,7 @@ pub(super) async fn dispatch(
                 .map_or(configured, |budget| budget.min(configured))
                 .saturating_sub(received.elapsed());
             if timeout.is_zero() {
-                return Err(RpcError::from(&LspError::Timeout(
+                return Err(RpcError::from(&LspError::timeout(
                     "Caller time budget expired".to_string(),
                 )));
             }
@@ -81,7 +81,7 @@ pub(super) async fn dispatch(
 }
 
 fn timeout_error(_: tokio::time::error::Elapsed) -> RpcError {
-    RpcError::from(&LspError::Timeout("Request timed out".to_string()))
+    RpcError::from(&LspError::timeout("Request timed out".to_string()))
 }
 
 fn estimate_request_timeout(method: &str, ctx: &ProjectContext) -> Duration {
@@ -479,6 +479,6 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(error.code, LspError::Timeout(String::new()).error_code());
+        assert_eq!(error.code, LspError::timeout(String::new()).error_code());
     }
 }
