@@ -260,6 +260,7 @@ symora impact src/services/checkout.ts:48 --depth 2
     "depth": 2,
     "max_depth_reached": true,
     "indexing": "unconfirmed",
+    "incomplete": true,
     "dynamic_dispatch": { "status": "unavailable", "implementations": 0 },
     "callers_by_depth": [
       { "depth": 1, "count": 4, "test": 2, "prod": 2 },
@@ -275,7 +276,7 @@ symora impact src/services/checkout.ts:48 --depth 2
   ]
 }
 ```
-> `test_caller_ratio` describes the discovered callers; it does not measure executed test coverage. With `max_depth_reached: true`, the transitive count is a lower bound. `dynamic_dispatch` qualifies a dynamically dispatched method: `incomplete` when the implementation lookup found overrides (`implementations` counts them) whose callers the counts leave out, `unavailable` when it could not establish them (`implementations` is absent when the lookup failed). Either way, callers reached through an override may be missing. Static references and call graphs do not prove runtime dispatch, external consumers, or configuration-based connections. Assess this evidence and its limits rather than an arbitrary risk or confidence score. `--depth 3` expands the graph by one level.
+> `test_caller_ratio` describes the discovered callers; it does not measure executed test coverage. With `max_depth_reached: true`, the transitive count is a lower bound, so `incomplete: true` is set as well; a per-node caller cap (`callers_truncated`) or a failed hop (`failed_hops`) sets it too, and each names its cause. `dynamic_dispatch` qualifies a dynamically dispatched method: its `status` is `incomplete` when the implementation lookup found overrides (`implementations` counts them) whose callers the counts leave out, `unavailable` when it could not establish them (`implementations` is absent when the lookup failed). Either way, callers reached through an override may be missing. Static references and call graphs do not prove runtime dispatch, external consumers, or configuration-based connections. Assess this evidence and its limits rather than an arbitrary risk or confidence score. `--depth 3` expands the graph by one level.
 
 ### ⑥ Make the change — preview before you write
 

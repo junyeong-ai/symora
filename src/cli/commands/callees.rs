@@ -64,9 +64,10 @@ struct CalleesReachOutput {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     callees_truncated: bool,
     /// At least one hop's callee query failed and was treated as empty, so the
-    /// reachable set is a lower bound.
+    /// reachable set is a lower bound. Any of these three causes sets the
+    /// section's `incomplete`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    incomplete: bool,
+    failed_hops: bool,
     /// The anchor (from-position) did not resolve to a listed symbol:
     /// "binding" (a declaration the tree does not list; the set is exactly
     /// its), "not_a_symbol" (read OK, denotes nothing), or "unavailable" (a
@@ -119,6 +120,10 @@ struct CalleesPathOutput {
     /// A hop's callee query failed and was treated as empty, so a would-be
     /// `no_static_path` is a possible missed path: the verdict degrades to
     /// `not_reached_within_bound` and this flag discloses why.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    failed_hops: bool,
+    /// The search stopped short of the whole reachable graph:
+    /// `max_depth_reached`, `callees_truncated` or `failed_hops`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incomplete: bool,
     /// The `--to` target did not resolve to a verified symbol: "not_a_symbol" or
@@ -221,11 +226,12 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
     ctx.print_success(CalleesReachOutput {
         section: Section::with_total(items, total)
             .with_hints(hints)
-            .with_indexing(walk.indexing),
+            .with_indexing(walk.indexing)
+            .with_incomplete(walk.is_lower_bound()),
         depth: walk.depth_reached(),
         max_depth_reached: walk.max_depth_reached,
         callees_truncated: walk.truncated,
-        incomplete: walk.incomplete,
+        failed_hops: walk.failed_hops,
         anchor_status: anchor.resolution.as_status(),
     });
 
@@ -313,7 +319,7 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
             let bounded = walk.max_depth_reached
                 || walk.truncated
                 || walk.indexing.is_some()
-                || walk.incomplete
+                || walk.failed_hops
                 || !target.is_resolved()
                 || !anchor.is_resolved();
             let verdict = if bounded {
@@ -353,7 +359,8 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         depth: walk.depth_reached(),
         max_depth_reached: walk.max_depth_reached,
         callees_truncated: walk.truncated,
-        incomplete: walk.incomplete,
+        failed_hops: walk.failed_hops,
+        incomplete: walk.is_lower_bound(),
         target_status: target.resolution.as_status(),
         anchor_status: anchor.resolution.as_status(),
         indexing: walk.indexing,
@@ -411,6 +418,7 @@ mod tests {
             depth: 3,
             max_depth_reached: false,
             callees_truncated: false,
+            failed_hops: false,
             incomplete: false,
             target_status: None,
             anchor_status: None,
@@ -440,7 +448,8 @@ mod tests {
             depth: 2,
             max_depth_reached: true,
             callees_truncated: false,
-            incomplete: false,
+            failed_hops: false,
+            incomplete: true,
             target_status: None,
             anchor_status: None,
             indexing: None,
@@ -450,6 +459,7 @@ mod tests {
         assert_eq!(v["reachability"], "not_reached_within_bound");
         assert!(v.get("chain").is_none());
         assert_eq!(v["max_depth_reached"], true);
+        assert_eq!(v["incomplete"], true);
     }
 
     #[test]
@@ -462,6 +472,7 @@ mod tests {
             depth: 3,
             max_depth_reached: false,
             callees_truncated: false,
+            failed_hops: false,
             incomplete: false,
             target_status: None,
             anchor_status: None,
@@ -474,8 +485,9 @@ mod tests {
         assert!(v.get("max_depth_reached").is_none());
         assert!(v.get("callees_truncated").is_none());
         // A clean negative carries no incomplete marker — that flag is what
-        // separates a true `no_static_path` from a hop-error lower bound.
+        // separates a true `no_static_path` from a bounded search.
         assert!(v.get("incomplete").is_none());
+        assert!(v.get("failed_hops").is_none());
         // The negative discloses itself as a lower bound: dynamic dispatch is
         // not folded in, so it is never read as an absolute "unreachable".
         assert_eq!(v["dynamic_dispatch_possible"], true);
@@ -491,6 +503,7 @@ mod tests {
             depth: 3,
             max_depth_reached: false,
             callees_truncated: false,
+            failed_hops: false,
             incomplete: false,
             target_status: Some("not_a_symbol"),
             anchor_status: None,
@@ -511,7 +524,7 @@ mod tests {
             depth: 2,
             max_depth_reached: false,
             callees_truncated: false,
-            incomplete: false,
+            failed_hops: false,
             anchor_status: None,
         };
         let v = serde_json::to_value(out).unwrap();
@@ -527,16 +540,17 @@ mod tests {
     #[test]
     fn reach_output_surfaces_lower_bound_markers_when_set() {
         let out = CalleesReachOutput {
-            section: Section::with_total(vec![frame("a", 20)], 5),
+            section: Section::with_total(vec![frame("a", 20)], 5).with_incomplete(true),
             depth: 3,
             max_depth_reached: true,
             callees_truncated: true,
-            incomplete: false,
+            failed_hops: false,
             anchor_status: None,
         };
         let v = serde_json::to_value(out).unwrap();
         assert_eq!(v["max_depth_reached"], true);
         assert_eq!(v["callees_truncated"], true);
+        assert_eq!(v["incomplete"], true);
         // Section's own truncation (showing < count) is a distinct concept and
         // still reported.
         assert_eq!(v["truncated"], true);

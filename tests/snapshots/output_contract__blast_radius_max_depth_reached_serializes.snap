@@ -1,6 +1,5 @@
 ---
 source: tests/output_contract.rs
-assertion_line: 748
 expression: radius
 ---
 {
@@ -10,6 +9,7 @@ expression: radius
   "max_depth_reached": true,
   "callers_truncated": true,
   "indexing": "timed_out",
+  "incomplete": true,
   "callers_by_depth": [
     {
       "depth": 1,

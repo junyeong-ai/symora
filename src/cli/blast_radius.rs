@@ -30,7 +30,11 @@ pub struct BlastRadius {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing: Option<crate::models::lsp::IndexingDegradation>,
     /// True when at least one hop's call-hierarchy request failed and was
-    /// treated as an empty caller set — the counts are then a lower bound.
+    /// treated as an empty caller set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub failed_hops: bool,
+    /// True when the walk's own bounds or failures leave the counts a lower
+    /// bound: `max_depth_reached`, `callers_truncated` or `failed_hops`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub incomplete: bool,
     /// Present only when the anchor is dynamically dispatched (a
@@ -143,7 +147,8 @@ pub async fn compute(
         max_depth_reached: walk.max_depth_reached,
         callers_truncated: walk.truncated,
         indexing: walk.indexing,
-        incomplete: walk.incomplete,
+        failed_hops: walk.failed_hops,
+        incomplete: walk.is_lower_bound(),
         dynamic_dispatch,
         callers_by_depth: buckets,
         test_caller_ratio: test_ratio,
@@ -301,6 +306,7 @@ mod tests {
             },
         );
         assert!(!complete.max_depth_reached && !complete.callers_truncated);
+        assert!(!complete.incomplete);
 
         let depth_bound = compute_with(
             HashMap::from([
@@ -317,6 +323,7 @@ mod tests {
             depth_bound.max_depth_reached,
             "the fixture must trip the cap"
         );
+        assert!(depth_bound.incomplete);
 
         let neighbour_bound = compute_with(
             HashMap::from([((10, 5), vec![caller(20), caller(30), caller(40)])]),
@@ -329,6 +336,7 @@ mod tests {
             neighbour_bound.callers_truncated && !neighbour_bound.max_depth_reached,
             "the fixture must bound the walk by the neighbour cap alone"
         );
+        assert!(neighbour_bound.incomplete);
     }
 
     /// A share of nothing is not zero. An anchor with no callers has no

@@ -82,10 +82,16 @@ pub struct CallGraphWalk {
     /// and was treated as an empty neighbour set. The discovered graph — and any
     /// "no path" verdict or count derived from it — is therefore a lower bound,
     /// never an exhaustive negative.
-    pub incomplete: bool,
+    pub failed_hops: bool,
 }
 
 impl CallGraphWalk {
+    /// The walk's own bounds or a failed hop left the discovered graph short
+    /// of what the server holds.
+    pub fn is_lower_bound(&self) -> bool {
+        self.max_depth_reached || self.truncated || self.failed_hops
+    }
+
     /// Depth actually reached (number of levels traversed).
     pub fn depth_reached(&self) -> u32 {
         self.levels.len() as u32
@@ -145,7 +151,7 @@ pub async fn walk(
     let mut levels: Vec<Vec<CallHierarchyItem>> = Vec::with_capacity(max_depth as usize);
     let mut max_depth_reached = false;
     let mut truncated = false;
-    let mut incomplete = false;
+    let mut failed_hops = false;
     // Aggregates the computation-time snapshot of every hop: if ANY hop ran
     // under degraded indexing the whole walk is a lower bound, and quiescence
     // landing mid-walk must not strip that.
@@ -181,7 +187,7 @@ pub async fn walk(
                 // verdict or count degrades to a lower bound rather than an
                 // exhaustive "no path".
                 Err(_) => {
-                    incomplete = true;
+                    failed_hops = true;
                     Vec::new()
                 }
             };
@@ -229,7 +235,7 @@ pub async fn walk(
         max_depth_reached,
         truncated,
         indexing,
-        incomplete,
+        failed_hops,
     }
 }
 
@@ -261,7 +267,7 @@ pub(crate) mod test_support {
         pub outgoing: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
         pub implementations: Result<Vec<Location>, i32>,
         /// Positions whose `incoming_calls`/`outgoing_calls` return an error,
-        /// to exercise the swallowed-hop `incomplete` lower-bound marker.
+        /// to exercise the swallowed-hop `failed_hops` lower-bound marker.
         pub errors: HashSet<(u32, u32)>,
     }
 
@@ -465,10 +471,10 @@ mod tests {
     }
 
     #[test]
-    fn swallowed_interior_hop_error_sets_incomplete() {
+    fn swallowed_interior_hop_error_sets_failed_hops() {
         // anchor (10,5) -> node_20 (20,1); node_20's own outgoing hop errors,
         // so the walk cannot see past it. The result must be flagged a lower
-        // bound (`incomplete`) rather than a clean, exhaustive empty — that is
+        // bound (`failed_hops`) rather than a clean, exhaustive empty — that is
         // what stops a derived verdict from claiming an absolute "no path".
         let mut outgoing = HashMap::new();
         outgoing.insert((10, 5), vec![node(20)]);
@@ -481,8 +487,8 @@ mod tests {
         };
         let errored = tokio_test::block_on(walk(&stub, anchor(), Direction::Outgoing, &cfg));
         assert!(
-            errored.incomplete,
-            "a swallowed hop error must set the incomplete lower-bound marker"
+            errored.failed_hops,
+            "a swallowed hop error must set the failed_hops lower-bound marker"
         );
 
         // The same shape without the error is a genuine, complete walk.
@@ -495,7 +501,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(!clean_walk.incomplete);
+        assert!(!clean_walk.failed_hops);
     }
 
     #[test]

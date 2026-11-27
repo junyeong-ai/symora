@@ -260,6 +260,7 @@ symora impact src/services/checkout.ts:48 --depth 2
     "depth": 2,
     "max_depth_reached": true,
     "indexing": "unconfirmed",
+    "incomplete": true,
     "dynamic_dispatch": { "status": "unavailable", "implementations": 0 },
     "callers_by_depth": [
       { "depth": 1, "count": 4, "test": 2, "prod": 2 },
@@ -275,7 +276,7 @@ symora impact src/services/checkout.ts:48 --depth 2
   ]
 }
 ```
-> `test_caller_ratio`는 발견한 호출자 중 테스트 코드의 비율이며 테스트 실행·커버리지 측정이 아닙니다. `max_depth_reached: true`이면 전이 호출자 수는 하한입니다. `dynamic_dispatch`는 동적으로 디스패치되는 메서드에 붙습니다. `incomplete`는 구현 조회가 오버라이드를 찾았지만(`implementations`가 그 수입니다) 그 호출자를 집계에 넣지 않았다는 뜻이고, `unavailable`은 오버라이드를 확정하지 못했다는 뜻입니다(조회가 실패하면 `implementations`가 없습니다). 어느 쪽이든 오버라이드를 거쳐 닿는 호출자는 빠져 있을 수 있습니다. 정적 참조와 호출 그래프에는 런타임 디스패치, 외부 소비자, 설정을 통한 연결이 드러나지 않습니다. 임의의 위험 등급이나 신뢰 점수 대신 이 근거와 한계를 검토하세요. `--depth 3`은 그래프를 한 단계 확장합니다.
+> `test_caller_ratio`는 발견한 호출자 중 테스트 코드의 비율이며 테스트 실행·커버리지 측정이 아닙니다. `max_depth_reached: true`이면 전이 호출자 수는 하한이고, 그래서 `incomplete: true`도 붙습니다. 노드별 호출자 상한(`callers_truncated`)이나 실패한 홉(`failed_hops`)도 같은 표시를 붙이며, 원인은 각자의 필드가 밝힙니다. `dynamic_dispatch`는 동적으로 디스패치되는 메서드에 붙습니다. 그 `status`의 `incomplete`는 구현 조회가 오버라이드를 찾았지만(`implementations`가 그 수입니다) 그 호출자를 집계에 넣지 않았다는 뜻이고, `unavailable`은 오버라이드를 확정하지 못했다는 뜻입니다(조회가 실패하면 `implementations`가 없습니다). 어느 쪽이든 오버라이드를 거쳐 닿는 호출자는 빠져 있을 수 있습니다. 정적 참조와 호출 그래프에는 런타임 디스패치, 외부 소비자, 설정을 통한 연결이 드러나지 않습니다. 임의의 위험 등급이나 신뢰 점수 대신 이 근거와 한계를 검토하세요. `--depth 3`은 그래프를 한 단계 확장합니다.
 
 ### ⑥ 변경 — 쓰기 전에 미리보기
 

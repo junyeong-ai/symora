@@ -682,6 +682,7 @@ fn impact_output_full() {
             max_depth_reached: false,
             callers_truncated: false,
             indexing: None,
+            failed_hops: false,
             incomplete: false,
             dynamic_dispatch: None,
             callers_by_depth: vec![
@@ -746,7 +747,8 @@ fn blast_radius_max_depth_reached_serializes() {
         max_depth_reached: true,
         callers_truncated: true,
         indexing: Some(symora::models::lsp::IndexingDegradation::TimedOut),
-        incomplete: false,
+        failed_hops: false,
+        incomplete: true,
         dynamic_dispatch: None,
         callers_by_depth: vec![
             DepthBucket {

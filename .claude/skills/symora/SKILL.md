@@ -37,7 +37,7 @@ Lines and Unicode-scalar columns are 1-indexed. Every result states its own posi
 
 ## Interpret limits
 
-Lists carry `count`, `showing`, and `items`. These markers qualify the answer:
+Lists carry `count`, `showing`, and `items`. These markers qualify the answer; each is present only when set, so read an absent one as false. `incomplete` is the one marker that says a count is a lower bound because of the command's own caps or failures, including a call-graph walk's `max_depth_reached`, `callers_truncated`/`callees_truncated` or `failed_hops`:
 
 | Marker | Meaning and next action |
 |---|---|

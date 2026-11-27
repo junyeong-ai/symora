@@ -374,10 +374,16 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                      (depth>1 only)",
                 ),
                 (
-                    "incomplete",
+                    "failed_hops",
                     "boolean",
                     "A hop's callee query failed and was treated as empty, so the set is a \
                      lower bound (depth>1 only)",
+                ),
+                (
+                    "incomplete",
+                    "boolean",
+                    "Present (true) only when count is a lower bound; with depth>1, set by \
+                     max_depth_reached, callees_truncated or failed_hops, which name the cause",
                 ),
                 (
                     "anchor_status",
@@ -458,10 +464,16 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 "A node's fan-out hit the per-node cap (lower bound)",
             ),
             (
-                "incomplete",
+                "failed_hops",
                 "boolean",
                 "A hop's call query failed and was treated as empty, so the \
                      verdict is a lower bound — never an exhaustive negative",
+            ),
+            (
+                "incomplete",
+                "boolean",
+                "The search stopped short of the whole reachable graph: set by \
+                     max_depth_reached, callees_truncated or failed_hops, which name the cause",
             ),
             (
                 "target_status",
