@@ -2315,6 +2315,11 @@ fn a_deletion_takes_none_of_the_caps_room() {
     );
     assert_eq!(capped["changed_symbols_count"], 2, "{capped}");
     assert_eq!(capped["incomplete"].as_bool(), Some(true), "{capped}");
+    assert_eq!(
+        capped["unmeasured_files"],
+        serde_json::json!(["a.py", "b.py"]),
+        "a.py, whose rows the cap refused some of, and b.py, which it never read: {capped}"
+    );
 
     let (full, rows) = analyse("2");
     assert_eq!(
@@ -2328,17 +2333,23 @@ fn a_deletion_takes_none_of_the_caps_room() {
         "b.py, after the file the cap filled, is not read: {full}"
     );
     assert_eq!(full["incomplete"].as_bool(), Some(true), "{full}");
+    assert_eq!(
+        full["unmeasured_files"],
+        serde_json::json!(["b.py"]),
+        "the file the cap stopped before is named, not dropped: {full}"
+    );
     assert!(
         full["hints"][0]
             .as_str()
-            .is_some_and(|hint| hint.contains("--max-symbols")),
-        "the cause of `incomplete`, the cap, leads the hints: {full}"
+            .is_some_and(|hint| hint.contains("--max-symbols") && hint.contains("b.py")),
+        "the cause of `incomplete`, the cap, leads the hints and names the file: {full}"
     );
 
     let (whole, rows) = analyse("3");
     assert!(rows.contains(&"dropped \"deleted\"".to_string()), "{whole}");
     assert_eq!(rows.len(), 5, "{whole}");
     assert_eq!(whole["incomplete"].as_bool(), None, "{whole}");
+    assert!(whole.get("unmeasured_files").is_none(), "{whole}");
     // `--deterministic` counts no reference, so there is no total to state,
     // only the reason none was taken, for each row it was not.
     assert!(whole.get("total_references").is_none(), "{whole}");
@@ -2346,6 +2357,61 @@ fn a_deletion_takes_none_of_the_caps_room() {
         whole["refs_status_counts"],
         serde_json::json!({"not_consulted": 2}),
         "{whole}"
+    );
+}
+
+/// A cap reached in the changed code leaves every changed file disclosed: a
+/// changed Markdown file, which 0.37.1 listed among the unmeasured files, is
+/// listed still, as is the code the cap stopped before reading and the file
+/// it stopped in. Each file is a row or an unmeasured file with its cause in
+/// the hints, never neither.
+#[test]
+fn a_cap_reached_in_code_leaves_every_changed_file_disclosed() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let two = |body: &str| format!("def one():\n    {body}\n\n\ndef two():\n    {body}\n");
+    std::fs::write(repo.join("a.py"), two("pass")).unwrap();
+    std::fs::write(repo.join("c.py"), two("pass")).unwrap();
+    std::fs::write(repo.join("README.md"), "# Title\n\nold\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "init"]);
+    std::fs::write(repo.join("a.py"), two("return 1")).unwrap();
+    std::fs::write(repo.join("c.py"), two("return 1")).unwrap();
+    std::fs::write(repo.join("README.md"), "# Title\n\nnew\n").unwrap();
+
+    let page = json_ok(
+        repo,
+        &["--deterministic", "diff-impact", "--max-symbols", "1"],
+    );
+    assert_eq!(page["incomplete"].as_bool(), Some(true), "{page}");
+    assert_eq!(
+        named_rows(&page),
+        [("one".to_string(), "modified".to_string())],
+        "{page}"
+    );
+    assert_eq!(
+        page["unmeasured_files"],
+        serde_json::json!(["README.md", "a.py", "c.py"]),
+        "{page}"
+    );
+    let hints: Vec<&str> = page["hints"]
+        .as_array()
+        .expect("hints")
+        .iter()
+        .filter_map(|hint| hint.as_str())
+        .collect();
+    assert!(
+        hints[0].contains("--max-symbols") && hints[0].contains("a.py, c.py"),
+        "{page}"
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|hint| hint.contains("not read as symbols: README.md")),
+        "{page}"
     );
 }
 

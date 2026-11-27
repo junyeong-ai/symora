@@ -701,7 +701,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 "unmeasured_files",
                 "array",
                 "Files whose changes could not be measured in full, documentation and \
-                 configuration among them; hints name the causes",
+                 configuration among them, and those max_symbols stopped in or before; hints \
+                 name the causes",
             ),
             (
                 "incomplete",

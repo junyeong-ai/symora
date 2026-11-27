@@ -88,20 +88,22 @@ pub struct DiffImpactOutput {
     /// configuration (Markdown, MDX, YAML, TOML, JSON), whose keys and
     /// headings are not read as symbols, they are symbolic links, whose
     /// lines are a path rather than source, git reports them as binary and
-    /// names no lines, or — with `--staged` — unstaged edits sit over the
-    /// staged ones, so the lines the diff names are not the lines on disk.
-    /// What was not measured is absent from `changes`, so the result is a
-    /// lower bound for these files. `hints` names the documentation,
-    /// binary and staged causes; a file listed without one is a link or one
-    /// whose symbols could not be read. Omitted when empty.
+    /// names no lines, with `--staged` unstaged edits sit over the staged
+    /// ones, so the lines the diff names are not the lines on disk, or
+    /// `--max-symbols` refused one of their rows or stopped before reading
+    /// them. What was not measured is absent from `changes`, so the result is
+    /// a lower bound for these files. `hints` names the documentation,
+    /// binary, staged and cap causes; a file listed without one is a link or
+    /// one whose symbols could not be read. Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unmeasured_files: Vec<String>,
     /// `--max-symbols` stopped the analysis: the added and modified symbols,
-    /// or the deletions, past it are not listed, nor, once the counted
-    /// symbols reach it, the files after the one it stopped in, so every
-    /// count here is a lower bound. Carried in the shared shape's
-    /// words so a reader treats it as it treats any other short answer.
-    /// Omitted when the whole diff was analysed.
+    /// or the deletions, past it are not listed, and once the counted
+    /// symbols reach it the files after the one it stopped in are not read,
+    /// so every count here is a lower bound. `unmeasured_files` names the
+    /// files it left unfinished. Carried in the shared shape's words so a
+    /// reader treats it as it treats any other short answer. Omitted when the
+    /// whole diff was analysed.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub incomplete: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -307,8 +309,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     let HunkAnalysis {
         changes,
         unmeasured: unreadable,
-        capped,
-        ..
+        unfinished,
     } = analyze_hunks(
         app,
         &hunks,
@@ -318,12 +319,25 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     )
     .await;
     unmeasured.extend(unreadable);
-    let mut listed = HashSet::new();
-    unmeasured.retain(|file| listed.insert(file.clone()));
+    let capped = !unfinished.is_empty();
     if capped {
         // The cause of `incomplete` leads the hints.
-        hints.insert(0, LowerBound::AnalysisCapped(args.max_symbols).hint());
+        let files: Vec<String> = unfinished
+            .iter()
+            .map(|file| relative_display(file, root))
+            .collect();
+        hints.insert(
+            0,
+            LowerBound::AnalysisCapped {
+                symbols: args.max_symbols,
+                files,
+            }
+            .hint(),
+        );
+        unmeasured.extend(unfinished);
     }
+    let mut listed = HashSet::new();
+    unmeasured.retain(|file| listed.insert(file.clone()));
     let timed_out = Some(CoverageReason::TimedOut.as_str());
     if changes
         .iter()
@@ -434,8 +448,9 @@ fn symbol_change_type(
 struct HunkAnalysis {
     changes: Vec<ChangedSymbolImpact>,
     unmeasured: Vec<PathBuf>,
-    /// Work was left undone because the cap was reached.
-    capped: bool,
+    /// The files the cap left work undone in, in path order: those it
+    /// refused a row of and those it stopped before reading.
+    unfinished: Vec<PathBuf>,
 }
 
 /// A changed symbol's row, in the order it is reported: settled where the
@@ -462,8 +477,10 @@ struct Plan {
     live: usize,
     /// The rows the diff alone answers: deletions.
     settled: usize,
-    /// Work was left undone because the cap was reached.
-    capped: bool,
+    /// The file being planned, until the cap refuses one of its rows.
+    planning: Option<PathBuf>,
+    /// The files the cap left work undone in.
+    unfinished: Vec<PathBuf>,
 }
 
 impl Plan {
@@ -473,12 +490,19 @@ impl Plan {
         self.max_symbols > 0 && self.live >= self.max_symbols
     }
 
+    /// Records the file being planned as one the cap left unfinished.
+    fn refuse(&mut self) {
+        if let Some(file) = self.planning.take() {
+            self.unfinished.push(file);
+        }
+    }
+
     /// Plans a symbol whose references are to be counted, unless the cap
-    /// leaves no room for it, when the analysis is recorded as having
-    /// stopped short and false is returned.
+    /// leaves no room for it, when its file is recorded as unfinished and
+    /// false is returned.
     fn measure(&mut self, row: Row) -> bool {
         if self.full() {
-            self.capped = true;
+            self.refuse();
             return false;
         }
         self.live += 1;
@@ -492,7 +516,7 @@ impl Plan {
     /// lists its first deletions rather than every one of them.
     fn settle(&mut self, impact: ChangedSymbolImpact) {
         if self.max_symbols > 0 && self.settled >= self.max_symbols {
-            self.capped = true;
+            self.refuse();
             return;
         }
         self.settled += 1;
@@ -548,7 +572,7 @@ async fn analyze_hunks(
         rows,
         answers,
         unmeasured,
-        capped,
+        unfinished,
         ..
     } = plan_hunks(app, hunks, preimage_ref, max_symbols).await;
     let answers = &answers;
@@ -625,7 +649,7 @@ async fn analyze_hunks(
     HunkAnalysis {
         changes: measured.into_iter().map(|row| row.impact).collect(),
         unmeasured,
-        capped,
+        unfinished,
     }
 }
 
@@ -633,7 +657,8 @@ async fn analyze_hunks(
 /// rows whose references are counted and, apart from them, the deletions
 /// listed, so a deletion never takes the place of a symbol whose references
 /// would be counted. The analysis stops at the first file the cap leaves no
-/// room for a counted symbol in, which with every file after it is not read.
+/// room for a counted symbol in, which with every file after it is not read
+/// and is recorded as unfinished, as a file the cap refuses a row of is.
 async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbols: usize) -> Plan {
     let root = app.output.root();
     let mut by_file: BTreeMap<&PathBuf, Vec<&DiffHunk>> = BTreeMap::new();
@@ -648,16 +673,22 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
         max_symbols,
         live: 0,
         settled: 0,
-        capped: false,
+        planning: None,
+        unfinished: Vec::new(),
     };
     // Kept apart from `analysis` until every file is read: a file's
     // declarations are borrowed from here while its rows join the plan.
     let mut answers: Vec<FileSymbols> = Vec::new();
-    for (file, hunks) in by_file {
+    let mut files = by_file.into_iter();
+    while let Some((file, hunks)) = files.next() {
         if analysis.full() {
-            analysis.capped = true;
+            analysis.unfinished.push(file.clone());
+            analysis
+                .unfinished
+                .extend(files.map(|(file, _)| file.clone()));
             break;
         }
+        analysis.planning = Some(file.clone());
 
         // Current-tree symbols, loaded once when the file survives — needed both
         // for live (Added/Modified) hunks and to recognise a deletion that only

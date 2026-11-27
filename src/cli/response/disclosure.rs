@@ -252,7 +252,12 @@ pub enum LowerBound {
     /// past the cap are absent from every count. Kept apart from a failed
     /// analysis because raising the cap reaches them, where a failure is what
     /// retrying is for.
-    AnalysisCapped(usize),
+    AnalysisCapped {
+        symbols: usize,
+        /// The files it left unmeasured in full: those it refused a row of
+        /// and those it stopped before.
+        files: Vec<String>,
+    },
     /// The command's language-server budget (`lsp.timeout_secs`, in seconds)
     /// ran out before every count was taken, so the rows marked `timed_out`
     /// carry none. Kept apart from the cap because a larger budget, not a
@@ -305,10 +310,12 @@ impl LowerBound {
             Self::IndexPageCapped => "The index held more rows than this page asked for, so the \
                  count is a lower bound; raise --limit to reach them"
                 .to_string(),
-            Self::AnalysisCapped(symbols) => format!(
+            Self::AnalysisCapped { symbols, files } => format!(
                 "Analysis stopped at {symbols} symbol(s) whose references are counted, or \
                  as many deletions, before running out of candidates, so those past the cap \
-                 are missing from the counts; raise --max-symbols to reach them"
+                 are missing from the counts and {} are not measured in full; raise \
+                 --max-symbols to reach them",
+                name_some(files)
             ),
             Self::AnalysisTimedOut(secs) => format!(
                 "The language-server budget (lsp.timeout_secs = {secs}) ran out before every \
@@ -368,7 +375,7 @@ impl LowerBound {
             | Self::LiveWideningCapped
             | Self::IndexPageCapped
             | Self::LiveFileNotDescribed
-            | Self::AnalysisCapped(_)
+            | Self::AnalysisCapped { .. }
             | Self::AnalysisTimedOut(_) => None,
         }
     }
