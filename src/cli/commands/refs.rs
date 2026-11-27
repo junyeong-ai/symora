@@ -33,7 +33,7 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let cfg = app.config();
     let limit = args.limit.unwrap_or(cfg.lsp.refs_limit);
-    let loc = args.loc.parse()?.to_absolute()?;
+    let loc = args.loc.parse()?.resolve(None)?;
 
     let anchor = anchor_of(
         app,

@@ -705,6 +705,59 @@ fn edit_reindexes_the_store_so_search_sees_the_new_content() {
     );
 }
 
+/// A position past its file's end is refused, stating the file's extent,
+/// before any language server is asked: the configured server does not
+/// exist, so a command that reached it would answer `server_not_installed`.
+#[cfg(unix)]
+#[test]
+fn a_position_past_its_files_end_reaches_no_server() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn main() {}\nfn helper() {}\n").unwrap();
+    std::fs::create_dir_all(dir.path().join(".symora")).unwrap();
+    std::fs::write(
+        dir.path().join(".symora/config.toml"),
+        "[lsp.servers.rust]\ncommand = \"/nonexistent/rust-analyzer-missing\"\n",
+    )
+    .unwrap();
+
+    let past_line = "Line 3 is past the end of main.rs, which has 2 lines";
+    let past_column = "Column 14 is past the end of line 1 of main.rs, which has 12 characters";
+    for (args, message) in [
+        (&["refs", "main.rs:3"][..], past_line),
+        (&["def", "main.rs:1:14"], past_column),
+        (&["hover", "main.rs:3:1"], past_line),
+        (&["typedef", "main.rs:3"], past_line),
+        (&["implementations", "main.rs:3"], past_line),
+        (&["callers", "main.rs:3"], past_line),
+        (&["callees", "main.rs:3"], past_line),
+        (&["callees", "main.rs:3", "--depth", "2"], past_line),
+        (&["callees", "main.rs:1", "--to", "main.rs:3"], past_line),
+        (&["context", "main.rs:3", "--all"], past_line),
+        (&["impact", "main.rs:3"], past_line),
+        (
+            &["rename", "main.rs:1:14", "renamed", "--dry-run"],
+            past_column,
+        ),
+        (&["actions", "list", "main.rs:3"], past_line),
+        (&["edit", "delete", "main.rs:3", "--dry-run"], past_line),
+    ] {
+        let out = run_in(dir.path(), &[&["--format", "compact"], args].concat());
+        assert!(!out.status.success(), "{args:?} succeeded");
+        let json = common::parse_response(&out.stdout).expect("JSON on stdout");
+        assert_eq!(
+            json["error"]["code"], "invalid_argument",
+            "{args:?}: {json}"
+        );
+        assert_eq!(json["error"]["message"], message, "{args:?}: {json}");
+        assert!(
+            json["error"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.ends_with("symora symbols -- 'main.rs'")),
+            "{args:?}: {json}"
+        );
+    }
+}
+
 /// The C-1 scenario: a built index covering rust plus a rust LSP that
 /// cannot start. The index has no match, so it vouches for nothing — the
 /// live recheck it triggers is the answer, and its failure leaves a zero

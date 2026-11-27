@@ -90,7 +90,7 @@ struct ContextParams {
 
 pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
-    let loc = args.loc.parse()?.to_absolute()?;
+    let loc = args.loc.parse()?.resolve(None)?;
     let config = app.config();
     let params = ContextParams {
         calls: config.lsp.calls_limit,

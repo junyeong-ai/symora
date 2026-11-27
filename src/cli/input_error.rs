@@ -50,11 +50,31 @@ pub enum CliInputError {
     #[error("Line {line} exceeds file length ({total} lines)")]
     LineOutOfRange { line: u32, total: usize },
 
-    #[error("Column {column} exceeds line length ({chars} chars) at line {line}")]
-    ColumnOutOfRange {
+    /// A position named a line the file does not have. `file` is the path as
+    /// it was given.
+    #[error(
+        "Line {line} is past the end of {}, which has {lines} {}",
+        file.display(),
+        if *lines == 1 { "line" } else { "lines" }
+    )]
+    LinePastEnd {
+        file: PathBuf,
+        line: u32,
+        lines: usize,
+    },
+
+    /// A position named a column more than one past its line's last
+    /// character. `file` is the path as it was given.
+    #[error(
+        "Column {column} is past the end of line {line} of {}, which has {chars} {}",
+        file.display(),
+        if *chars == 1 { "character" } else { "characters" }
+    )]
+    ColumnPastEnd {
+        file: PathBuf,
+        line: u32,
         column: u32,
         chars: usize,
-        line: u32,
     },
 
     #[error("File not found: {0}")]
@@ -73,12 +93,24 @@ pub enum CliInputError {
 impl From<CliInputError> for OutputError {
     fn from(err: CliInputError) -> Self {
         let message = err.to_string();
-        let code = match err {
-            CliInputError::FileNotFound(_) => ErrorCode::NotFound,
-            CliInputError::FileTooLarge { .. } => ErrorCode::FileTooLarge,
-            _ => ErrorCode::InvalidArgument,
-        };
-        OutputError::new(code, message)
+        match err {
+            CliInputError::FileNotFound(_) => OutputError::new(ErrorCode::NotFound, message),
+            CliInputError::FileTooLarge { .. } => {
+                OutputError::new(ErrorCode::FileTooLarge, message)
+            }
+            // A position read from the file before it last changed, or
+            // counted from 0: what the file declares now, and where, is one
+            // call away.
+            CliInputError::LinePastEnd { file, .. } | CliInputError::ColumnPastEnd { file, .. } => {
+                OutputError::invalid(message).with_hint(format!(
+                    "Lines and columns are 1-indexed, a column counting characters; a position \
+                     taken before the file last changed may be out of date. Its declarations \
+                     and their positions now: symora symbols -- {}",
+                    super::utils::shell_arg(&file.display().to_string())
+                ))
+            }
+            _ => OutputError::new(ErrorCode::InvalidArgument, message),
+        }
     }
 }
 
@@ -130,6 +162,29 @@ mod tests {
         .into();
         assert!(matches!(err.code, ErrorCode::FileTooLarge));
         assert!(err.message.contains("200 MB"));
+    }
+
+    #[test]
+    fn a_position_past_the_end_names_the_declarations_that_are_there() {
+        for err in [
+            CliInputError::LinePastEnd {
+                file: PathBuf::from("src/a b.rs"),
+                line: 99,
+                lines: 10,
+            },
+            CliInputError::ColumnPastEnd {
+                file: PathBuf::from("src/a b.rs"),
+                line: 3,
+                column: 40,
+                chars: 12,
+            },
+        ] {
+            let out: OutputError = err.into();
+            assert!(matches!(out.code, ErrorCode::InvalidArgument));
+            let hint = out.hint.expect("a remedy");
+            assert!(hint.ends_with("symora symbols -- 'src/a b.rs'"), "{hint}");
+            crate::cli::assert_named_commands_parse(&hint);
+        }
     }
 
     #[test]

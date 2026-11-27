@@ -47,12 +47,7 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
         .then(|| super::edit::lock_edits(app.root()))
         .transpose()?;
     let ctx = &app.output;
-    let loc = ParsedLocation::parse(&args.location)?.to_absolute_with_root(Some(app.root()))?;
-
-    if let Err(e) = loc.validate_position_async().await {
-        ctx.print_error(e);
-        return Ok(());
-    }
+    let loc = ParsedLocation::parse(&args.location)?.resolve(Some(app.root()))?;
 
     let old_name = get_symbol_name_at_position(app, &loc).await;
 

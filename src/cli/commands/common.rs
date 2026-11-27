@@ -298,7 +298,7 @@ where
     O: Serialize + crate::cli::response::DisclosesIndexing,
 {
     let ctx = &app.output;
-    let loc = loc.parse()?.to_absolute()?;
+    let loc = loc.parse()?.resolve(None)?;
 
     match lsp_call(loc.file, loc.line, loc.column).await {
         Ok(answer) => {
@@ -343,7 +343,7 @@ where
     O: Serialize,
 {
     let ctx = &app.output;
-    let loc = loc.parse()?.to_absolute()?;
+    let loc = loc.parse()?.resolve(None)?;
     let anchor = anchor_of(app, &loc, FindSymbolsOptions::default().with_depth(10)).await;
 
     match lsp_call(anchor.file.clone(), anchor.line, anchor.column).await {

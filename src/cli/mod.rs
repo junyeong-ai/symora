@@ -204,8 +204,10 @@ pub enum Commands {
 }
 
 /// Parse every `symora …` command a piece of advice names, as an agent would
-/// run it: `<location>` and `"<symbol>"` are the placeholders it fills, and a
-/// named command ends at ` or ` or at the end of the advice.
+/// run it: `<location>`, `<file>` and `"<symbol>"` are the placeholders it
+/// fills, its words are split as a shell splits them, quotes and all (a
+/// value `utils::shell_arg` encodes is one word), and a named command ends
+/// at ` or ` or at the end of the advice.
 #[cfg(test)]
 pub(crate) fn assert_named_commands_parse(advice: &str) {
     use clap::Parser;
@@ -216,13 +218,36 @@ pub(crate) fn assert_named_commands_parse(advice: &str) {
             .next()
             .unwrap_or(named)
             .replace("<location>", "src/lib.rs:1:1")
+            .replace("<file>", "src/lib.rs")
             .replace("\"<symbol>\"", "name");
-        let args = std::iter::once("symora")
-            .chain(command.split_whitespace().map(|arg| arg.trim_matches('"')));
+        let args = std::iter::once("symora".to_string()).chain(shell_words(&command));
         if let Err(err) = Cli::try_parse_from(args) {
             panic!("`{advice}` names `symora {command}`: {err}");
         }
     }
+}
+
+/// A command line's words as a POSIX shell reads them: quoted text, single
+/// or double, is part of its word, and a backslash outside quotes escapes
+/// the character after it.
+#[cfg(test)]
+fn shell_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = command.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' | '"' => {
+                let word = word.get_or_insert_with(String::new);
+                word.extend(chars.by_ref().take_while(|&quoted| quoted != ch));
+            }
+            '\\' => word.get_or_insert_with(String::new).extend(chars.next()),
+            ch if ch.is_whitespace() => words.extend(word.take()),
+            ch => word.get_or_insert_with(String::new).push(ch),
+        }
+    }
+    words.extend(word);
+    words
 }
 
 #[cfg(test)]

@@ -144,13 +144,20 @@ impl ParsedLocation {
         Ok((line, column))
     }
 
-    /// Convert to absolute path with security validation
-    pub fn to_absolute(&self) -> Result<Self> {
-        self.to_absolute_with_root(None)
+    /// The position in its file: the path made absolute and canonical, and
+    /// held to `project_root` where one is given, and the line and column
+    /// held to what the file has. A position past the file's end is refused
+    /// here, stating the file's extent, rather than handed to a language
+    /// server, which answers one with an internal error or with nothing, as
+    /// though the position were real and denoted nothing.
+    pub fn resolve(&self, project_root: Option<&Path>) -> Result<Self> {
+        let resolved = self.to_absolute_with_root(project_root)?;
+        resolved.ensure_within_file(&self.file)?;
+        Ok(resolved)
     }
 
     /// Convert to absolute path, optionally validating against project root
-    pub fn to_absolute_with_root(&self, project_root: Option<&Path>) -> Result<Self> {
+    fn to_absolute_with_root(&self, project_root: Option<&Path>) -> Result<Self> {
         let file = if self.file.is_absolute() {
             self.file.clone()
         } else {
@@ -190,62 +197,51 @@ impl ParsedLocation {
         })
     }
 
-    /// Validate position is within file bounds (async version with streaming)
-    pub async fn validate_position_async(&self) -> Result<()> {
-        use tokio::io::{AsyncBufReadExt, BufReader};
+    /// Refuse a line past the file's last, or a column past one beyond its
+    /// line's last character, the zero-width position at its end. Lines are
+    /// counted as `str::lines` counts them, and an empty file still has the
+    /// one position `1:1`. A line that is not UTF-8 is left to the reader that
+    /// refuses the file as not text, since its characters cannot be counted.
+    /// `named` is the path as it was given, which the refusal names.
+    fn ensure_within_file(&self, named: &Path) -> Result<()> {
+        use std::io::BufRead;
 
-        let file = tokio::fs::File::open(&self.file)
-            .await
-            .with_context(|| format!("Failed to open file: {}", self.file.display()))?;
-
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-        let mut line_num = 0u32;
-
-        while let Some(line) = lines.next_line().await? {
-            line_num += 1;
-            if line_num == self.line {
-                let char_count = line.chars().count();
-                if self.column as usize > char_count + 1 {
-                    bail!(CliInputError::ColumnOutOfRange {
-                        column: self.column,
-                        chars: char_count,
-                        line: self.line,
-                    });
-                }
-                return Ok(());
+        let mut reader = std::io::BufReader::new(std::fs::File::open(&self.file)?);
+        let mut text = Vec::new();
+        let mut lines = 0u32;
+        while lines < self.line {
+            text.clear();
+            if reader.read_until(b'\n', &mut text)? == 0 {
+                break;
             }
+            lines += 1;
         }
-
-        let line_count = line_num.max(1) as usize;
-        bail!(CliInputError::LineOutOfRange {
-            line: self.line,
-            total: line_count,
-        })
-    }
-
-    pub fn validate_position_with_content(&self, content: &str) -> Result<()> {
-        let lines: Vec<&str> = content.lines().collect();
-        let line_count = lines.len().max(1);
-
-        if self.line as usize > line_count {
-            bail!(CliInputError::LineOutOfRange {
-                line: self.line,
-                total: line_count,
-            });
-        }
-
-        if let Some(line_content) = lines.get((self.line - 1) as usize) {
-            let char_count = line_content.chars().count();
-            if self.column as usize > char_count + 1 {
-                bail!(CliInputError::ColumnOutOfRange {
-                    column: self.column,
-                    chars: char_count,
+        if lines < self.line {
+            if lines == 0 && self.line == 1 {
+                text.clear();
+            } else {
+                bail!(CliInputError::LinePastEnd {
+                    file: named.to_path_buf(),
                     line: self.line,
+                    lines: lines as usize,
                 });
             }
         }
-
+        let text = match text.strip_suffix(b"\n") {
+            Some(text) => text.strip_suffix(b"\r").unwrap_or(text),
+            None => &text,
+        };
+        if let Ok(text) = std::str::from_utf8(text) {
+            let chars = text.chars().count();
+            if self.column as usize > chars + 1 {
+                bail!(CliInputError::ColumnPastEnd {
+                    file: named.to_path_buf(),
+                    line: self.line,
+                    column: self.column,
+                    chars,
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -337,25 +333,55 @@ mod tests {
         assert_eq!(loc.column, 5);
     }
 
+    /// The refusal, if any, for `position` in a file holding `content`.
+    fn refusal(content: &str, position: &str) -> Option<String> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.rs"), content).unwrap();
+        let named = format!("{}/f.rs:{position}", dir.path().display());
+        let err = ParsedLocation::parse(&named).unwrap().resolve(None).err()?;
+        let message = err.to_string();
+        Some(message.replace(&format!("{}/", dir.path().display()), ""))
+    }
+
+    /// A position is held to the file it names before any server is asked,
+    /// and a refusal states the extent the position is past.
     #[test]
-    fn test_validate_position_with_content() {
-        let loc = ParsedLocation {
-            file: PathBuf::from("test.rs"),
-            line: 2,
-            column: 5,
-            column_explicit: true,
-        };
-
-        let content = "line1\nline2\nline3";
-        assert!(loc.validate_position_with_content(content).is_ok());
-
-        let loc_invalid = ParsedLocation {
-            file: PathBuf::from("test.rs"),
-            line: 10,
-            column: 1,
-            column_explicit: true,
-        };
-        assert!(loc_invalid.validate_position_with_content(content).is_err());
+    fn a_position_past_the_files_end_is_refused_with_its_extent() {
+        let content = "fn a() {}\n// 한글\n";
+        assert_eq!(refusal(content, "2"), None);
+        assert_eq!(refusal(content, "2:6"), None, "one past the last character");
+        assert_eq!(refusal(content, "1:10"), None);
+        assert_eq!(
+            refusal(content, "3").as_deref(),
+            Some("Line 3 is past the end of f.rs, which has 2 lines")
+        );
+        assert_eq!(
+            refusal(content, "999:1").as_deref(),
+            Some("Line 999 is past the end of f.rs, which has 2 lines")
+        );
+        assert_eq!(
+            refusal(content, "2:7").as_deref(),
+            Some("Column 7 is past the end of line 2 of f.rs, which has 5 characters"),
+            "a column counts characters, not bytes"
+        );
+        assert_eq!(
+            refusal("one\r\ntwo", "1:5").as_deref(),
+            Some("Column 5 is past the end of line 1 of f.rs, which has 3 characters"),
+            "a CRLF ending is no character of the line"
+        );
+        assert_eq!(
+            refusal("one", "2").as_deref(),
+            Some("Line 2 is past the end of f.rs, which has 1 line")
+        );
+        assert_eq!(
+            refusal("", "1:1"),
+            None,
+            "an empty file has the position 1:1"
+        );
+        assert_eq!(
+            refusal("", "1:2").as_deref(),
+            Some("Column 2 is past the end of line 1 of f.rs, which has 0 characters")
+        );
     }
 
     #[test]

@@ -34,7 +34,7 @@ pub struct ImpactArgs {
 
 pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
-    let loc = args.loc.parse()?.to_absolute()?;
+    let loc = args.loc.parse()?.resolve(None)?;
     let test_scope = app.test_scope();
     let root = ctx.root();
     let depth = args.depth.clamp(1, CALL_GRAPH_MAX_DEPTH);

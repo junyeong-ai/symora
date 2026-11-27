@@ -253,7 +253,7 @@ pub(super) async fn resolve_symbol(
         if symbol_path.is_some() {
             anyhow::bail!(conflicting_addressing(target));
         }
-        let loc = ParsedLocation::parse(target)?.to_absolute_with_root(Some(app.root()))?;
+        let loc = ParsedLocation::parse(target)?.resolve(Some(app.root()))?;
         let column = loc.column_explicit.then_some(loc.column);
         return find_symbol_at_location(app, loc.file, loc.line, column).await;
     }

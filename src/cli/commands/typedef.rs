@@ -24,7 +24,7 @@ pub struct TypedefArgs {
 pub async fn execute(args: TypedefArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let limit = args.limit.unwrap_or(app.config().lsp.typedef_limit);
-    let loc = args.loc.parse()?.to_absolute()?;
+    let loc = args.loc.parse()?.resolve(None)?;
 
     match app
         .lsp

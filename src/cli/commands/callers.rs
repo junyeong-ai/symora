@@ -50,7 +50,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let cfg = app.config();
     let limit = args.limit.unwrap_or(cfg.lsp.calls_limit);
-    let loc = args.loc.parse()?.to_absolute()?;
+    let loc = args.loc.parse()?.resolve(None)?;
     let anchor = crate::cli::commands::common::anchor_of(
         app,
         &loc,

@@ -31,7 +31,12 @@ fn location_schema_with(column_desc: &str) -> Value {
     schema_object(
         &[
             ("file", "string", "Project-relative file path"),
-            ("line", "integer", "1-indexed line number"),
+            (
+                "line",
+                "integer",
+                "1-indexed line number. A position past the file's end, line or column, is \
+                 refused as invalid_argument stating the file's extent",
+            ),
             ("column", "integer", column_desc),
         ],
         &["file", "line"],
@@ -74,7 +79,12 @@ pub fn edit_target_schema() -> Value {
                 "Symbol path within the file (e.g. 'Class/method'), as returned by \
                  search_symbols or list_file_symbols",
             ),
-            ("line", "integer", "1-indexed line number of the symbol"),
+            (
+                "line",
+                "integer",
+                "1-indexed line number of the symbol. A position past the file's end is \
+                 refused as invalid_argument stating the file's extent",
+            ),
             (
                 "column",
                 "integer",

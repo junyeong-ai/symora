@@ -192,7 +192,7 @@ async fn probe_outgoing(app: &App, file: &std::path::Path, line: u32, column: u3
 
 async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) -> Result<()> {
     let ctx = &app.output;
-    let loc = loc.parse()?.to_absolute()?;
+    let loc = loc.parse()?.resolve(None)?;
     let anchor = anchor_of(app, &loc, FindSymbolsOptions::default().with_depth(10)).await;
 
     if probe_outgoing(app, &anchor.file, anchor.line, anchor.column)
@@ -240,8 +240,8 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
 
 async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Result<()> {
     let ctx = &app.output;
-    let loc = loc.parse()?.to_absolute()?;
-    let target_loc = ParsedLocation::parse(to)?.to_absolute()?;
+    let loc = loc.parse()?.resolve(None)?;
+    let target_loc = ParsedLocation::parse(to)?.resolve(None)?;
 
     let anchor = anchor_of(app, &loc, FindSymbolsOptions::default().with_depth(10)).await;
     let target = anchor_of(

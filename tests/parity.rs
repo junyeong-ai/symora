@@ -121,6 +121,26 @@ const CASES: &[ParityCase] = &[
         cli: &["diagnostics", "src/main.rs", "--severity", "bogus"],
         error: Some("invalid_argument"),
     },
+    // A position past its file's end is refused before any server is asked,
+    // so these answer alike with no server running.
+    ParityCase {
+        tool: "find_references",
+        arguments: r#"{"file":"src/main.rs","line":99999}"#,
+        cli: &["refs", "src/main.rs:99999"],
+        error: Some("invalid_argument"),
+    },
+    ParityCase {
+        tool: "get_hover",
+        arguments: r#"{"file":"src/main.rs","line":1,"column":9999}"#,
+        cli: &["hover", "src/main.rs:1:9999"],
+        error: Some("invalid_argument"),
+    },
+    ParityCase {
+        tool: "find_call_path",
+        arguments: r#"{"file":"src/main.rs","line":1,"to":"src/main.rs:99999"}"#,
+        cli: &["callees", "src/main.rs:1", "--to", "src/main.rs:99999"],
+        error: Some("invalid_argument"),
+    },
 ];
 
 fn run_cli(args: &[&str]) -> Vec<Value> {

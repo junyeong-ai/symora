@@ -58,7 +58,7 @@ pub async fn execute(args: ActionsArgs, app: &App) -> Result<()> {
 
 async fn execute_list(args: ListArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
-    let loc = ParsedLocation::parse(&args.location)?.to_absolute_with_root(Some(app.root()))?;
+    let loc = ParsedLocation::parse(&args.location)?.resolve(Some(app.root()))?;
 
     match app.lsp.code_actions(&loc.file, loc.line, loc.column).await {
         Ok(actions) => {
@@ -95,7 +95,7 @@ async fn execute_apply(args: ApplyArgs, app: &App) -> Result<()> {
         .then(|| super::edit::lock_edits(app.root()))
         .transpose()?;
     let ctx = &app.output;
-    let loc = ParsedLocation::parse(&args.location)?.to_absolute_with_root(Some(app.root()))?;
+    let loc = ParsedLocation::parse(&args.location)?.resolve(Some(app.root()))?;
 
     match app.lsp.code_actions(&loc.file, loc.line, loc.column).await {
         Ok(actions) => {
