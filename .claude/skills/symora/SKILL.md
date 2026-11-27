@@ -71,8 +71,9 @@ symora diagnostics src/auth.py --with-context
 - Prefer a returned symbol path over line numbers for sequential edits. `insert-before`/`insert-after` take `--code`; range replace and AST pattern take `--text`. Range `--expect` checks the live text.
 - Delete's `--expect-no-references` requires verified static reference freedom, so under `unconfirmed` it refuses: check `refs` yourself and delete without it. A static zero alone does not establish that code is unused.
 - Rename applies under confirmed workspace readiness. Under `unconfirmed`, compare each file's `edit_count` in the `--dry-run` with `refs` for the target, which leaves out the declaration the rename also edits, then apply with `--accept-unconfirmed`; the response keeps the marker, so check that no reference kept the old name. `timed_out` permits previews only.
-- `edit pattern` replaces match 0 unless `--index N` or `--index all` selects others; `--index all` refuses overlapping matches. Multi-file application is not atomic; inspect already-applied files before retrying an error.
+- `edit pattern` rewrites the syntax nodes a tree-sitter pattern matches in one file, so a repeated replacement leaves look-alike text in strings and comments alone. It replaces match 0 unless `--index N` or `--index all` selects others; `--index all` refuses overlapping matches.
 - `actions list <file:line:col>` lists the server's code actions at a position; `actions apply <file:line:col> '<title>' --dry-run` previews one by its exact title.
+- `rename` and `actions apply` check every file before writing any, but a write that fails partway leaves earlier files modified; the error's hint names them, so inspect those before retrying.
 
 ## Recover
 
