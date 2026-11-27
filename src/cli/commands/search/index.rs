@@ -35,8 +35,9 @@ struct IndexStatusOutput {
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     unread_paths: Vec<String>,
     /// The build to run when no completed one stands behind these counts.
-    /// A never-built index is the one state every search reads as absence,
-    /// and it is the only state the remedy is unconditional in.
+    /// The first symbol search would run it anyway; building ahead spares
+    /// that search the wait, and it is the only state the remedy is
+    /// unconditional in.
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     next_commands: Vec<String>,
     /// The languages this index answers authoritatively for — empty until a
@@ -102,9 +103,10 @@ fn parse_build_languages(languages: Option<&str>) -> Result<Option<Vec<Language>
 
 /// The build to prescribe beside a status.
 ///
-/// A never-built index answers every search as absence, and that is the one
-/// state whose remedy holds without qualification. A completed build needs no
-/// second one, and a build in flight is already the remedy running.
+/// A never-built index is the one state whose remedy holds without
+/// qualification: the first symbol search would otherwise pay for the build.
+/// A completed build needs no second one, and a build in flight is already
+/// the remedy running.
 fn status_next_commands(languages: &[Language], is_indexing: bool) -> Vec<String> {
     match languages.is_empty() && !is_indexing {
         true => vec!["symora search index build".to_string()],

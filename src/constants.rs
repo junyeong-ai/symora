@@ -48,6 +48,14 @@ pub mod defaults {
     /// + open file descriptors trade off here).
     pub const STORE_INDEX_CONCURRENCY: usize = 16;
 
+    /// How long a caller waits on an index build it does not run itself: one
+    /// sent to the daemon — a `search index build`, or the build a symbol
+    /// search starts — and one a symbol search finds already running. A build
+    /// the caller runs in process has no such bound and runs to completion.
+    /// A daemon finishes a build its caller stopped waiting for, and a build
+    /// cut off in process resumes where it stopped.
+    pub const INDEX_BUILD_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+
     /// Reference counts `symbols --refs` and `diff-impact` keep in flight.
     /// Enough to overlap round-trips on a file of methods without queueing a
     /// file's worth of work inside a server that answers one at a time.

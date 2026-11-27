@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use super::{CoverageGap, Section, SymbolSource};
 use crate::cli::OutputContext;
 use crate::cli::utils::shell_arg;
+use crate::constants::defaults::INDEX_BUILD_WAIT;
 use crate::error::{LspError, StoreError};
 use crate::models::symbol::{Language, PathPattern, SymbolKind};
 use crate::services::store::{TreeCurrency, UnreadPath};
@@ -410,17 +411,15 @@ pub fn relative_stale_files(ctx: &OutputContext, files: &[String]) -> HashSet<St
 pub enum WorkspaceSearchRoute {
     /// `--workspace-symbols` explicitly skipped the index.
     Forced,
-    /// The store reported `NotInitialized`; the live lookup is the
-    /// fallback and the zero is workspace-only.
-    IndexNotBuilt,
-    /// A build owns the index, so it has no completed state to answer
-    /// from. The live lookup is the same fallback, but the remedy is to
-    /// wait for the build rather than to start one.
+    /// A build still owned the index when the search stopped waiting for
+    /// it, so it had no completed state to answer from. The live lookup is
+    /// the fallback, and the remedy is to wait for that build rather than to
+    /// start one.
     IndexRebuilding,
-    /// The store could not be read at all. Like the two above, the live
-    /// lookup is the whole answer; unlike them, the state is not one the
-    /// index reaches on its own, so what it costs is disclosed separately by
-    /// [`index_unavailable_disclosure`].
+    /// The store could not be read, or no build had completed and the one
+    /// the search ran failed. The live lookup is the whole answer, and the
+    /// state is not one the index leaves on its own, so what it costs is
+    /// disclosed separately by [`IndexAbsence::disclosure`].
     IndexUnreadable,
     /// A path-like query routed here; a built index still supplements
     /// the live results in the same call.
@@ -558,8 +557,8 @@ pub struct SymbolRerun<'a> {
 /// The remedy for the first gap. A language that was never searched is
 /// cured by asking for it, whatever the route; a language that could not
 /// answer is cured by the route's own escape — a forced live lookup by
-/// dropping the flag, an unbuilt index by building it, but only where the
-/// extractor covers the language, since `search index build` can never
+/// dropping the flag, a path query no index supplemented by building one, but
+/// only where the extractor covers the language, since `search index build` can never
 /// help one it does not.
 pub fn symbol_coverage_next_commands(
     rerun: SymbolRerun<'_>,
@@ -636,16 +635,14 @@ pub fn symbol_coverage_next_commands(
         ],
         // The index cannot be asked to help yet, so the only remedy left is
         // the server's own; what to do about the index is stated by the route
-        // — wait for the build, or read the failure `index_unavailable_disclosure`
+        // — wait for the build, or read the failure `IndexAbsence::disclosure`
         // put beside this.
         DisclosureRoute::WorkspaceOnly(
             WorkspaceSearchRoute::IndexRebuilding | WorkspaceSearchRoute::IndexUnreadable,
         ) => {
             vec![format!("symora doctor {lang}")]
         }
-        DisclosureRoute::WorkspaceOnly(
-            WorkspaceSearchRoute::IndexNotBuilt | WorkspaceSearchRoute::PathQuery,
-        ) => {
+        DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::PathQuery) => {
             if crate::services::symbols::SymbolExtractor::is_supported(gap.language) {
                 vec![
                     "symora search index build".to_string(),
@@ -836,34 +833,94 @@ pub fn with_coverage_disclosure<T>(
     }
 }
 
-/// Why an answer is workspace-only, read from the store failure that made it
-/// so.
+/// Why the index took no part in a symbol search's answer.
 ///
-/// Every route that falls back to live symbols derives it here, so two
+/// A symbol search reads an index only once one has had its build: it builds
+/// one where no build has completed, and waits for the build that owns one.
+/// What is left to answer around is a build still running when the search
+/// stopped waiting, a build of its own that failed, or a store it could not
+/// read — each routes the live lookup that answers in the index's place and
+/// says what the absence cost. A daemon that was never reached is none of
+/// them: the store said nothing, so it is reported as itself.
+///
+/// Every route that falls back to live symbols derives both from here, so two
 /// surfaces meeting the same store state cannot prescribe opposite remedies —
 /// which is what happened while one asserted "the index was consulted" and
-/// the other read the outcome. Its pair is
-/// [`index_unavailable_disclosure`]: the route decides the wording, and the
-/// disclosure says what the failure itself was. `None` where there is no
-/// route to take, because the failure is not the store's — see
-/// [`StoreError::describes_the_store`].
-pub fn workspace_route_for(error: &StoreError) -> Option<WorkspaceSearchRoute> {
-    match error {
-        StoreError::NotInitialized => Some(WorkspaceSearchRoute::IndexNotBuilt),
-        StoreError::Rebuilding => Some(WorkspaceSearchRoute::IndexRebuilding),
-        // Nothing to route around: the store never answered, so it is reported
-        // as itself (see `StoreError::describes_the_store`).
-        StoreError::Unreachable(_) => None,
-        // Every other failure leaves the store unread rather than unbuilt.
-        // Named rather than caught by a `_` so a variant added to `StoreError`
-        // has to be placed here instead of silently reading as unreadable.
-        StoreError::Busy
-        | StoreError::AlreadyIndexing
-        | StoreError::EmptyScope
-        | StoreError::Database(_)
-        | StoreError::Corrupt(_)
-        | StoreError::SchemaMismatch { .. }
-        | StoreError::Io(_) => Some(WorkspaceSearchRoute::IndexUnreadable),
+/// the other read the outcome.
+#[derive(Debug)]
+pub enum IndexAbsence {
+    /// A build still owned the index when the search's wait for it,
+    /// [`INDEX_BUILD_WAIT`], ran out: one already running when the search
+    /// came to it, or the search's own, sent to a daemon.
+    StillBuilding,
+    /// No build had completed, and the one the search ran failed.
+    BuildFailed(StoreError),
+    /// The store refused the read itself.
+    Unreadable(StoreError),
+    /// The store was never reached — see [`StoreError::describes_the_store`].
+    Unreachable(StoreError),
+}
+
+impl IndexAbsence {
+    /// The route the live lookup takes in the index's place; `None` where
+    /// there is nothing to route around.
+    pub fn route(&self) -> Option<WorkspaceSearchRoute> {
+        match self {
+            Self::StillBuilding => Some(WorkspaceSearchRoute::IndexRebuilding),
+            Self::BuildFailed(_) | Self::Unreadable(_) => {
+                Some(WorkspaceSearchRoute::IndexUnreadable)
+            }
+            Self::Unreachable(_) => None,
+        }
+    }
+
+    /// What the absence costs the answer, and the command that acts on it.
+    /// Not a language gap — nothing is missing from the answer's domain — but
+    /// a bare result would otherwise read as one the index confirmed.
+    ///
+    /// A failed build is not cured by building: the same run just tried. The
+    /// name's text is what still answers without an index or a server, so a
+    /// content search for it is the remedy where the query spells one.
+    pub fn disclosure(&self, rerun: SymbolRerun<'_>) -> Option<(String, String)> {
+        match self {
+            Self::StillBuilding => Some((
+                format!(
+                    "A build of the search index was still running after this search waited {}s \
+                     for it, so the index took no part in this answer",
+                    INDEX_BUILD_WAIT.as_secs()
+                ),
+                "symora search index status".to_string(),
+            )),
+            Self::BuildFailed(error) => Some((
+                format!(
+                    "The search index could not be built in .symora/, so it took no part in this \
+                     answer ({error})"
+                ),
+                literal_query(rerun.query)
+                    .map(|literal| {
+                        format!(
+                            "symora search content{}{} -- {}",
+                            rerun
+                                .language
+                                .map(|language| format!(" --lang={}", shell_arg(language)))
+                                .unwrap_or_default(),
+                            path_flags(rerun.within),
+                            shell_arg(&literal)
+                        )
+                    })
+                    .unwrap_or_else(|| "symora search index status".to_string()),
+            )),
+            Self::Unreadable(error) => index_unavailable_disclosure(error),
+            Self::Unreachable(_) => None,
+        }
+    }
+
+    /// The failure as the error a route that cannot answer around it reports.
+    pub fn into_error(self) -> StoreError {
+        match self {
+            Self::StillBuilding => StoreError::Rebuilding,
+            Self::BuildFailed(error) | Self::Unreadable(error) | Self::Unreachable(error) => error,
+        }
     }
 }
 
@@ -872,9 +929,9 @@ pub fn workspace_route_for(error: &StoreError) -> Option<WorkspaceSearchRoute> {
 /// Not a language gap — nothing is missing from the answer's domain, and each
 /// surface already says what DID answer through `backend` and its coverage —
 /// but a bare result would otherwise read as one the index confirmed.
-/// `NotInitialized` is the exception: an index that was never built is the
-/// ordinary state, and the routes that meet it already say so in their own
-/// words.
+/// `NotInitialized` is the exception: a content search answers an index that
+/// was never built by scanning the tree, which costs its answer nothing, and a
+/// symbol search builds one before it reads.
 pub fn index_unavailable_disclosure(error: &StoreError) -> Option<(String, String)> {
     match error {
         StoreError::NotInitialized => None,
@@ -967,20 +1024,17 @@ pub async fn index_currency_disclosure(
 /// What an index that did not answer a language costs a symbol answer a
 /// language server gave for it alone without confirming workspace readiness:
 /// the answer may be short, and a build that takes the language in answers it
-/// without waiting on the server, whether the index was never built or its
-/// last build left the language out. Nothing to say for a language whose
-/// server confirmed readiness or that the index cannot extract, nor on a
-/// route that would not consult a built index.
+/// without waiting on the server. Said where the index answered and its last
+/// build left the language out — a search builds an index no build has
+/// completed before it reads, so that is the one index-backed answer a build
+/// can still widen. Nothing to say for a language whose server confirmed
+/// readiness or that the index cannot extract, nor on a route that did not
+/// consult the index.
 pub fn unindexed_live_disclosure(
     route: DisclosureRoute,
     degraded: &[Language],
     covered: &[Language],
 ) -> Option<(String, String)> {
-    let buildable = matches!(
-        route,
-        DisclosureRoute::IndexConsulted
-            | DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt)
-    );
     let unindexed: Vec<&str> = degraded
         .iter()
         .filter(|language| {
@@ -989,23 +1043,18 @@ pub fn unindexed_live_disclosure(
         })
         .map(|language| language.lsp_id())
         .collect();
-    if !buildable || unindexed.is_empty() {
+    if route != DisclosureRoute::IndexConsulted || unindexed.is_empty() {
         return None;
     }
     let languages = unindexed.join(", ");
-    let fact = match route {
-        DisclosureRoute::WorkspaceOnly(_) => format!(
-            "The search index is not built, so this answer rests on a language server that \
-             did not confirm workspace readiness; a built index answers {languages} without \
-             waiting for it"
-        ),
-        DisclosureRoute::IndexConsulted => format!(
+    Some((
+        format!(
             "The last index build left out {languages}, so this answer rests on a language \
              server that did not confirm workspace readiness for it; a build without --lang \
              indexes {languages} and answers without waiting for it"
         ),
-    };
-    Some((fact, "symora search index build".to_string()))
+        "symora search index build".to_string(),
+    ))
 }
 
 /// What a rebuilding index costs an answer that could not consult it. Its
@@ -1223,12 +1272,13 @@ mod tests {
         assert!(SymbolExtractor::is_supported(Language::Rust));
         let rust = gap(Language::Rust);
 
-        let not_built = route(WorkspaceSearchRoute::IndexNotBuilt);
+        // An index whose last build was narrowed to other languages.
+        let narrowed = DisclosureRoute::IndexConsulted;
         assert_eq!(
-            symbol_coverage_next_commands(rerun("alpha"), &rust, not_built),
+            symbol_coverage_next_commands(rerun("alpha"), &rust, narrowed),
             ["symora search index build"]
         );
-        assert!(symbol_coverage_hints(&rust, not_built)[0].contains("the index does not hold it"));
+        assert!(symbol_coverage_hints(&rust, narrowed)[0].contains("the index does not hold it"));
 
         let forced = route(WorkspaceSearchRoute::Forced);
         assert_eq!(
@@ -1240,8 +1290,17 @@ mod tests {
                 .contains("--workspace-symbols skipped the index")
         );
 
-        let rebuilding = route(WorkspaceSearchRoute::IndexRebuilding);
-        assert!(symbol_coverage_next_commands(rerun("alpha"), &rust, rebuilding).is_empty());
+        // Neither a build still running nor one that just failed is cured by
+        // starting another.
+        for absent in [
+            WorkspaceSearchRoute::IndexRebuilding,
+            WorkspaceSearchRoute::IndexUnreadable,
+        ] {
+            assert!(
+                symbol_coverage_next_commands(rerun("alpha"), &rust, route(absent)).is_empty(),
+                "{absent:?}"
+            );
+        }
 
         let unextracted = Language::all()
             .into_iter()
@@ -1249,14 +1308,14 @@ mod tests {
             .expect("a language the index does not extract");
         let other = gap(unextracted);
         assert_eq!(
-            symbol_coverage_next_commands(rerun("alpha"), &other, not_built),
+            symbol_coverage_next_commands(rerun("alpha"), &other, narrowed),
             [format!(
                 "symora search content --lang {} -- 'alpha'",
                 unextracted.lsp_id()
             )]
         );
         assert!(
-            symbol_coverage_hints(&other, not_built)[0].contains("the index does not extract it")
+            symbol_coverage_hints(&other, narrowed)[0].contains("the index does not extract it")
         );
 
         let mixed = [
@@ -1267,11 +1326,11 @@ mod tests {
         assert!(!SymbolExtractor::is_supported(Language::Css));
         assert!(!SymbolExtractor::is_supported(Language::Html));
         assert_eq!(
-            symbol_coverage_next_commands(rerun("alpha"), &mixed, not_built),
+            symbol_coverage_next_commands(rerun("alpha"), &mixed, narrowed),
             ["symora search index build"],
             "the build that cures the project's own language leads"
         );
-        assert!(symbol_coverage_hints(&mixed, not_built)[0].contains("for rust"));
+        assert!(symbol_coverage_hints(&mixed, narrowed)[0].contains("for rust"));
     }
 
     /// A content search is offered the name a symbol path ends in, as source
@@ -1357,52 +1416,95 @@ mod tests {
         );
     }
 
+    /// Every way the index stays out of a symbol answer that the search
+    /// can answer around, each made fresh.
+    fn absences() -> Vec<IndexAbsence> {
+        vec![
+            IndexAbsence::StillBuilding,
+            IndexAbsence::BuildFailed(StoreError::Io(std::io::Error::other("boom"))),
+            IndexAbsence::BuildFailed(StoreError::Busy),
+            IndexAbsence::Unreadable(StoreError::Corrupt("boom".to_string())),
+            IndexAbsence::Unreadable(StoreError::Busy),
+            IndexAbsence::Unreadable(StoreError::Io(std::io::Error::other("boom"))),
+        ]
+    }
+
     /// An index that did not answer took no part in the answer, and each
     /// reason it did not has its own remedy. Read from the store outcome
     /// here — a surface that asserted the route instead prescribed narrowing
-    /// a result the index had never produced.
+    /// a result the index had never produced. None of them is cured by
+    /// starting a build: the search gave the index its build before it
+    /// answered around it.
     #[test]
     fn an_index_that_did_not_answer_never_reads_as_one_that_did() {
         let shortfall = [Uncovered::not_reached(
             Language::Rust,
             CoverageReason::ServerNotInstalled,
         )];
-        let commands = |error: &StoreError| {
-            symbol_coverage_next_commands(
+        let build = "symora search index build".to_string();
+        for absence in absences() {
+            let route = absence.route().expect("a store state has a route");
+            let commands = symbol_coverage_next_commands(
                 rerun("alpha"),
                 &shortfall,
-                DisclosureRoute::WorkspaceOnly(
-                    workspace_route_for(error).expect("a store state has a route"),
-                ),
-            )
-        };
-        let build = "symora search index build".to_string();
-
-        assert!(
-            commands(&StoreError::NotInitialized).contains(&build),
-            "an index that was never built is cured by building it"
-        );
-        for out_of_reach in [
-            StoreError::Rebuilding,
-            StoreError::Corrupt("boom".to_string()),
-            StoreError::Busy,
-            StoreError::Io(std::io::Error::other("boom")),
-        ] {
-            assert!(
-                !commands(&out_of_reach).contains(&build),
-                "{out_of_reach} is not cured by starting a build"
+                DisclosureRoute::WorkspaceOnly(route),
             );
+            let (fact, remedy) = absence
+                .disclosure(rerun("alpha"))
+                .expect("a store state costs the answer something");
+            assert!(
+                !commands.contains(&build) && remedy != build,
+                "{absence:?} is not cured by starting a build"
+            );
+            assert!(fact.contains("took no part in this answer"), "{fact}");
             assert_ne!(
-                commands(&out_of_reach),
+                commands,
                 symbol_coverage_next_commands(
                     rerun("alpha"),
                     &shortfall,
                     DisclosureRoute::IndexConsulted
                 ),
-                "{out_of_reach} left the index out of the answer, so it may not be steered \
+                "{absence:?} left the index out of the answer, so it may not be steered \
                  as though the index had narrowed one"
             );
         }
+    }
+
+    /// Each absence says which it was, because each has a different remedy: a
+    /// build still running is waited for, and a build that failed leaves the
+    /// name's text, which a content search reads without an index or a
+    /// server.
+    #[test]
+    fn an_absent_index_names_what_kept_it_out() {
+        let (running, wait) = IndexAbsence::StillBuilding
+            .disclosure(rerun("alpha"))
+            .unwrap();
+        assert!(running.contains("still running"), "{running}");
+        assert_eq!(wait, "symora search index status");
+
+        let failed =
+            IndexAbsence::BuildFailed(StoreError::Io(std::io::Error::other("Permission denied")));
+        let within = [PathBuf::from("src")];
+        let (fact, remedy) = failed
+            .disclosure(SymbolRerun {
+                language: Some("rust"),
+                within: &within,
+                ..rerun("Shape/area")
+            })
+            .unwrap();
+        assert!(
+            fact.contains("could not be built") && fact.contains("Permission denied"),
+            "{fact}"
+        );
+        assert_eq!(
+            remedy, "symora search content --lang='rust' --path='src' -- 'area'",
+            "the content search re-runs the search's own scope for the name it ends in"
+        );
+
+        let (unread, _) = IndexAbsence::Unreadable(StoreError::Busy)
+            .disclosure(rerun("alpha"))
+            .unwrap();
+        assert!(unread.contains("could not be read"), "{unread}");
     }
 
     /// `--workspace-symbols` is how a caller gets an answer that owes nothing
@@ -1413,43 +1515,32 @@ mod tests {
     fn only_a_path_query_lets_the_index_supplement_a_live_answer() {
         assert!(WorkspaceSearchRoute::PathQuery.supplements_from_index());
         assert!(!WorkspaceSearchRoute::Forced.supplements_from_index());
-        assert!(!WorkspaceSearchRoute::IndexNotBuilt.supplements_from_index());
         assert!(!WorkspaceSearchRoute::IndexRebuilding.supplements_from_index());
         assert!(!WorkspaceSearchRoute::IndexUnreadable.supplements_from_index());
     }
 
     /// A route that asked the index and was refused is no longer the route
     /// that asked. `PathQuery` prescribes a build, which is exactly wrong for
-    /// an index already building or one nothing can open — so the route a
-    /// failed supplement leaves behind is always derived from the failure, and
-    /// `workspace_route_for` can never answer with a route that would ask
-    /// again.
+    /// an index still building or one whose build just failed — so the route
+    /// a failed supplement leaves behind is always derived from what kept the
+    /// index out, and can never be one that would ask again.
     #[test]
     fn a_refused_supplement_never_leaves_the_route_that_asked_for_it() {
-        let failures: Vec<fn() -> StoreError> = vec![
-            || StoreError::NotInitialized,
-            || StoreError::Rebuilding,
-            || StoreError::Busy,
-            || StoreError::Corrupt("boom".to_string()),
-            || StoreError::Io(std::io::Error::other("boom")),
-        ];
-        for make in failures {
-            let route = workspace_route_for(&make()).expect("a store state has a route");
+        for absence in absences() {
+            let route = absence.route().expect("a store state has a route");
             assert!(
                 !route.supplements_from_index(),
-                "{} left a route that would ask the index again",
-                make()
+                "{absence:?} left a route that would ask the index again"
             );
         }
 
         // A transport failure is not a store state, so it has no route at all
         // — it is reported as itself rather than answered around.
-        assert!(
-            workspace_route_for(&StoreError::Unreachable(Box::new(
-                crate::error::LspError::NotConnected
-            )))
-            .is_none()
-        );
+        let unreachable = IndexAbsence::Unreachable(StoreError::Unreachable(Box::new(
+            crate::error::LspError::NotConnected,
+        )));
+        assert!(unreachable.route().is_none());
+        assert!(unreachable.disclosure(rerun("alpha")).is_none());
     }
 
     /// A build's holes and this run's holes can be different directories: one

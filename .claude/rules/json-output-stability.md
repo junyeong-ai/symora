@@ -80,6 +80,8 @@ Location analysis echoes the resolved `target` by name, kind, and its own `file`
 
 Read rows and their completed-build scope in the same database transaction. Per-file refreshes do not establish whole-project coverage. `search index status` always carries `languages`; empty means no completed symbol build. `last_indexed` dates that completion, not the newest row. Persist `unread_paths` with completion and retire a path when a later refresh settles it.
 
+A symbol search reads the index only once it has had its build: every route that reads one builds an index no build has completed, and waits for a build that owns it. A build already running is waited for up to ten minutes (`INDEX_BUILD_WAIT`); the search's own as `search index build` waits for one: in process to completion, and sent to a daemon for up to the same ten minutes, after which a build the daemon is still running counts as one still running past the wait. Its answer is then the index's, with no mark of who built it. Where that build failed, or a build still ran past the wait, the live answer leads its hints with which, and prescribes no build: a failed one offers a content search for the name, a running one its status.
+
 `index_size_bytes` is the database's page count times page size, including committed WAL pages. It belongs to status, not an individual build. A conflicting build or lock is transient contention; retry after it releases.
 
 ## Errors and optional fields

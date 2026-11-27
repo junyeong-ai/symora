@@ -32,7 +32,7 @@ pub(super) fn calculate_timeout(config: &LspRuntimeConfig, method: &str) -> Dura
         | methods::NOTE_FILES_EDITED => {
             return Duration::from_secs(30);
         }
-        methods::INDEX_BUILD => return Duration::from_secs(600),
+        methods::INDEX_BUILD => return crate::constants::defaults::INDEX_BUILD_WAIT,
         methods::INDEX_CLEAR | methods::INDEX_STATUS => return Duration::from_secs(120),
         methods::SEARCH_SYMBOLS | methods::SEARCH_CONTENT => return Duration::from_secs(60),
         methods::TREE_CURRENCY | methods::INDEXED_LANGUAGES => {

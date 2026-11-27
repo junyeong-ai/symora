@@ -237,6 +237,26 @@ impl IsolatedDaemon {
         command
     }
 
+    /// Start the daemon before the test runs anything beside it. Where pipes
+    /// cannot be made close-on-exec atomically (macOS), a process spawned
+    /// while another thread makes one can inherit its writing end, and a
+    /// daemon inherits it from the command that starts it and holds it for
+    /// as long as it serves: the command the pipe belongs to never sees its
+    /// output end, and the test stops the daemon only after that command
+    /// returns.
+    fn start(&self) {
+        let output = self
+            .command(Path::new(env!("CARGO_TARGET_TMPDIR")))
+            .args(["daemon", "start", "--format", "compact"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "daemon start failed: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
     /// Assert that this installation's daemon is serving from this test's own
     /// home: a command that could not reach one runs in process and agrees
     /// with the direct run without comparing anything, and one that served
@@ -425,6 +445,72 @@ fn daemon_and_direct_emit_identical_payloads() {
         );
         assert_eq!(direct, daemon, "daemon and direct diverged for {args:?}");
     }
+}
+
+/// A first symbol search builds the index it answers from whichever way it
+/// runs — in process, through a daemon, or as an MCP tool — so three copies of
+/// one project no index was built for answer it alike, each from its own new
+/// index. The project's language server cannot start, so an answer the index
+/// did not give would differ from one it did. Each copy is a root of its own,
+/// so the three run at once.
+#[test]
+#[cfg(unix)]
+fn a_first_search_builds_and_answers_alike_in_process_through_a_daemon_and_over_mcp() {
+    let project = || {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn helper_alpha() {}\npub fn helper_beta() {}\n",
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join(".symora")).unwrap();
+        std::fs::write(
+            dir.path().join(".symora/config.toml"),
+            "[lsp.servers.rust]\ncommand = \"/nonexistent/rust-analyzer-missing\"\n",
+        )
+        .unwrap();
+        dir
+    };
+    let args = ["search", "symbols", "helper"];
+    let (direct_root, daemon_root, mcp_root) = (project(), project(), project());
+    let daemon = IsolatedDaemon::for_test("a_first_search_builds_and_answers_alike");
+    daemon.start();
+
+    let (direct, through_daemon, over_mcp) = std::thread::scope(|scope| {
+        let direct = scope.spawn(|| {
+            let output = symora()
+                .args(args)
+                .args(["--format", "compact"])
+                .current_dir(direct_root.path())
+                .env("SYMORA_NO_DAEMON", "1")
+                .stderr(Stdio::null())
+                .output()
+                .unwrap();
+            vec![common::parse_response(&output.stdout).unwrap()]
+        });
+        let over_mcp = scope.spawn(|| {
+            McpSession::new(Some(mcp_root.path()))
+                .call("search_symbols", json!({"query": "helper"}))
+        });
+        let through_daemon = run_daemon_cli(&daemon, daemon_root.path(), &args);
+        (
+            direct.join().unwrap(),
+            through_daemon,
+            over_mcp.join().unwrap(),
+        )
+    });
+
+    assert_eq!(direct[0]["count"], 2, "{direct:?}");
+    assert!(
+        direct[0]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["backend"] == "index"),
+        "{direct:?}"
+    );
+    assert_eq!(direct, through_daemon, "daemon and direct diverged");
+    assert_eq!(direct, over_mcp, "MCP and the CLI diverged");
 }
 
 /// The quiescence gate is only meaningful if it actually recognises the

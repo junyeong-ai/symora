@@ -45,7 +45,7 @@ No two declarations of a file share a name position: the index keeps one row per
 - `Default*` — in-process (direct LSP child processes; the store's SQLite opens lazily on first use).
 - `Daemon*` — forwards to a `symora daemon` over a Unix socket.
 
-Both implementations preserve the same result semantics and error contracts. Compare payloads under equivalent source and server state; indexing can change observations between calls (invariant #3). A read against a missing store reports `NotInitialized`, so the caller answers from its live source instead (a filesystem scan for content, language servers for symbols); a present-but-unopenable store surfaces the real error.
+Both implementations preserve the same result semantics and error contracts. Compare payloads under equivalent source and server state; indexing can change observations between calls (invariant #3). A read against a missing store reports `NotInitialized`, so the caller answers from its live source instead — a filesystem scan for content — or, for symbols, builds the index first and answers from language servers only where that build fails or a build is still running past the wait — one already running, or its own sent to a daemon, since in process its own runs to completion; a present-but-unopenable store surfaces the real error.
 
 Rename captures its request-document hash before the retry loop and retains it across all attempts and server restarts.
 

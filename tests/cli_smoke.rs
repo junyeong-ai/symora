@@ -521,10 +521,20 @@ fn an_unreadable_subtree_is_reported_as_io_rather_than_as_absence() {
         return;
     }
     // Every language this project has is behind the blocked directory, so
-    // "no languages" would be a claim the walk never got to make.
-    assert_eq!(
-        code_of(&["--format", "compact", "search", "symbols", "beta"]),
-        "io"
+    // "no languages" would be a claim the walk never got to make. A symbol
+    // search answers from the index it builds, whose walk was turned away
+    // there too, so its zero is a lower bound naming the path.
+    let search = run_in(root, &["--format", "compact", "search", "symbols", "beta"]);
+    let answer: serde_json::Value = common::parse_response(&search.stdout).unwrap();
+    assert!(search.status.success(), "{answer}");
+    assert_eq!(answer["incomplete"], true, "{answer}");
+    assert!(
+        answer["hints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hint| hint.as_str().unwrap().contains("(blocked)")),
+        "{answer}"
     );
     assert_eq!(
         code_of(&["--format", "compact", "map", "file", "blocked/b.rs"]),
@@ -952,6 +962,160 @@ fn a_symbol_zero_is_authoritative_until_the_tree_moves() {
         json["count"], 1,
         "the prescribed rebuild must reach the file the disclosure was about: {json}"
     );
+}
+
+/// A Rust project no index was ever built for, whose language server cannot
+/// start: whatever a symbol search answers, it answers from an index, or it
+/// says why it could not.
+#[cfg(unix)]
+fn unindexed_project() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "fn main() {}\nstruct Shape;\nimpl Shape {\n    fn area(&self) -> u32 {\n        0\n    }\n}\nfn helper_alpha() {}\n",
+    )
+    .unwrap();
+    let config_dir = dir.path().join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.rust]\ncommand = \"/nonexistent/rust-analyzer-missing\"\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// A project whose index was never built answers its first symbol search
+/// from an index: the search builds it first, the same build `search index
+/// build` runs, rather than leave the answer to a language server whose zero
+/// reads as absence. Every route that reads the index does — a name, a
+/// wildcard, and a path query the index supplements — and the index stays
+/// built for the searches after it.
+#[cfg(unix)]
+#[test]
+fn a_first_symbol_search_builds_the_index_it_answers_from() {
+    for (query, name_path) in [
+        ("helper_alpha", "helper_alpha"),
+        ("*_alpha", "helper_alpha"),
+        ("Shape/area", "Shape/area"),
+    ] {
+        let dir = unindexed_project();
+        let answer = json_ok(dir.path(), &["search", "symbols", query]);
+        assert_eq!(answer["count"], 1, "{query}: {answer}");
+        assert_eq!(answer["items"][0]["name_path"], name_path, "{answer}");
+        assert_eq!(answer["items"][0]["backend"], "index", "{query}: {answer}");
+        assert!(
+            answer.get("coverage_gaps").is_none() && answer.get("hints").is_none(),
+            "{query}: rust is in the index the search built, so a dead server costs it nothing: \
+             {answer}"
+        );
+        let status = json_ok(dir.path(), &["search", "index", "status"]);
+        assert!(
+            status["languages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|language| language == "rust"),
+            "{query}: the build stays for the next search: {status}"
+        );
+    }
+}
+
+/// A checkout whose `.symora` cannot be written cannot hold an index, so its
+/// first symbol search answers from language servers alone and says the index
+/// could not be built — with the name's text as the remedy, never the build
+/// that just failed. A wildcard, which only an index answers, reports the
+/// failure instead.
+#[cfg(unix)]
+#[test]
+fn a_search_that_cannot_build_the_index_says_so_and_prescribes_no_build() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = unindexed_project();
+    let state = dir.path().join(".symora");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let restore = || {
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // Asked of the directory, not of the answer: permission bits do not
+    // constrain root, and an answer that built its index would pass for one
+    // the environment let build.
+    if std::fs::write(state.join("probe"), "").is_ok() {
+        restore();
+        eprintln!("skipping: this process writes through a read-only directory");
+        return;
+    }
+
+    let answer = json_ok(dir.path(), &["search", "symbols", "helper_alpha"]);
+    let hints = answer["hints"].as_array().expect("hints");
+    assert!(
+        hints[0].as_str().unwrap().contains("could not be built"),
+        "{answer}"
+    );
+    let next: Vec<&str> = answer["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|command| command.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        next[0], "symora search content -- 'helper_alpha'",
+        "{answer}"
+    );
+    assert!(!next.contains(&"symora search index build"), "{answer}");
+    assert_eq!(
+        answer["coverage_gaps"][0]["reason"], "server_not_installed",
+        "the zero rests on a server that never answered, and says so: {answer}"
+    );
+
+    let wildcard = run_in(
+        dir.path(),
+        &["--format", "compact", "search", "symbols", "*alpha"],
+    );
+    restore();
+    assert!(!wildcard.status.success());
+    let error = common::parse_response(&wildcard.stdout).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not be built"),
+        "{error}"
+    );
+}
+
+/// A search that finds a build owning the index waits for it rather than
+/// answering without the index, and then reads what it left — here a build
+/// that stopped without completing, so the search builds the index itself.
+#[cfg(unix)]
+#[test]
+fn a_search_waits_out_the_build_that_owns_the_index() {
+    let dir = unindexed_project();
+    let held =
+        symora::infra::file_lock::FileLock::exclusive(&dir.path().join(".symora/index.lock"))
+            .unwrap()
+            .expect("nothing else holds a fresh project's index");
+    let mut search = symora()
+        .args(["--format", "compact", "search", "symbols", "helper_alpha"])
+        .current_dir(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let waited = search.try_wait().unwrap().is_none();
+    drop(held);
+    let output = search.wait_with_output().unwrap();
+    assert!(
+        waited,
+        "a search answered while a build owned the index: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(output.status.success());
+    let answer = common::parse_response(&output.stdout).unwrap();
+    assert_eq!(answer["count"], 1, "{answer}");
+    assert_eq!(answer["items"][0]["backend"], "index", "{answer}");
+    assert!(answer.get("hints").is_none(), "{answer}");
 }
 
 /// A file that holds no text is outside a search's domain, not a hole in its
@@ -1892,7 +2056,8 @@ fn a_path_query_answers_from_the_index_by_path_not_by_substring() {
 
 /// A computed member is named by its brackets, whatever kind their text
 /// spells, and no server search lists one. Alone, it is answered by the index
-/// or disclosed as unasked; under what encloses it, by its path.
+/// — the one the first search builds — or, where the index leaves its
+/// language out, disclosed as unasked; under what encloses it, by its path.
 #[test]
 fn a_computed_member_is_found_by_its_brackets() {
     let dir = tempfile::tempdir().unwrap();
@@ -1911,6 +2076,15 @@ fn a_computed_member_is_found_by_its_brackets() {
     )
     .unwrap();
 
+    let first = json_ok(dir.path(), &["search", "symbols", "[key]"]);
+    assert_eq!(first["count"], 1, "{first}");
+    assert_eq!(first["items"][0]["backend"], "index", "{first}");
+
+    let narrowed = run_in(
+        dir.path(),
+        &["search", "index", "build", "--force", "--lang", "rust"],
+    );
+    assert!(narrowed.status.success());
     let unasked = json_ok(dir.path(), &["search", "symbols", "[key]"]);
     assert_eq!(unasked["count"], 0, "{unasked}");
     assert_eq!(unasked["incomplete"], true, "{unasked}");

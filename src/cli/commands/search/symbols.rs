@@ -8,10 +8,10 @@ use crate::app::App;
 use crate::cli::OutputContext;
 use crate::cli::OutputError;
 use crate::cli::response::disclosure::{
-    Cap, DisclosureRoute, LiveLookup, LowerBound, SymbolRerun, Uncovered, WorkspaceSearchRoute,
-    coverage_shortfall, index_currency_disclosure, index_holes_bound, index_unavailable_disclosure,
+    Cap, DisclosureRoute, IndexAbsence, LiveLookup, LowerBound, SymbolRerun, Uncovered,
+    WorkspaceSearchRoute, coverage_shortfall, index_currency_disclosure, index_holes_bound,
     literal_query, ordered_bounds, path_flags, relative_stale_files, unindexed_live_disclosure,
-    with_coverage_disclosure, workspace_route_for,
+    with_coverage_disclosure,
 };
 use crate::cli::response::{CoverageGap, Section, SymbolSource};
 use crate::cli::symbol_discovery::{
@@ -20,12 +20,13 @@ use crate::cli::symbol_discovery::{
 };
 use crate::cli::utils::shell_arg;
 use crate::cli::{FileSymbols, SymbolBackend};
+use crate::constants::defaults::INDEX_BUILD_WAIT;
 use crate::error::{LspError, StoreError};
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
 use crate::models::symbol::{Language, PathPattern, Symbol, SymbolFilter, SymbolKind};
 use crate::services::TestScope;
-use crate::services::store::SymbolSearchResult;
+use crate::services::store::{IndexOptions, SearchPage, SymbolSearchResult};
 use crate::services::symbols::SymbolExtractor;
 
 use super::common::{looks_like_symbol_path, resolve_search_paths};
@@ -279,16 +280,15 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
         .await;
     }
 
-    match app
-        .store
-        .search_symbols(
-            query,
-            candidate_budget(limit),
-            kind,
-            explicit_index_language(language),
-            &within,
-        )
-        .await
+    match read_index(
+        app,
+        query,
+        candidate_budget(limit),
+        kind,
+        explicit_index_language(language),
+        &within,
+    )
+    .await
     {
         Ok(page) => {
             let mut count = page.total;
@@ -370,15 +370,16 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
             )
             .await;
         }
-        // Nothing to read the index for: never built, a build owns it, or it
-        // could not be opened at all. Live LSP workspace symbols answer in its
-        // place, and the route says which of the three it was — one is cured
-        // by building, one by waiting, and one by neither.
-        Err(e) => {
+        // Nothing to read the index for: a build still owned it when the
+        // search stopped waiting, the build it ran failed, or it could not be
+        // opened at all. Live LSP workspace symbols answer in its place, and
+        // the route says which it was — one is cured by waiting, the others
+        // by neither a wait nor a build.
+        Err(absence) => {
             // A daemon that was never reached says nothing about the store, so
             // there is nothing to answer around: it is reported as itself.
-            let Some(route) = workspace_route_for(&e) else {
-                ctx.print_error(OutputError::from(e));
+            let Some(route) = absence.route() else {
+                ctx.print_error(OutputError::from(absence.into_error()));
                 return Ok(());
             };
             return execute_workspace_symbol_search(
@@ -387,7 +388,7 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
                 WorkspaceRoute {
                     route,
                     detected: &detected,
-                    index_unavailable: index_unavailable_disclosure(&e),
+                    index_unavailable: absence.disclosure(search.rerun()),
                 },
             )
             .await;
@@ -427,37 +428,44 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
     // bare `*`, or `*/[key]`, whose reading as a name ending in `/` holds no
     // literal run. `finish_symbol_search` caps the emitted page at the display
     // `limit`.
-    let page = match app
-        .store
-        .search_symbols(
-            seed,
-            usize::MAX,
-            kind,
-            explicit_index_language(language),
-            within,
-        )
-        .await
+    // A wildcard is answered from the index alone, so an index that took no
+    // part leaves nothing to answer with.
+    let page = match read_index(
+        app,
+        seed,
+        usize::MAX,
+        kind,
+        explicit_index_language(language),
+        within,
+    )
+    .await
     {
         Ok(page) => page,
-        Err(StoreError::NotInitialized) => {
-            ctx.print_error(
-                OutputError::not_found("Search index not built")
-                    .with_hint("Run 'symora search index build', then retry the wildcard query"),
-            );
-            return Ok(());
-        }
-        // A wildcard is answered from the index alone, so a build in
-        // progress leaves nothing to answer with — but telling the caller
-        // to build one would be prescribing what is already running.
-        Err(StoreError::Rebuilding) => {
+        // Telling the caller to build would be prescribing what is already
+        // running.
+        Err(IndexAbsence::StillBuilding) => {
             ctx.print_error(
                 OutputError::from(StoreError::Rebuilding)
                     .with_hint("Wait for 'symora search index status' to report is_indexing: false, then retry the wildcard query"),
             );
             return Ok(());
         }
-        Err(e) => {
-            ctx.print_error(OutputError::from(e));
+        Err(IndexAbsence::BuildFailed(error)) => {
+            let error = OutputError::from(error);
+            ctx.print_error(
+                OutputError::new(
+                    error.code,
+                    format!(
+                        "The search index could not be built in .symora/: {}",
+                        error.message
+                    ),
+                )
+                .with_hint("A wildcard query is answered from the index alone; name the symbol without '*' to search language servers instead"),
+            );
+            return Ok(());
+        }
+        Err(absence) => {
+            ctx.print_error(OutputError::from(absence.into_error()));
             return Ok(());
         }
     };
@@ -643,35 +651,35 @@ async fn execute_workspace_symbol_search(
     let supplement = match route.supplements_from_index() {
         true => Some({
             let (searched, rows) = store_path_query(&pattern, limit);
-            app.store
-                .search_symbols(
-                    searched,
-                    rows,
-                    kind,
-                    explicit_index_language(language),
-                    within,
-                )
-                .await
+            read_index(
+                app,
+                searched,
+                rows,
+                kind,
+                explicit_index_language(language),
+                within,
+            )
+            .await
         }),
         false => None,
     };
     let mut route = route;
     let mut supplement_unavailable = None;
     let page = match supplement {
-        // An index this run could not read is not the same as there being
-        // nothing to supplement with: the answer rests on the live lookup
-        // alone, and that is worth saying rather than reading as one the index
-        // confirmed. The route becomes what the store said it was, so the
-        // remedy fits the state rather than the query that asked — a path
-        // query prescribing a build to an index already rebuilding otherwise.
-        Some(Err(error)) => {
+        // An index that took no part is not the same as there being nothing
+        // to supplement with: the answer rests on the live lookup alone, and
+        // that is worth saying rather than reading as one the index
+        // confirmed. The route becomes what kept the index out, so the remedy
+        // fits the state rather than the query that asked — a path query
+        // prescribing a build to an index still building otherwise.
+        Some(Err(absence)) => {
             // Except when the store never answered at all, which is the
             // transport failing and is reported as itself.
-            let Some(reason) = workspace_route_for(&error) else {
-                ctx.print_error(OutputError::from(error));
+            let Some(reason) = absence.route() else {
+                ctx.print_error(OutputError::from(absence.into_error()));
                 return Ok(());
             };
-            supplement_unavailable = index_unavailable_disclosure(&error);
+            supplement_unavailable = absence.disclosure(search.rerun());
             route = reason;
             None
         }
@@ -1024,6 +1032,71 @@ fn declaration_of<'a>(declared: &'a [Symbol], row: &SymbolResultOutput) -> Optio
     found
         .into_iter()
         .max_by_key(|symbol| symbol.location.effective_start())
+}
+
+/// How often a search waiting on a build reads the index again. A read while
+/// a build owns the index answers at once, so looking often costs little.
+const BUILD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The index's page for a symbol query, read once the index has had its build.
+///
+/// Where no build has completed, the search builds the index first — the same
+/// incremental build `search index build` runs, written to `.symora/` — rather
+/// than leave the answer to language servers, whose zero after a long wait
+/// reads as absence. A build already running is waited for rather than raced:
+/// the read finds it rebuilding and looks again, until [`INDEX_BUILD_WAIT`]
+/// has passed since the search began; past it the search answers without
+/// the index and says a build is still running. The search waits for its own
+/// build as `search index build` does: run in process, to completion; sent
+/// to a daemon, for [`INDEX_BUILD_WAIT`], after which a build the daemon is
+/// still running reads as one still running. The steps go through the store
+/// service, so a daemon and an in-process run take the same ones and answer
+/// from the same index.
+async fn read_index(
+    app: &App,
+    query: &str,
+    rows: usize,
+    kind: Option<SymbolKind>,
+    language: Option<Language>,
+    within: &[PathBuf],
+) -> Result<SearchPage<SymbolSearchResult>, IndexAbsence> {
+    let deadline = tokio::time::Instant::now() + INDEX_BUILD_WAIT;
+    let mut failed = None;
+    loop {
+        let error = match app
+            .store
+            .search_symbols(query, rows, kind, language, within)
+            .await
+        {
+            Ok(page) => return Ok(page),
+            Err(error) => error,
+        };
+        let waited_out = tokio::time::Instant::now() >= deadline;
+        match error {
+            StoreError::NotInitialized => {
+                if let Some(error) = failed {
+                    return Err(IndexAbsence::BuildFailed(error));
+                }
+                // Every build this search started or waited on stopped
+                // without completing one.
+                if waited_out {
+                    return Err(IndexAbsence::BuildFailed(StoreError::NotInitialized));
+                }
+                match app.store.index(IndexOptions::default()).await {
+                    // Another build took the index first; the next read finds
+                    // it rebuilding and waits for it.
+                    Ok(_) | Err(StoreError::AlreadyIndexing) => {}
+                    Err(error) => failed = Some(error),
+                }
+            }
+            StoreError::Rebuilding if !waited_out => {
+                tokio::time::sleep(BUILD_POLL_INTERVAL).await;
+            }
+            StoreError::Rebuilding => return Err(IndexAbsence::StillBuilding),
+            error if !error.describes_the_store() => return Err(IndexAbsence::Unreachable(error)),
+            error => return Err(IndexAbsence::Unreadable(error)),
+        }
+    }
 }
 
 /// The single language to scope an index `search_symbols` query to: `Some` only
@@ -2264,7 +2337,7 @@ mod tests {
         // and the prose come from the same set, so neither can be alone.
         for route in [
             DisclosureRoute::IndexConsulted,
-            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
+            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexUnreadable),
         ] {
             let section = with_coverage_disclosure(
                 Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
@@ -2484,42 +2557,42 @@ mod tests {
         );
     }
 
+    /// A search whose build of a never-built index failed answers from its
+    /// language servers, and says what kept the index out beside what the
+    /// servers could not cover. It never prescribes the build it just ran:
+    /// the remedy left is the name's text, read by a content search.
     #[test]
-    fn index_not_built_route_steers_extractor_covered_failure_to_index_build() {
+    fn a_failed_build_steers_to_the_text_rather_than_another_build() {
         let failures = vec![server_failure(Language::Rust)];
+        let search = search("alpha", 10);
+        let failed =
+            IndexAbsence::BuildFailed(StoreError::Io(std::io::Error::other("Permission denied")));
         let section = with_coverage_disclosure(
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &gaps(&failures, &[]),
-            search("alpha", 10).rerun(),
-            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
+            search.rerun(),
+            DisclosureRoute::WorkspaceOnly(failed.route().unwrap()),
             &[],
-            &[],
+            &Vec::from_iter(failed.disclosure(search.rerun())),
         );
-        assert_eq!(section.hints.len(), 1);
-        assert!(section.hints[0].contains("rust"));
-        assert!(section.hints[0].contains("workspace symbol lookup failed"));
-        assert!(section.hints[0].contains("server_not_installed"));
+        assert!(
+            section.hints[0].contains("could not be built"),
+            "{:?}",
+            section.hints
+        );
+        assert!(section.hints[1].contains("workspace symbol lookup failed"));
         assert_eq!(
             section.next_commands,
-            vec!["symora search index build", "symora doctor rust"]
+            vec!["symora search content -- 'alpha'", "symora doctor rust"]
         );
     }
 
-    /// Where the index did not answer a language a server answered alone
-    /// without confirming readiness, a build is advised, whether the index
-    /// was never built or its last build left the language out; nowhere a
-    /// build changes nothing. Beside a gap that prescribes the same build, it
-    /// is offered once.
+    /// Where the index answered and its last build left out a language a
+    /// server answered alone without confirming readiness, a build is
+    /// advised; nowhere a build changes nothing — a search that bypassed the
+    /// index, or one whose own build of it failed.
     #[test]
     fn a_build_is_advised_only_where_it_would_answer() {
-        let unbuilt = DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt);
-        let fact = unindexed_live_disclosure(unbuilt, &[Language::Rust], &[])
-            .expect("a build answers rust");
-        assert!(
-            fact.0.contains("not built") && fact.0.contains("rust"),
-            "{}",
-            fact.0
-        );
         let narrowed = unindexed_live_disclosure(
             DisclosureRoute::IndexConsulted,
             &[Language::Python],
@@ -2527,12 +2600,14 @@ mod tests {
         )
         .expect("a build without --lang adds python");
         assert!(narrowed.0.contains("left out python"), "{}", narrowed.0);
+        assert_eq!(narrowed.1, "symora search index build");
         let confined =
             unindexed_live_disclosure(DisclosureRoute::IndexConsulted, &[Language::Python], &[])
                 .expect("a build answers a language confined away from the built ones");
         assert!(confined.0.contains("left out python"), "{}", confined.0);
         assert!(
-            unindexed_live_disclosure(unbuilt, &[], &[]).is_none(),
+            unindexed_live_disclosure(DisclosureRoute::IndexConsulted, &[], &[Language::Rust])
+                .is_none(),
             "a server that confirmed readiness answered in full"
         );
         assert!(
@@ -2544,15 +2619,21 @@ mod tests {
             .is_none(),
             "the index already answers rust"
         );
-        assert!(
-            unindexed_live_disclosure(
-                DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced),
-                &[Language::Rust],
-                &[]
-            )
-            .is_none(),
-            "a search that bypasses the index gains nothing from one"
-        );
+        for bypassed in [
+            WorkspaceSearchRoute::Forced,
+            WorkspaceSearchRoute::IndexRebuilding,
+            WorkspaceSearchRoute::IndexUnreadable,
+        ] {
+            assert!(
+                unindexed_live_disclosure(
+                    DisclosureRoute::WorkspaceOnly(bypassed),
+                    &[Language::Rust],
+                    &[]
+                )
+                .is_none(),
+                "{bypassed:?}: a search the index took no part in gains nothing from a build"
+            );
+        }
         let extractorless = Language::all()
             .into_iter()
             .find(|language| {
@@ -2560,48 +2641,13 @@ mod tests {
                     && !crate::services::symbols::SymbolExtractor::is_supported(*language)
             })
             .expect("some code language has no extractor");
-        assert!(unindexed_live_disclosure(unbuilt, &[extractorless], &[]).is_none());
-
-        let failures = vec![server_failure(Language::Rust)];
-        let section = with_coverage_disclosure(
-            Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
-            &gaps(&failures, &[]),
-            search("alpha", 10).rerun(),
-            unbuilt,
-            &[],
-            &[fact],
-        );
-        assert_eq!(
-            section.next_commands,
-            vec!["symora search index build", "symora doctor rust"]
-        );
-    }
-
-    /// `search index build` can never help a language with no extractor;
-    /// the unbuilt-index route steers those to content search instead.
-    #[test]
-    fn index_not_built_route_never_suggests_index_build_for_extractor_less_language() {
-        let language = Language::all()
-            .into_iter()
-            .find(|language| !crate::services::symbols::SymbolExtractor::is_supported(*language))
-            .expect("a language with no extraction query");
-        let failures = vec![server_failure(language)];
-        let section = with_coverage_disclosure(
-            Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
-            &gaps(&failures, &[]),
-            search("alpha", 10).rerun(),
-            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
-            &[],
-            &[],
-        );
-        assert_eq!(section.hints.len(), 1);
-        assert!(section.hints[0].contains(language.lsp_id()));
-        assert_eq!(
-            section.next_commands,
-            vec![
-                format!("symora search content --lang {language} -- 'alpha'"),
-                format!("symora doctor {language}"),
-            ]
+        assert!(
+            unindexed_live_disclosure(
+                DisclosureRoute::IndexConsulted,
+                &[extractorless],
+                &[Language::Rust]
+            )
+            .is_none()
         );
     }
 
@@ -2636,7 +2682,7 @@ mod tests {
             Section::with_total(vec![result("alpha", "src/a.rs")], 1),
             &gaps(&failures, &[]),
             search("alpha", 10).rerun(),
-            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
+            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexUnreadable),
             &[],
             &[],
         );
