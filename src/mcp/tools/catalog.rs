@@ -48,9 +48,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           body or signature reads each match's source, so a known declaration \
                           needs no second call. A language coverage_gaps lists was not covered, \
                           so a match's absence there proves nothing: search it with \
-                          search_content or search_ast, or fix what its reason names. The \
-                          first search in a project builds its index in .symora/ and answers \
-                          from it.",
+                          search_content or search_ast, or fix what its reason names. In a git \
+                          work tree the first search builds the index in .symora/ and answers \
+                          from it; elsewhere a hint says no index took part and build_index \
+                          builds one.",
             {
                 let mut schema = schema_object(
                     &[
@@ -199,8 +200,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Mutates the project's search index (.symora/), never source. Refresh it after \
                           edits so symbol and content search answer for the working tree, or \
                           rebuild or narrow it — the remedy a currency hint and a not_indexed \
-                          coverage gap name. search_symbols builds an index no build has \
-                          completed on its own.",
+                          coverage gap name. search_symbols builds a missing index on its own \
+                          only in a git work tree; outside one, build it here.",
             schema_object(
                 &[
                     ("force", "boolean", "Rebuild from scratch instead of in place"),

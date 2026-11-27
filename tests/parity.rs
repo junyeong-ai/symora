@@ -447,33 +447,45 @@ fn daemon_and_direct_emit_identical_payloads() {
     }
 }
 
-/// A first symbol search builds the index it answers from whichever way it
-/// runs — in process, through a daemon, or as an MCP tool — so three copies of
-/// one project no index was built for answer it alike, each from its own new
-/// index. The project's language server cannot start, so an answer the index
-/// did not give would differ from one it did. Each copy is a root of its own,
-/// so the three run at once.
+/// A first symbol search in a work tree builds the index it answers from
+/// whichever way it runs — in process, through a daemon, or as an MCP tool —
+/// so three copies of one project in a repository no index was built for
+/// answer it alike, each from its own new index. The project's language
+/// server cannot start, so an answer the index did not give would differ
+/// from one it did. Each copy is a root of its own, so the three run at once.
 #[test]
 #[cfg(unix)]
 fn a_first_search_builds_and_answers_alike_in_process_through_a_daemon_and_over_mcp() {
-    let project = || {
-        let dir = tempfile::tempdir().unwrap();
+    // Copying the daemon's installation takes about as long as making the
+    // repository, so the two overlap.
+    let installing =
+        std::thread::spawn(|| IsolatedDaemon::for_test("a_first_search_builds_and_answers_alike"));
+    let repository = tempfile::tempdir().unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repository.path())
+        .status()
+        .unwrap();
+    assert!(init.success());
+    let project = |name: &str| {
+        let root = repository.path().join(name);
+        std::fs::create_dir_all(root.join(".symora")).unwrap();
         std::fs::write(
-            dir.path().join("lib.rs"),
+            root.join("lib.rs"),
             "pub fn helper_alpha() {}\npub fn helper_beta() {}\n",
         )
         .unwrap();
-        std::fs::create_dir(dir.path().join(".symora")).unwrap();
         std::fs::write(
-            dir.path().join(".symora/config.toml"),
+            root.join(".symora/config.toml"),
             "[lsp.servers.rust]\ncommand = \"/nonexistent/rust-analyzer-missing\"\n",
         )
         .unwrap();
-        dir
+        root
     };
     let args = ["search", "symbols", "helper"];
-    let (direct_root, daemon_root, mcp_root) = (project(), project(), project());
-    let daemon = IsolatedDaemon::for_test("a_first_search_builds_and_answers_alike");
+    let (direct_root, daemon_root, mcp_root) =
+        (project("direct"), project("daemon"), project("mcp"));
+    let daemon = installing.join().unwrap();
     daemon.start();
 
     let (direct, through_daemon, over_mcp) = std::thread::scope(|scope| {
@@ -481,7 +493,7 @@ fn a_first_search_builds_and_answers_alike_in_process_through_a_daemon_and_over_
             let output = symora()
                 .args(args)
                 .args(["--format", "compact"])
-                .current_dir(direct_root.path())
+                .current_dir(&direct_root)
                 .env("SYMORA_NO_DAEMON", "1")
                 .stderr(Stdio::null())
                 .output()
@@ -489,10 +501,9 @@ fn a_first_search_builds_and_answers_alike_in_process_through_a_daemon_and_over_
             vec![common::parse_response(&output.stdout).unwrap()]
         });
         let over_mcp = scope.spawn(|| {
-            McpSession::new(Some(mcp_root.path()))
-                .call("search_symbols", json!({"query": "helper"}))
+            McpSession::new(Some(&mcp_root)).call("search_symbols", json!({"query": "helper"}))
         });
-        let through_daemon = run_daemon_cli(&daemon, daemon_root.path(), &args);
+        let through_daemon = run_daemon_cli(&daemon, &daemon_root, &args);
         (
             direct.join().unwrap(),
             through_daemon,

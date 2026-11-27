@@ -521,9 +521,14 @@ fn an_unreadable_subtree_is_reported_as_io_rather_than_as_absence() {
         return;
     }
     // Every language this project has is behind the blocked directory, so
-    // "no languages" would be a claim the walk never got to make. A symbol
-    // search answers from the index it builds, whose walk was turned away
-    // there too, so its zero is a lower bound naming the path.
+    // "no languages" would be a claim the walk never got to make.
+    assert_eq!(
+        code_of(&["--format", "compact", "search", "symbols", "beta"]),
+        "io"
+    );
+    // In a work tree the search builds the index first, whose walk was turned
+    // away there too, so its zero is a lower bound naming the path.
+    git(root, &["init", "-q"]);
     let search = run_in(root, &["--format", "compact", "search", "symbols", "beta"]);
     let answer: serde_json::Value = common::parse_response(&search.stdout).unwrap();
     assert!(search.status.success(), "{answer}");
@@ -964,25 +969,122 @@ fn a_symbol_zero_is_authoritative_until_the_tree_moves() {
     );
 }
 
-/// A Rust project no index was ever built for, whose language server cannot
-/// start: whatever a symbol search answers, it answers from an index, or it
-/// says why it could not.
+/// Write a Rust project into `dir` whose language server cannot start, so
+/// whatever a symbol search answers there, it answers from an index or says
+/// why it could not.
 #[cfg(unix)]
-fn unindexed_project() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
+fn write_rust_project(dir: &std::path::Path) {
     std::fs::write(
-        dir.path().join("main.rs"),
+        dir.join("main.rs"),
         "fn main() {}\nstruct Shape;\nimpl Shape {\n    fn area(&self) -> u32 {\n        0\n    }\n}\nfn helper_alpha() {}\n",
     )
     .unwrap();
-    let config_dir = dir.path().join(".symora");
+    let config_dir = dir.join(".symora");
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(
         config_dir.join("config.toml"),
         "[lsp.servers.rust]\ncommand = \"/nonexistent/rust-analyzer-missing\"\n",
     )
     .unwrap();
+}
+
+/// A git clone of such a project that no index was ever built for.
+#[cfg(unix)]
+fn unindexed_project() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q"]);
+    write_rust_project(dir.path());
     dir
+}
+
+/// Whether the index answered a first symbol search run in `dir`.
+#[cfg(unix)]
+fn first_search_answers_from_an_index(dir: &std::path::Path) -> bool {
+    let answer = json_ok(dir, &["search", "symbols", "helper_alpha"]);
+    let built = answer["items"][0]["backend"] == "index";
+    let declined = answer["hints"].as_array().is_some_and(|hints| {
+        hints
+            .iter()
+            .any(|hint| hint.as_str().unwrap().contains("only for a git work tree"))
+    });
+    assert!(built != declined, "{}: {answer}", dir.display());
+    if declined {
+        assert_eq!(
+            answer["next_commands"][0], "symora search index build",
+            "a search that left the build to its caller names it: {answer}"
+        );
+    }
+    built
+}
+
+/// A search builds a missing index only where the project root is in a
+/// repository's work tree, as git reads it: a clone, a directory inside one,
+/// a linked worktree, a repository nested in a directory that is none. A
+/// directory that is in no work tree — a home directory, a downloads folder,
+/// an unpacked tarball or a CI checkout without `.git` — answers from its
+/// servers, says no index took part, and leaves the build to an explicit
+/// `search index build`, even when a repository lies beneath it.
+#[cfg(unix)]
+#[test]
+fn a_search_builds_a_missing_index_only_in_a_work_tree() {
+    let plain = tempfile::tempdir().unwrap();
+    write_rust_project(plain.path());
+    assert!(!first_search_answers_from_an_index(plain.path()));
+    assert!(
+        json_ok(plain.path(), &["search", "index", "status"])["languages"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "nothing was built"
+    );
+    run_in(plain.path(), &["search", "index", "build"]);
+    assert!(
+        first_search_answers_from_an_index(plain.path()),
+        "an explicit build is the caller's to make anywhere"
+    );
+
+    let clone = unindexed_project();
+    assert!(first_search_answers_from_an_index(clone.path()));
+
+    let within = unindexed_project();
+    let package = within.path().join("package");
+    std::fs::create_dir(&package).unwrap();
+    write_rust_project(&package);
+    assert!(first_search_answers_from_an_index(&package));
+
+    let linked = unindexed_project();
+    git(linked.path(), &["add", "main.rs"]);
+    git(
+        linked.path(),
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    );
+    let worktree = linked.path().join("linked");
+    git(
+        linked.path(),
+        &["worktree", "add", "-q", worktree.to_str().unwrap()],
+    );
+    write_rust_project(&worktree);
+    assert!(first_search_answers_from_an_index(&worktree));
+
+    let holder = tempfile::tempdir().unwrap();
+    let nested = holder.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    git(&nested, &["init", "-q"]);
+    write_rust_project(&nested);
+    write_rust_project(holder.path());
+    assert!(
+        !first_search_answers_from_an_index(holder.path()),
+        "a directory holding a repository is not one"
+    );
+    assert!(first_search_answers_from_an_index(&nested));
 }
 
 /// A project whose index was never built answers its first symbol search
@@ -2056,8 +2158,7 @@ fn a_path_query_answers_from_the_index_by_path_not_by_substring() {
 
 /// A computed member is named by its brackets, whatever kind their text
 /// spells, and no server search lists one. Alone, it is answered by the index
-/// — the one the first search builds — or, where the index leaves its
-/// language out, disclosed as unasked; under what encloses it, by its path.
+/// or disclosed as unasked; under what encloses it, by its path.
 #[test]
 fn a_computed_member_is_found_by_its_brackets() {
     let dir = tempfile::tempdir().unwrap();
@@ -2076,15 +2177,6 @@ fn a_computed_member_is_found_by_its_brackets() {
     )
     .unwrap();
 
-    let first = json_ok(dir.path(), &["search", "symbols", "[key]"]);
-    assert_eq!(first["count"], 1, "{first}");
-    assert_eq!(first["items"][0]["backend"], "index", "{first}");
-
-    let narrowed = run_in(
-        dir.path(),
-        &["search", "index", "build", "--force", "--lang", "rust"],
-    );
-    assert!(narrowed.status.success());
     let unasked = json_ok(dir.path(), &["search", "symbols", "[key]"]);
     assert_eq!(unasked["count"], 0, "{unasked}");
     assert_eq!(unasked["incomplete"], true, "{unasked}");

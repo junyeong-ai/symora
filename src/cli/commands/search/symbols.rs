@@ -441,6 +441,16 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
     .await
     {
         Ok(page) => page,
+        Err(IndexAbsence::NotBuilt { outside_work_tree }) => {
+            ctx.print_error(
+                OutputError::not_found(format!(
+                    "Search index not built, and a search builds one only for a git work tree, \
+                     which the project root is not ({outside_work_tree})"
+                ))
+                .with_hint("Run 'symora search index build', then retry the wildcard query"),
+            );
+            return Ok(());
+        }
         // Telling the caller to build would be prescribing what is already
         // running.
         Err(IndexAbsence::StillBuilding) => {
@@ -1040,10 +1050,12 @@ const BUILD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_milli
 
 /// The index's page for a symbol query, read once the index has had its build.
 ///
-/// Where no build has completed, the search builds the index first — the same
-/// incremental build `search index build` runs, written to `.symora/` — rather
-/// than leave the answer to language servers, whose zero after a long wait
-/// reads as absence. A build already running is waited for rather than raced:
+/// Where no build has completed and the project root is in a repository's
+/// work tree, the search builds the index first — the same incremental build
+/// `search index build` runs, written to `.symora/` — rather than leave the
+/// answer to language servers, whose zero after a long wait reads as absence.
+/// Anywhere else the build is left to the caller ([`outside_work_tree`]). A
+/// build already running is waited for rather than raced:
 /// the read finds it rebuilding and looks again, until [`INDEX_BUILD_WAIT`]
 /// has passed since the search began; past it the search answers without
 /// the index and says a build is still running. The search waits for its own
@@ -1082,6 +1094,11 @@ async fn read_index(
                 if waited_out {
                     return Err(IndexAbsence::BuildFailed(StoreError::NotInitialized));
                 }
+                if let Some(why) = outside_work_tree(app.root()).await {
+                    return Err(IndexAbsence::NotBuilt {
+                        outside_work_tree: why,
+                    });
+                }
                 match app.store.index(IndexOptions::default()).await {
                     // Another build took the index first; the next read finds
                     // it rebuilding and waits for it.
@@ -1096,6 +1113,44 @@ async fn read_index(
             error if !error.describes_the_store() => return Err(IndexAbsence::Unreachable(error)),
             error => return Err(IndexAbsence::Unreadable(error)),
         }
+    }
+}
+
+/// Why a search may not build the index of the tree it searches, or `None`
+/// where it may: the project root is in a repository's work tree, as git
+/// itself reads it — a clone, a directory inside one, a linked worktree, a
+/// submodule. A home directory, a downloads folder or an unpacked tarball is
+/// none of those, and a build there could walk far more than a project and
+/// write an index nobody asked for, so it is left to an explicit
+/// `search index build`. Decided by where the root sits, never by how much it
+/// holds, and asked in the process that runs the command, so a daemon and an
+/// in-process run decide alike. Git's own words say why, where it says no;
+/// a git that cannot be run says no as well.
+async fn outside_work_tree(root: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await;
+    match output {
+        Ok(output) if output.status.success() => {
+            match String::from_utf8_lossy(&output.stdout).trim() {
+                "true" => None,
+                // Inside a repository's own directory or a bare one, whose
+                // files are git's rather than a project's.
+                _ => Some("git reads it as part of a repository's own directory".to_string()),
+            }
+        }
+        Ok(output) => Some(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .next()
+                .unwrap_or("git rev-parse failed")
+                .trim()
+                .to_string(),
+        ),
+        Err(error) => Some(format!("git could not be run: {error}")),
     }
 }
 
@@ -2337,6 +2392,7 @@ mod tests {
         // and the prose come from the same set, so neither can be alone.
         for route in [
             DisclosureRoute::IndexConsulted,
+            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
             DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexUnreadable),
         ] {
             let section = with_coverage_disclosure(
@@ -2553,6 +2609,66 @@ mod tests {
             vec![
                 "symora search content --lang lua -- 'handler'",
                 "symora doctor lua"
+            ]
+        );
+    }
+
+    /// A search outside a work tree builds no index, so the build is the
+    /// remedy for a language its extractor covers — offered once, beside the
+    /// fact that says why the search did not run it.
+    #[test]
+    fn index_not_built_route_steers_extractor_covered_failure_to_index_build() {
+        let failures = vec![server_failure(Language::Rust)];
+        let search = search("alpha", 10);
+        let declined = IndexAbsence::NotBuilt {
+            outside_work_tree: "fatal: not a git repository".to_string(),
+        };
+        assert_eq!(declined.route(), Some(WorkspaceSearchRoute::IndexNotBuilt));
+        let section = with_coverage_disclosure(
+            Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
+            &gaps(&failures, &[]),
+            search.rerun(),
+            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
+            &[],
+            &Vec::from_iter(declined.disclosure(search.rerun())),
+        );
+        assert!(
+            section.hints[0].contains("only for a git work tree"),
+            "{:?}",
+            section.hints
+        );
+        assert!(section.hints[1].contains("workspace symbol lookup failed"));
+        assert!(section.hints[1].contains("server_not_installed"));
+        assert_eq!(
+            section.next_commands,
+            vec!["symora search index build", "symora doctor rust"]
+        );
+    }
+
+    /// `search index build` can never help a language with no extractor;
+    /// the unbuilt-index route steers those to content search instead.
+    #[test]
+    fn index_not_built_route_never_suggests_index_build_for_extractor_less_language() {
+        let language = Language::all()
+            .into_iter()
+            .find(|language| !crate::services::symbols::SymbolExtractor::is_supported(*language))
+            .expect("a language with no extraction query");
+        let failures = vec![server_failure(language)];
+        let section = with_coverage_disclosure(
+            Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
+            &gaps(&failures, &[]),
+            search("alpha", 10).rerun(),
+            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
+            &[],
+            &[],
+        );
+        assert_eq!(section.hints.len(), 1);
+        assert!(section.hints[0].contains(language.lsp_id()));
+        assert_eq!(
+            section.next_commands,
+            vec![
+                format!("symora search content --lang {language} -- 'alpha'"),
+                format!("symora doctor {language}"),
             ]
         );
     }

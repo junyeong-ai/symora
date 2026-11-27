@@ -58,7 +58,7 @@ symora map summary                          # 저장소 개요
 symora context src/auth/service.ts:42 --body # 알고 있는 심볼 확인
 symora impact src/auth/service.ts:42        # 변경 영향 범위
 
-# 심볼 찾기: 첫 검색이 프로젝트 인덱스를 빌드하고, 이후 검색은 그 인덱스를 읽음
+# 심볼 찾기: git 작업 트리에서는 첫 검색이 인덱스를 빌드하고, 이후 검색은 그 인덱스를 읽음
 symora search symbols AuthService
 symora search index build                   # 소스 변경 후 증분 갱신
 ```
@@ -403,7 +403,7 @@ symora search index status              # languages(인덱스가 다루는 언�
 symora search index clear
 ```
 
-인덱스가 없으면 내용 검색은 파일을 스캔하고, 첫 심볼 검색은 인덱스를 빌드한 뒤(`search index build`와 같은 증분 빌드) 그 인덱스로 답하므로, 그 검색 하나는 빌드만큼 걸립니다. 이미 진행 중인 빌드를 만난 검색은 빌드를 새로 시작하지 않고 그 빌드를 기다립니다. language server만의 답은 워크스페이스 분석을 마치기 전에는 비어 있을 수 있으므로, 심볼 검색은 이곳에서 인덱스를 빌드할 수 없거나(쓸 수 없는 `.symora/`) 검색이 기다리기를 멈출 때까지 빌드가 끝나지 않을 때만 language server로 답하고, 그 경우 hints가 어느 쪽인지와 인덱스가 답에 참여하지 않았음을 알려 줍니다. 이미 진행 중이던 빌드는 10분까지 기다리고, 검색이 직접 시작한 빌드는 `search index build`처럼 기다립니다. 프로세스 안에서는 끝날 때까지, daemon을 거치면 10분까지 기다리며, daemon은 그 뒤에도 빌드를 마칩니다. 도중에 끊긴 빌드는 멈춘 곳부터 이어서 진행합니다. `--force`는 전체 재빌드에만 사용합니다.
+인덱스가 없으면 내용 검색은 파일을 스캔합니다. git 작업 트리(클론, 그 안의 디렉터리, 연결된 worktree나 submodule — `git rev-parse --is-inside-work-tree`가 판단하는 대로)에서는 첫 심볼 검색이 인덱스를 빌드한 뒤(`search index build`와 같은 증분 빌드) 그 인덱스로 답하므로, 그 검색 하나는 빌드만큼 걸립니다. 이미 진행 중인 빌드를 만난 검색은 빌드를 새로 시작하지 않고 그 빌드를 기다립니다. 작업 트리 밖(홈 디렉터리, 다운로드 폴더, 압축을 푼 tarball, `.git` 없는 CI 체크아웃)에서는 요청받지 않은 빌드를 하지 않습니다. language server로 답하되(워크스페이스 분석을 마치기 전에는 비어 있을 수 있음), 인덱스가 답에 참여하지 않았다는 hint와 함께 `symora search index build`를 해결 방법으로 알려 줍니다. 작업 트리 안에서도 인덱스를 빌드할 수 없거나(쓸 수 없는 `.symora/`) 검색이 기다리기를 멈출 때까지 빌드가 끝나지 않으면 language server로 답하고, hints가 어느 쪽인지 알려 줍니다. 이미 진행 중이던 빌드는 10분까지 기다리고, 검색이 직접 시작한 빌드는 `search index build`처럼 기다립니다. 프로세스 안에서는 끝날 때까지, daemon을 거치면 10분까지 기다리며, daemon은 그 뒤에도 빌드를 마칩니다. 도중에 끊긴 빌드는 멈춘 곳부터 이어서 진행합니다. `--force`는 전체 재빌드에만 사용합니다.
 
 ---
 
@@ -556,7 +556,7 @@ symora daemon start | stop | restart | status
 
 | 증상 | 해결 |
 | --- | --- |
-| `search …`가 `count: 0` | 응답의 hints·`coverage_gaps`와 `symora search index status`를 확인하세요. 인덱스를 빌드할 수 없었다거나 아직 빌드 중이었다는 hint가 있으면 인덱스가 답에 참여하지 않은 것입니다. 경로 질의(`Class/method`, `Name[kind]`), 인덱스에 일치하는 항목이 없는 이름, 인덱스가 다루지 않는 언어는 language server를 조회하고, 내용 검색은 파일을 스캔합니다. `--deterministic`은 language server를 조회하지 않습니다. |
+| `search …`가 `count: 0` | 응답의 hints·`coverage_gaps`와 `symora search index status`를 확인하세요. git 작업 트리 밖이라 인덱스를 빌드하지 않았다거나, 빌드할 수 없었다거나, 아직 빌드 중이었다는 hint가 있으면 인덱스가 답에 참여하지 않은 것입니다. 작업 트리 밖에서는 `symora search index build`를 실행하세요. 경로 질의(`Class/method`, `Name[kind]`), 인덱스에 일치하는 항목이 없는 이름, 인덱스가 다루지 않는 언어는 language server를 조회하고, 내용 검색은 파일을 스캔합니다. `--deterministic`은 language server를 조회하지 않습니다. |
 | `server_not_installed` | `symora doctor <lang>` 후 `install` 필드대로 설치, 또는 `[lsp.servers.<lang>]`를 기존 바이너리로 지정 후 `symora daemon restart --project`. `installed: true`인데 `serves: false`면 바이너리는 있으나 실행되지 않는 것(대개 버전 매니저 심(shim)) — 직접 실행해 원인을 보세요. daemon이 상속한 환경을 바꿨다면 전체 `symora daemon restart`가 필요합니다. |
 | 검색 결과의 `coverage_gaps` | 그 언어는 답에 들어 있지 않습니다. `reason: "unavailable"`이면 `message`에 실패 원인의 첫 줄(서버가 `initialize`를 거부했다면 그 이유)이 실리고, hint와 `next_commands`는 조회가 실패한 언어부터 다룹니다. |
 | `indexing: "timed_out"` / `"unconfirmed"` | 해당 요청에서 워크스페이스 준비 상태를 확인하지 못했습니다. 목록은 일부 결과일 수 있으며, 빈 `def`·`hover` 결과는 부재의 증거가 아닙니다. 서버 작업이 끝난 뒤 재시도할 수 있지만, 지원하는 준비 완료 신호가 없는 서버는 계속 미확인 상태입니다. `rename`은 적용을 거부합니다. `--dry-run`으로 편집 집합을 확인한 뒤, `unconfirmed` 상태라면 `--accept-unconfirmed`로 적용할 수 있습니다. |

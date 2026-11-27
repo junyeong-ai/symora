@@ -35,9 +35,9 @@ struct IndexStatusOutput {
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     unread_paths: Vec<String>,
     /// The build to run when no completed one stands behind these counts.
-    /// The first symbol search would run it anyway; building ahead spares
-    /// that search the wait, and it is the only state the remedy is
-    /// unconditional in.
+    /// The first symbol search in a git work tree would run it anyway;
+    /// building ahead spares that search the wait, and it is the only state
+    /// the remedy is unconditional in.
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     next_commands: Vec<String>,
     /// The languages this index answers authoritatively for — empty until a

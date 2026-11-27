@@ -933,10 +933,9 @@ fn a_path_search_over_a_changed_file_lists_each_declaration_once_and_loses_none(
 }
 
 /// Pyright never confirms workspace readiness, so a symbol search that only
-/// pyright answers rests on an answer it cannot vouch for. A project with no
-/// index never gets that answer — its first search builds the index and
-/// answers from it — while one whose last build left Python out does, and is
-/// advised the build that takes Python in.
+/// pyright answers rests on an answer it cannot vouch for, and the index it
+/// extracts Python into is what to build — whether there is no index yet or
+/// the last build left Python out.
 #[test]
 #[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
 fn a_build_is_advised_where_pyright_answers_alone() {
@@ -979,13 +978,8 @@ fn a_build_is_advised_where_pyright_answers_alone() {
         );
     };
 
-    let first = run(&search);
-    assert_eq!(first["count"], 1, "{first}");
-    assert_eq!(first["items"][0]["backend"], "index", "{first}");
-    assert!(
-        first.get("indexing").is_none() && first.get("next_commands").is_none(),
-        "the index the search built answers python without pyright: {first}"
-    );
+    let unbuilt = run(&search);
+    advised(&unbuilt);
 
     run(&["search", "index", "build", "--lang", "rust"]);
     let narrowed = run(&search);

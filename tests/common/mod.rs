@@ -10,6 +10,10 @@ pub const SYMORA: &str = env!("CARGO_BIN_EXE_symora");
 pub fn symora() -> Command {
     let mut command = Command::new(SYMORA);
     command.env("XDG_CONFIG_HOME", no_global_config());
+    // A project a test makes in the system's temporary directory is in no
+    // repository's work tree unless the test makes it one, whichever
+    // directory holds the temporary one: git looks no higher than it.
+    command.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     command
 }
 

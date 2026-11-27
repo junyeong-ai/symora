@@ -411,6 +411,10 @@ pub fn relative_stale_files(ctx: &OutputContext, files: &[String]) -> HashSet<St
 pub enum WorkspaceSearchRoute {
     /// `--workspace-symbols` explicitly skipped the index.
     Forced,
+    /// No build has completed, and the search started none: it builds one
+    /// only for a repository's work tree. The live lookup is the fallback,
+    /// the zero is workspace-only, and building the index is the remedy.
+    IndexNotBuilt,
     /// A build still owned the index when the search stopped waiting for
     /// it, so it had no completed state to answer from. The live lookup is
     /// the fallback, and the remedy is to wait for that build rather than to
@@ -557,7 +561,7 @@ pub struct SymbolRerun<'a> {
 /// The remedy for the first gap. A language that was never searched is
 /// cured by asking for it, whatever the route; a language that could not
 /// answer is cured by the route's own escape — a forced live lookup by
-/// dropping the flag, a path query no index supplemented by building one, but
+/// dropping the flag, an index the search did not build by building it, but
 /// only where the extractor covers the language, since `search index build` can never
 /// help one it does not.
 pub fn symbol_coverage_next_commands(
@@ -642,7 +646,9 @@ pub fn symbol_coverage_next_commands(
         ) => {
             vec![format!("symora doctor {lang}")]
         }
-        DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::PathQuery) => {
+        DisclosureRoute::WorkspaceOnly(
+            WorkspaceSearchRoute::IndexNotBuilt | WorkspaceSearchRoute::PathQuery,
+        ) => {
             if crate::services::symbols::SymbolExtractor::is_supported(gap.language) {
                 vec![
                     "symora search index build".to_string(),
@@ -835,12 +841,13 @@ pub fn with_coverage_disclosure<T>(
 
 /// Why the index took no part in a symbol search's answer.
 ///
-/// A symbol search reads an index only once one has had its build: it builds
-/// one where no build has completed, and waits for the build that owns one.
-/// What is left to answer around is a build still running when the search
-/// stopped waiting, a build of its own that failed, or a store it could not
-/// read — each routes the live lookup that answers in the index's place and
-/// says what the absence cost. A daemon that was never reached is none of
+/// A symbol search reads an index only once one has had its build: in a
+/// repository's work tree it builds one where no build has completed, and
+/// anywhere it waits for the build that owns one. What is left to answer
+/// around is a tree the search would not build for, a build still running
+/// when it stopped waiting, a build of its own that failed, or a store it
+/// could not read — each routes the live lookup that answers in the index's
+/// place and says what the absence cost. A daemon that was never reached is none of
 /// them: the store said nothing, so it is reported as itself.
 ///
 /// Every route that falls back to live symbols derives both from here, so two
@@ -849,6 +856,12 @@ pub fn with_coverage_disclosure<T>(
 /// the other read the outcome.
 #[derive(Debug)]
 pub enum IndexAbsence {
+    /// No build has completed, and the search started none: the project
+    /// root is in no repository's work tree, so a build is left to the caller.
+    NotBuilt {
+        /// Why the root is not in a work tree, in git's own words.
+        outside_work_tree: String,
+    },
     /// A build still owned the index when the search's wait for it,
     /// [`INDEX_BUILD_WAIT`], ran out: one already running when the search
     /// came to it, or the search's own, sent to a daemon.
@@ -866,6 +879,7 @@ impl IndexAbsence {
     /// there is nothing to route around.
     pub fn route(&self) -> Option<WorkspaceSearchRoute> {
         match self {
+            Self::NotBuilt { .. } => Some(WorkspaceSearchRoute::IndexNotBuilt),
             Self::StillBuilding => Some(WorkspaceSearchRoute::IndexRebuilding),
             Self::BuildFailed(_) | Self::Unreadable(_) => {
                 Some(WorkspaceSearchRoute::IndexUnreadable)
@@ -878,11 +892,20 @@ impl IndexAbsence {
     /// Not a language gap — nothing is missing from the answer's domain — but
     /// a bare result would otherwise read as one the index confirmed.
     ///
-    /// A failed build is not cured by building: the same run just tried. The
-    /// name's text is what still answers without an index or a server, so a
-    /// content search for it is the remedy where the query spells one.
+    /// An index the search would not build is cured by building it. A failed
+    /// build is not: the same run just tried. The name's text is what still
+    /// answers without an index or a server, so a content search for it is
+    /// the remedy where the query spells one.
     pub fn disclosure(&self, rerun: SymbolRerun<'_>) -> Option<(String, String)> {
         match self {
+            Self::NotBuilt { outside_work_tree } => Some((
+                format!(
+                    "No search index has been built here, and a search builds one only for a git \
+                     work tree, which the project root is not ({outside_work_tree}), so the index \
+                     took no part in this answer"
+                ),
+                "symora search index build".to_string(),
+            )),
             Self::StillBuilding => Some((
                 format!(
                     "A build of the search index was still running after this search waited {}s \
@@ -918,6 +941,7 @@ impl IndexAbsence {
     /// The failure as the error a route that cannot answer around it reports.
     pub fn into_error(self) -> StoreError {
         match self {
+            Self::NotBuilt { .. } => StoreError::NotInitialized,
             Self::StillBuilding => StoreError::Rebuilding,
             Self::BuildFailed(error) | Self::Unreadable(error) | Self::Unreachable(error) => error,
         }
@@ -1025,9 +1049,8 @@ pub async fn index_currency_disclosure(
 /// language server gave for it alone without confirming workspace readiness:
 /// the answer may be short, and a build that takes the language in answers it
 /// without waiting on the server. Said where the index answered and its last
-/// build left the language out — a search builds an index no build has
-/// completed before it reads, so that is the one index-backed answer a build
-/// can still widen. Nothing to say for a language whose server confirmed
+/// build left the language out; a search the index took no part in says so,
+/// and names its remedy, through [`IndexAbsence`]. Nothing to say for a language whose server confirmed
 /// readiness or that the index cannot extract, nor on a route that did not
 /// consult the index.
 pub fn unindexed_live_disclosure(
@@ -1272,13 +1295,18 @@ mod tests {
         assert!(SymbolExtractor::is_supported(Language::Rust));
         let rust = gap(Language::Rust);
 
-        // An index whose last build was narrowed to other languages.
+        // An index whose last build was narrowed to other languages, and one
+        // a search outside a work tree did not build.
         let narrowed = DisclosureRoute::IndexConsulted;
-        assert_eq!(
-            symbol_coverage_next_commands(rerun("alpha"), &rust, narrowed),
-            ["symora search index build"]
-        );
-        assert!(symbol_coverage_hints(&rust, narrowed)[0].contains("the index does not hold it"));
+        for unbuilt in [narrowed, route(WorkspaceSearchRoute::IndexNotBuilt)] {
+            assert_eq!(
+                symbol_coverage_next_commands(rerun("alpha"), &rust, unbuilt),
+                ["symora search index build"]
+            );
+            assert!(
+                symbol_coverage_hints(&rust, unbuilt)[0].contains("the index does not hold it")
+            );
+        }
 
         let forced = route(WorkspaceSearchRoute::Forced);
         assert_eq!(
@@ -1476,6 +1504,22 @@ mod tests {
     /// server.
     #[test]
     fn an_absent_index_names_what_kept_it_out() {
+        let (declined, build) = IndexAbsence::NotBuilt {
+            outside_work_tree: "fatal: not a git repository".to_string(),
+        }
+        .disclosure(rerun("alpha"))
+        .unwrap();
+        assert!(
+            declined.contains("only for a git work tree")
+                && declined.contains("fatal: not a git repository")
+                && declined.contains("took no part in this answer"),
+            "{declined}"
+        );
+        assert_eq!(
+            build, "symora search index build",
+            "an index the search would not build is the caller's to build"
+        );
+
         let (running, wait) = IndexAbsence::StillBuilding
             .disclosure(rerun("alpha"))
             .unwrap();
@@ -1515,6 +1559,7 @@ mod tests {
     fn only_a_path_query_lets_the_index_supplement_a_live_answer() {
         assert!(WorkspaceSearchRoute::PathQuery.supplements_from_index());
         assert!(!WorkspaceSearchRoute::Forced.supplements_from_index());
+        assert!(!WorkspaceSearchRoute::IndexNotBuilt.supplements_from_index());
         assert!(!WorkspaceSearchRoute::IndexRebuilding.supplements_from_index());
         assert!(!WorkspaceSearchRoute::IndexUnreadable.supplements_from_index());
     }
@@ -1526,7 +1571,10 @@ mod tests {
     /// index out, and can never be one that would ask again.
     #[test]
     fn a_refused_supplement_never_leaves_the_route_that_asked_for_it() {
-        for absence in absences() {
+        let declined = IndexAbsence::NotBuilt {
+            outside_work_tree: "fatal: not a git repository".to_string(),
+        };
+        for absence in absences().into_iter().chain([declined]) {
             let route = absence.route().expect("a store state has a route");
             assert!(
                 !route.supplements_from_index(),

@@ -58,7 +58,7 @@ symora map summary                          # repo overview
 symora context src/auth/service.ts:42 --body # inspect a known symbol
 symora impact src/auth/service.ts:42        # blast radius of a change
 
-# Find a symbol; the first search builds the project's index, later ones read it
+# Find a symbol; in a git work tree the first search builds the index, later ones read it
 symora search symbols AuthService
 symora search index build                   # refresh incrementally after changes
 ```
@@ -403,7 +403,7 @@ symora search index status              # languages covered, symbol/file/line co
 symora search index clear
 ```
 
-Without an index, content search scans files, and the first symbol search builds the index — the same incremental build `search index build` runs — then answers from it, so that one search takes as long as the build. A search that finds a build already running waits for it rather than starting another. A language server's answer alone can be empty until its workspace analysis is done, so a symbol search falls back to one only where the index cannot be built here (a `.symora/` it cannot write) or a build is still running when the search stops waiting for it: a build already running is waited for up to ten minutes, and the search's own as long as `search index build` waits — to completion in process, up to ten minutes through the daemon, which finishes the build all the same. The hints then say which, and that the index took no part in the answer. A build cut off partway resumes where it stopped. `--force` is only for a full rebuild.
+Without an index, content search scans files. In a git work tree — a clone, a directory inside one, a linked worktree or a submodule, as `git rev-parse --is-inside-work-tree` reads it — the first symbol search builds the index (the same incremental build `search index build` runs) and answers from it, so that one search takes as long as the build. A search that finds a build already running waits for it rather than starting another. Outside a work tree — a home directory, a downloads folder, an unpacked tarball, a CI checkout without `.git` — a search builds nothing it was not asked to: it answers from language servers, whose answer can be empty until their workspace analysis is done, and a hint says no index took part, with `symora search index build` as the remedy. Inside one, a symbol search falls back to language servers only where the index cannot be built (a `.symora/` it cannot write) or a build is still running when the search stops waiting for it: a build already running is waited for up to ten minutes, and the search's own as long as `search index build` waits — to completion in process, up to ten minutes through the daemon, which finishes the build all the same. The hints then say which. A build cut off partway resumes where it stopped. `--force` is only for a full rebuild.
 
 ---
 
@@ -556,7 +556,7 @@ Run `symora <command> --help` for any command's flags. Output fields are describ
 
 | Symptom | Fix |
 | --- | --- |
-| `count: 0` from `search …` | Check the response's hints and `coverage_gaps`, and `symora search index status`. A hint that the index could not be built, or was still being built, means the index took no part in the answer. A path query (`Class/method`, `Name[kind]`), a name the index does not match, and a language the index does not cover consult a language server; content search scans files. `--deterministic` never consults a language server. |
+| `count: 0` from `search …` | Check the response's hints and `coverage_gaps`, and `symora search index status`. A hint that no index has been built outside a git work tree, that the index could not be built, or that it was still being built means the index took no part in the answer; outside a work tree, run `symora search index build`. A path query (`Class/method`, `Name[kind]`), a name the index does not match, and a language the index does not cover consult a language server; content search scans files. `--deterministic` never consults a language server. |
 | `server_not_installed` | `symora doctor <lang>` and install per its `install` field, or point `[lsp.servers.<lang>]` at an existing binary, then `symora daemon restart --project`. `installed: true` with `serves: false` means the binary resolves but does not run — usually a version-manager shim; run it directly to see why. Changes to the daemon's inherited environment require a full `symora daemon restart`. |
 | `coverage_gaps` on a search | That language is missing from the answer. With `reason: "unavailable"`, `message` carries the failure's first line (for a server that rejected `initialize`, its reason), and the hints and `next_commands` lead with the languages whose lookup failed. |
 | `indexing: "timed_out"` / `"unconfirmed"` | Workspace readiness was not confirmed for the query. List counts may be partial; an empty `def` or `hover` result does not prove absence. Retry after pending server work finishes, but a server without a supported readiness signal stays unconfirmed. `rename` refuses application; inspect the edit set with `--dry-run`, then apply an `unconfirmed` one with `--accept-unconfirmed`. |
