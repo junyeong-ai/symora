@@ -571,7 +571,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::read_only(
             "get_context",
-            "Aggregated symbol context: callers, callees, related types, and tests. Set with_bodies=true for complete source bodies sharing body_tokens in target/callee/type order. Bodies that do not fit are omitted with body_omitted; source-size fitting can also omit bodies. bodies_included counts emitted section bodies. Missing bodies can be unresolvable or absent in source. refs.is_exported appears only where the compiler decides visibility, so its absence is not false.",
+            "Aggregated symbol context: callers, callees, related types, and tests. all (the default) attaches the target's body; with_bodies=true adds the callees' and types' bodies, all sharing body_tokens in target/callee/type order. Bodies that do not fit are omitted with body_omitted; source-size fitting can also omit bodies. bodies_included counts emitted section bodies. Missing bodies can be unresolvable or absent in source. refs.is_exported appears only where the compiler decides visibility, so its absence is not false.",
             with_extra(
                 location_schema(),
                 &[
@@ -586,11 +586,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "Include outgoing calls (default with all)",
                     ),
                     ("types", "boolean", "Include type definitions used"),
-                    ("tests", "boolean", "Include related tests"),
+                    ("tests", "boolean", "Include the tests whose code references the target"),
                     (
                         "all",
                         "boolean",
-                        "Include every context section (default true)",
+                        "Include every context section and the target's body under body_tokens (default true)",
                     ),
                     (
                         "with_bodies",

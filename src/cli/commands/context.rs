@@ -27,7 +27,8 @@ pub struct ContextArgs {
     #[command(flatten)]
     pub loc: LocationArg,
 
-    /// Include all context (callers, callees, types, tests)
+    /// Include every section (callers, callees, types, tests) and the
+    /// target's body under --body-tokens
     #[arg(short, long)]
     pub all: bool,
 
@@ -43,7 +44,8 @@ pub struct ContextArgs {
     #[arg(long)]
     pub types: bool,
 
-    /// Include related tests (detected by file patterns)
+    /// Include the tests whose code references the target: references in
+    /// test files or in regions compiled only under test
     #[arg(long)]
     pub tests: bool,
 
