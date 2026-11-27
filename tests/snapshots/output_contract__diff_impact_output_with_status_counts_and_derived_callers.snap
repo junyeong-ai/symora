@@ -1,0 +1,83 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "revision": "HEAD",
+  "changed_files_count": 2,
+  "changed_symbols_count": 3,
+  "total_references": 4,
+  "refs_status_counts": {
+    "indexing_degraded": 1
+  },
+  "callers_status_counts": {
+    "not_callable": 1,
+    "references_derived": 1
+  },
+  "coverage": {
+    "with_tests": 1,
+    "without_tests": 1,
+    "ratio": 0.5
+  },
+  "unmeasured_files": [
+    "README.md"
+  ],
+  "hints": [
+    "Documentation and configuration files are not read as symbols: README.md. Read their diff for what changed."
+  ],
+  "changes": [
+    {
+      "name": "process",
+      "kind": "function",
+      "file": "src/main.rs",
+      "line": 12,
+      "column": 5,
+      "change_type": "modified",
+      "refs": 3,
+      "test_refs": 1,
+      "prod_refs": 2,
+      "callers_status": "references_derived",
+      "callers": {
+        "count": 2,
+        "showing": 1,
+        "truncated": true,
+        "items": [
+          {
+            "name": "handle",
+            "kind": "function",
+            "file": "src/api.rs",
+            "line": 30,
+            "column": 8,
+            "call_site": {
+              "file": "src/api.rs",
+              "line": 31,
+              "column": 9
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Handler",
+      "kind": "class",
+      "file": "src/main.rs",
+      "line": 3,
+      "column": 5,
+      "change_type": "modified",
+      "refs": 1,
+      "test_refs": 0,
+      "prod_refs": 1,
+      "refs_status": "indexing_degraded",
+      "callers_status": "not_callable"
+    },
+    {
+      "name": "retired",
+      "kind": "function",
+      "file": "src/main.rs",
+      "line": 40,
+      "column": 5,
+      "change_type": "deleted",
+      "deletion": "resolved"
+    }
+  ]
+}

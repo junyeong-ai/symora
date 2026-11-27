@@ -11,12 +11,16 @@
 //!
 //! Add a new snapshot by writing another `assert_json_snapshot!` block.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use insta::assert_json_snapshot;
 use serde_json::json;
 use symora::cli::blast_radius::{BlastRadius, DepthBucket};
 use symora::cli::commands::diagnostics::{DiagnosticsOutput, EnhancedDiagnostic};
+use symora::cli::commands::diff_impact::{
+    ChangeType, ChangedSymbolImpact, DeletionResolution, DiffCoverage, DiffImpactOutput,
+};
 use symora::cli::errors::{ErrorCode, OutputError};
 use symora::cli::response::{
     ActionOutput, AffectedFileOutput, ApplyActionOutput, CallHierarchyOutput, CoverageGap,
@@ -739,6 +743,80 @@ fn impact_output_full() {
             test_caller_ratio: Some(0.33),
         }),
         next_commands: vec!["symora impact src/main.rs:12:4 --depth 2".to_string()],
+    };
+    assert_json_snapshot!(out);
+}
+
+/// A diff-impact summary counts the rows of each status, and a changed
+/// function's callers read off its references are the shared list marked
+/// `references_derived`; a class row says `not_callable` and lists none; a
+/// deletion carries neither counts nor callers.
+#[test]
+fn diff_impact_output_with_status_counts_and_derived_callers() {
+    let row = |name: &str, kind: &str, line: u32| ChangedSymbolImpact {
+        name: Some(name.to_string()),
+        kind: Some(kind.to_string()),
+        location: sample_location(line, 5),
+        change_type: ChangeType::Modified,
+        refs: None,
+        test_refs: None,
+        prod_refs: None,
+        refs_status: None,
+        callers_status: None,
+        deletion: None,
+        callers: None,
+    };
+    let caller = CallHierarchyItem {
+        name: "handle".to_string(),
+        kind: SymbolKind::Function,
+        location: Location::point(root().join("src/api.rs"), 30, 8),
+        call_site: Some(Location::point(root().join("src/api.rs"), 31, 9)),
+    };
+    let out = DiffImpactOutput {
+        revision: "HEAD".to_string(),
+        changed_files_count: 2,
+        changed_symbols_count: 3,
+        total_references: Some(4),
+        refs_status_counts: BTreeMap::from([("indexing_degraded", 1)]),
+        callers_status_counts: BTreeMap::from([("not_callable", 1), ("references_derived", 1)]),
+        coverage: DiffCoverage {
+            with_tests: 1,
+            without_tests: 1,
+            ratio: Some(0.5),
+        },
+        unmeasured_files: vec!["README.md".to_string()],
+        incomplete: false,
+        hints: vec![
+            "Documentation and configuration files are not read as symbols: README.md. Read \
+             their diff for what changed."
+                .to_string(),
+        ],
+        changes: vec![
+            ChangedSymbolImpact {
+                refs: Some(3),
+                test_refs: Some(1),
+                prod_refs: Some(2),
+                callers_status: Some("references_derived"),
+                callers: Some(Section::with_total(
+                    vec![CallHierarchyOutput::from_item(&caller, &root())],
+                    2,
+                )),
+                ..row("process", "function", 12)
+            },
+            ChangedSymbolImpact {
+                refs: Some(1),
+                test_refs: Some(0),
+                prod_refs: Some(1),
+                refs_status: Some("indexing_degraded"),
+                callers_status: Some("not_callable"),
+                ..row("Handler", "class", 3)
+            },
+            ChangedSymbolImpact {
+                change_type: ChangeType::Deleted,
+                deletion: Some(DeletionResolution::Resolved),
+                ..row("retired", "function", 40)
+            },
+        ],
     };
     assert_json_snapshot!(out);
 }
