@@ -7,6 +7,8 @@ use crate::models::symbol::Language;
 
 use super::init_options::init_options;
 
+pub const CONFIGURATION_METHOD: &str = "workspace/didChangeConfiguration";
+
 pub struct ServerConfiguration {
     pub initialization_options: Option<Value>,
     pub settings: Value,

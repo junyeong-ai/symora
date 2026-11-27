@@ -10,6 +10,7 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot};
 use tokio::time::timeout;
 
+use super::configuration::{CONFIGURATION_METHOD, ServerConfiguration};
 use super::protocol::{
     ClientInfo, DidChangeWatchedFilesParams, InitializeParams, InitializeResult, LspDiagnostic,
     Message, Notification, PositionEncoding, RegistrationParams, Request, RequestId, Response,
@@ -504,11 +505,7 @@ impl LspClient {
 
     /// Initialize the language server
     async fn initialize(&self, admit: impl FnOnce()) -> Result<(), LspError> {
-        let configuration = super::configuration::ServerConfiguration::resolve(
-            self.language,
-            &self.root,
-            &self.config,
-        );
+        let configuration = ServerConfiguration::resolve(self.language, &self.root, &self.config);
         *self.settings.write().await = Some(configuration.settings.clone());
 
         let params = InitializeParams {
@@ -573,7 +570,7 @@ impl LspClient {
             .is_some()
         {
             notifications.push(Notification::new(
-                "workspace/didChangeConfiguration",
+                CONFIGURATION_METHOD,
                 Some(serde_json::json!({"settings": configuration.settings})),
             ));
         }
@@ -1434,11 +1431,16 @@ impl LspClient {
         }
     }
 
-    /// Whether this client offered dynamic registration for `method`.
+    /// Whether this client honours a dynamic registration for `method`.
+    ///
+    /// A configuration registration is honoured without being offered: the
+    /// settings are fixed for the server session, so the client never holds a
+    /// change it would owe the server.
     fn registers(&self, method: &str) -> bool {
         match method {
             WATCHED_FILES_METHOD => self.file_watching,
             DIAGNOSTIC_METHOD => offers_pull_diagnostics(self.language),
+            CONFIGURATION_METHOD => true,
             _ => false,
         }
     }
@@ -1458,10 +1460,15 @@ impl LspClient {
                 registration.method
             )));
         }
-        let (pulls, watchers): (Vec<_>, Vec<_>) = params
-            .registrations
-            .into_iter()
-            .partition(|registration| registration.method == DIAGNOSTIC_METHOD);
+        let mut pulls = Vec::new();
+        let mut watchers = Vec::new();
+        for registration in params.registrations {
+            match registration.method.as_str() {
+                DIAGNOSTIC_METHOD => pulls.push(registration),
+                WATCHED_FILES_METHOD => watchers.push(registration),
+                _ => {}
+            }
+        }
         let pulls = PullProviders::read(&pulls).map_err(Self::invalid_registration)?;
         self.watched_files
             .lock()
@@ -1490,16 +1497,18 @@ impl LspClient {
             )));
         }
         for unregistration in params.unregisterations {
-            if unregistration.method == DIAGNOSTIC_METHOD {
-                self.pull_providers
+            match unregistration.method.as_str() {
+                DIAGNOSTIC_METHOD => self
+                    .pull_providers
                     .lock()
                     .expect("pull providers poisoned")
-                    .unregister(&unregistration.id);
-            } else {
-                self.watched_files
+                    .unregister(&unregistration.id),
+                WATCHED_FILES_METHOD => self
+                    .watched_files
                     .lock()
                     .expect("watch registry poisoned")
-                    .unregister(&unregistration.id);
+                    .unregister(&unregistration.id),
+                _ => {}
             }
         }
         Ok(Value::Null)
@@ -1984,6 +1993,29 @@ mod tests {
                     "registrations": [watching]
                 })))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn configuration_registrations_are_honoured_without_being_offered() {
+        let client = test_client();
+        let configuration = serde_json::json!({
+            "id": "config", "method": CONFIGURATION_METHOD,
+            "registerOptions": { "section": ["typescript"] }
+        });
+        assert!(
+            client
+                .register_capabilities(&Some(serde_json::json!({
+                    "registrations": [configuration]
+                })))
+                .is_ok()
+        );
+        assert!(
+            client
+                .unregister_capabilities(&Some(serde_json::json!({
+                    "unregisterations": [configuration]
+                })))
+                .is_ok()
         );
     }
 
