@@ -430,7 +430,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           dynamic dispatch stays a disclosed lower bound, never an absolute \
                           'unreachable'. target_status reads for `to` as anchor_status does for \
                           the anchor; not_a_symbol or unavailable there forces \
-                          not_reached_within_bound, which is then not authoritative.",
+                          not_reached_within_bound, which is then not authoritative, and so does \
+                          not_callable, marking an endpoint that is no function, method or \
+                          constructor, to or from which no chain was found.",
             with_required(
                 with_extra(
                     location_schema(),

@@ -2973,6 +2973,62 @@ fn callers_without_call_hierarchy_name_none_for_a_type() {
     );
 }
 
+/// A call chain runs between functions, methods and constructors, so finding
+/// none to a class or a variable, or from one, is no verdict on reaching it:
+/// the endpoint reads `not_callable` and the verdict stays the non-absolute
+/// one, while a function no chain reaches still reads `no_static_path`. This
+/// fake names no outgoing calls, so no chain is found from anywhere.
+#[cfg(unix)]
+#[test]
+fn a_call_path_to_or_from_what_is_never_called_is_no_verdict() {
+    let source = "class Shape:\n    pass\n\n\nLIMIT = 3\n\n\ndef helper():\n    return LIMIT\n\n\n\
+                  def run():\n    return helper()\n";
+    let Some(dir) = reference_served_repo(&[("a.py", source, source)]) else {
+        return;
+    };
+    let path = |args: &[&str]| {
+        json_ok(
+            dir.path(),
+            &[&["--format", "compact", "callees"], args].concat(),
+        )
+    };
+
+    for target in ["a.py:1", "a.py:5"] {
+        let answer = path(&["a.py:12", "--to", target]);
+        assert_eq!(
+            answer["reachability"], "not_reached_within_bound",
+            "{answer}"
+        );
+        assert_eq!(answer["target_status"], "not_callable", "{answer}");
+        assert!(
+            answer.get("dynamic_dispatch_possible").is_none(),
+            "{answer}"
+        );
+        let column = answer["target"]["column"].as_u64().unwrap();
+        assert!(
+            answer["hints"].as_array().unwrap().iter().any(|hint| hint
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("symora refs -- '{target}:{column}'"))),
+            "{answer}"
+        );
+    }
+
+    let from_a_class = path(&["a.py:1", "--to", "a.py:8"]);
+    assert_eq!(
+        from_a_class["reachability"], "not_reached_within_bound",
+        "{from_a_class}"
+    );
+    assert_eq!(
+        from_a_class["anchor_status"], "not_callable",
+        "{from_a_class}"
+    );
+
+    let function = path(&["a.py:12", "--to", "a.py:8"]);
+    assert_eq!(function["reachability"], "no_static_path", "{function}");
+    assert!(function.get("target_status").is_none(), "{function}");
+}
+
 /// A request the server answers with JSON-RPC MethodNotFound is a feature it
 /// lacks, and the answer names that feature and what to run instead,
 /// whichever command asked — not a pointer to `doctor`, which lists no

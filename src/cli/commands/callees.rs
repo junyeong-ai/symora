@@ -20,12 +20,15 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
+use crate::cli::analysis::Anchor;
 use crate::cli::call_graph::{self, Direction, NodeKey, WalkConfig, key_of};
 use crate::cli::commands::common::{Reach, anchor_of, execute_list};
-use crate::cli::response::{CallHierarchyOutput, LocationOutput, Section};
+use crate::cli::response::{CallHierarchyOutput, LocationOutput, NOT_CALLABLE, Section};
+use crate::cli::utils::shell_arg;
 use crate::cli::{LocationArg, ParsedLocation};
 use crate::constants::defaults::CALL_GRAPH_MAX_DEPTH;
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions, IndexingDegradation};
+use crate::models::symbol::Symbol;
 
 #[derive(Args, Debug)]
 pub struct CalleesArgs {
@@ -127,14 +130,17 @@ struct CalleesPathOutput {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incomplete: bool,
     /// The `--to` target did not resolve to a verified symbol: "not_a_symbol" or
-    /// "unavailable" (omitted when resolved). The verdict about it is then never
-    /// an authoritative negative — it is forced to the non-absolute
-    /// `not_reached_within_bound`. Same `*_status` vocabulary as `anchor_status`.
+    /// "unavailable" (omitted when resolved), or resolved to one that is no
+    /// function, method or constructor and no chain was found to it:
+    /// "not_callable". The verdict about it is then never an authoritative
+    /// negative — it is forced to the non-absolute `not_reached_within_bound`.
+    /// Same `*_status` vocabulary as `anchor_status`.
     #[serde(skip_serializing_if = "Option::is_none")]
     target_status: Option<&'static str>,
     /// The anchor (from-position) did not resolve to a verified symbol:
-    /// "not_a_symbol" or "unavailable" (omitted when resolved), so the verdict
-    /// is never an authoritative negative.
+    /// "not_a_symbol" or "unavailable" (omitted when resolved), or is no
+    /// function, method or constructor and no chain was found from it:
+    /// "not_callable". The verdict is then never an authoritative negative.
     #[serde(skip_serializing_if = "Option::is_none")]
     anchor_status: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -289,6 +295,19 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         None
     };
 
+    // A call chain runs between functions, methods and constructors. A symbol
+    // of another kind can still be a node of its server's call graph — a
+    // TypeScript class `new` constructs, a constant holding a function — so a
+    // chain found through one stands, but finding none says nothing about it,
+    // since most such symbols, an enum or a field, no call reaches at all.
+    let uncallable = |endpoint: &Anchor| -> Option<Symbol> {
+        endpoint
+            .symbol
+            .clone()
+            .filter(|symbol| !symbol.kind.is_callable() && chain_keys.is_none())
+    };
+    let (uncallable_anchor, uncallable_target) = (uncallable(&anchor), uncallable(&target));
+
     let (reachability, chain) = match chain_keys {
         Some(keys) => {
             // Resolve each frame's key back to its discovered item for names.
@@ -321,7 +340,9 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
                 || walk.indexing.is_some()
                 || walk.failed_hops
                 || !target.is_resolved()
-                || !anchor.is_resolved();
+                || !anchor.is_resolved()
+                || uncallable_anchor.is_some()
+                || uncallable_target.is_some();
             let verdict = if bounded {
                 Reachability::NotReachedWithinBound
             } else {
@@ -341,6 +362,16 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         ctx.root(),
         "point --to at a declaration (e.g. a `symora search symbols` result)",
     ));
+    hints.extend(uncallable_anchor.as_ref().map(uncallable_anchor_hint));
+    hints.extend(uncallable_target.as_ref().map(|symbol| {
+        let at = format!(
+            "{}:{}:{}",
+            ctx.relative_path(&target.file),
+            target.line,
+            target.column
+        );
+        uncallable_target_hint(symbol, &at)
+    }));
 
     let dynamic_dispatch_possible = reachability == Reachability::NoStaticPath;
     if dynamic_dispatch_possible {
@@ -361,8 +392,8 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         callees_truncated: walk.truncated,
         failed_hops: walk.failed_hops,
         incomplete: walk.is_lower_bound(),
-        target_status: target.resolution.as_status(),
-        anchor_status: anchor.resolution.as_status(),
+        target_status: endpoint_status(&target, uncallable_target.is_some()),
+        anchor_status: endpoint_status(&anchor, uncallable_anchor.is_some()),
         indexing: walk.indexing,
         hints,
     });
@@ -370,9 +401,54 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
     Ok(())
 }
 
+fn uncallable_anchor_hint(symbol: &Symbol) -> String {
+    format!(
+        "The from-position `{}` ({}) is no function, method or constructor, so no chain found \
+         from it says nothing of what it reaches; start from a function, method or constructor",
+        symbol.name, symbol.kind
+    )
+}
+
+/// `at` is the target's position, where its uses are asked for.
+fn uncallable_target_hint(symbol: &Symbol, at: &str) -> String {
+    format!(
+        "The --to target `{}` ({}) is no function, method or constructor, so no chain found to \
+         it says nothing of reaching it. Where it is used: symora refs -- {}",
+        symbol.name,
+        symbol.kind,
+        shell_arg(at)
+    )
+}
+
+/// What `callees --to` says of an endpoint it found no chain between: its
+/// resolution where it resolved to nothing, and otherwise `not_callable` for
+/// one a call does not reach.
+fn endpoint_status(endpoint: &Anchor, uncallable: bool) -> Option<&'static str> {
+    endpoint
+        .resolution
+        .as_status()
+        .or(uncallable.then_some(NOT_CALLABLE))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_uncallable_target_is_sent_to_its_uses() {
+        let symbol = Symbol::new(
+            "ErrorCode".to_string(),
+            crate::models::symbol::SymbolKind::Enum,
+            crate::models::symbol::Location::point(std::path::PathBuf::from("/p/e.rs"), 8, 10),
+        );
+        let hint = uncallable_target_hint(&symbol, "src/e.rs:8:10");
+        assert!(
+            hint.starts_with("The --to target `ErrorCode` (enum)"),
+            "{hint}"
+        );
+        assert!(hint.ends_with("symora refs -- 'src/e.rs:8:10'"), "{hint}");
+        crate::cli::assert_named_commands_parse(&hint);
+    }
 
     fn frame(name: &str, line: u32) -> CallHierarchyOutput {
         CallHierarchyOutput {
