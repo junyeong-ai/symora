@@ -10,7 +10,8 @@ the root. An incoming call is an occurrence followed by `(` other than a
 declaration's own name, inside a function or method, which is the caller.
 
 Every message's method, and the name of the file it asks about, is appended
-to the file named by the first argument.
+to the file named by the first argument. `no-call-hierarchy` among the
+arguments after it leaves the call hierarchy provider out.
 """
 
 import json
@@ -21,6 +22,7 @@ import sys
 import urllib.parse
 
 log = pathlib.Path(sys.argv[1])
+modes = set(sys.argv[2:])
 root = None
 
 
@@ -140,7 +142,7 @@ while True:
             "textDocumentSync": 1,
             "documentSymbolProvider": True,
             "referencesProvider": True,
-            "callHierarchyProvider": True,
+            "callHierarchyProvider": "no-call-hierarchy" not in modes,
         }}
     elif method == "initialized":
         send({"jsonrpc": "2.0", "method": "experimental/serverStatus",

@@ -2706,6 +2706,66 @@ fn call_hierarchy_asks_the_server_for_every_changed_symbol() {
     );
 }
 
+/// Without call hierarchy, `callers` reads a function's callers off its
+/// references, and a class's not at all: what references a type annotates,
+/// imports or passes it, and none of those is a call, so the class reads
+/// `not_callable` with no list rather than its annotating functions.
+#[cfg(unix)]
+#[test]
+fn callers_without_call_hierarchy_name_none_for_a_type() {
+    let uses = "from shapes import Shape, target\n\n\ndef use() -> int:\n    return target()\n\n\n\
+                def annotate(shape: Shape) -> None:\n    return None\n";
+    let Some(dir) = reference_served_repo(&[
+        (
+            "shapes.py",
+            "class Shape:\n    size = 1\n\n\ndef target() -> int:\n    return 1\n",
+            "class Shape:\n    size = 1\n\n\ndef target() -> int:\n    return 1\n",
+        ),
+        ("use.py", uses, uses),
+    ]) else {
+        return;
+    };
+    let repo = dir.path();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/reference_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"python": {
+        "command": "python3",
+        "args": [server, repo.join(".symora/log"), "no-call-hierarchy"],
+    }}}});
+    std::fs::write(
+        repo.join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let callers_at = |at: &str| {
+        let out = symora()
+            .args(["callers", at])
+            .current_dir(repo)
+            .env("SYMORA_NO_DAEMON", "1")
+            .output()
+            .expect("symora binary should exist");
+        common::parse_response(&out.stdout).unwrap()
+    };
+
+    let function = callers_at("shapes.py:5");
+    assert_eq!(
+        function["callers_status"], "references_derived",
+        "{function}"
+    );
+    assert_eq!(function["items"][0]["name"], "use", "{function}");
+    assert_eq!(function["count"], 1, "{function}");
+
+    let class = callers_at("shapes.py:1");
+    assert_eq!(class["callers_status"], "not_callable", "{class}");
+    assert_eq!(class["count"], 0, "{class}");
+    assert!(
+        class["hints"][0]
+            .as_str()
+            .is_some_and(|hint| hint.contains("`Shape` is a class")),
+        "{class}"
+    );
+}
+
 /// Python runs `__init__` where its class is called, and its server reports
 /// those calls as references to the class alone, as this fake does: the
 /// constructor's own references and incoming calls are none. Its callers are

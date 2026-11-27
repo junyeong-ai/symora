@@ -9,7 +9,7 @@ use crate::app::App;
 use crate::cli::LocationArg;
 use crate::cli::analysis::{callers_from_references, constructions_of};
 use crate::cli::declarations_of;
-use crate::cli::response::{CallHierarchyOutput, REFERENCES_DERIVED, Section};
+use crate::cli::response::{CallHierarchyOutput, NOT_CALLABLE, REFERENCES_DERIVED, Section};
 use crate::error::LspError;
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
 use crate::models::symbol::{Location, Symbol};
@@ -33,7 +33,9 @@ pub struct CallersArgs {
 /// hierarchy, or because a constructor's constructions, which its server
 /// reports as references to its type, joined the server's list — those are
 /// reference-based callers, a broader approximation rather than verified
-/// call edges, and an agent should read them as such. On the exact
+/// call edges, and an agent should read them as such — and `not_callable`
+/// where the server lacks call hierarchy and the symbol is no function,
+/// method or constructor, whose references name no caller. On the exact
 /// call-hierarchy path the field is omitted, leaving the bare `Section`
 /// contract untouched.
 #[derive(Debug, Serialize)]
@@ -69,6 +71,22 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
             // callers; transient errors surface as errors, never as a
             // silently weaker answer.
             Err(ref e) if !args.no_fallback && e.is_unsupported() => {
+                // A type's or a value's references are annotations, imports
+                // and reads rather than calls, so none is read as a caller.
+                if let Some(symbol) = anchor.symbol.as_ref().filter(|s| !s.kind.is_callable()) {
+                    let mut hints = vec![format!(
+                        "`{}` is a {}, no function, method or constructor, and its server has \
+                         no call hierarchy: its references are uses rather than calls, so none \
+                         is read as a caller; `symora refs` lists them",
+                        symbol.name, symbol.kind
+                    )];
+                    hints.extend(anchor.inbound_hints(ctx.root(), "callers"));
+                    ctx.print_success(CallersOutput {
+                        section: Section::with_total(Vec::new(), 0).with_hints(hints),
+                        callers_status: Some(NOT_CALLABLE),
+                    });
+                    return Ok(());
+                }
                 match fallback_from_refs(app, &anchor.file, line, column).await {
                     Ok((calls, indexing)) => (calls, indexing, true),
                     Err(e) => {
