@@ -19,6 +19,9 @@
 //! the kernel hand it; one that closes every descriptor up to its limit before
 //! running another takes as long as that limit is high. A server that wants
 //! more raises its own, as the JVM and Go servers do.
+//!
+//! A daemon, which outlives whoever started it, also begins by closing the
+//! descriptors it inherited beyond stdio (`close_inherited`).
 
 use std::io;
 use std::process::Command;
@@ -86,6 +89,45 @@ fn run_under(command: &mut Command, limit: libc::rlimit) {
             0 => Ok(()),
             _ => Err(io::Error::last_os_error()),
         });
+    }
+}
+
+/// Close every descriptor above stderr. `daemon serve` calls it before it
+/// opens any of its own, so all it closes are inherited: the daemon outlives
+/// the command that starts it, and a descriptor that command held without
+/// close-on-exec — one its own caller handed down, or a pipe another of its
+/// threads had just made, which macOS marks close-on-exec only after
+/// `pipe()` returns — would stay open for as long as the daemon runs, and
+/// whoever reads that pipe would wait until then for its end. The starter
+/// cannot close them for the child: the standard library reports a failed
+/// exec through a descriptor of its own, which such a close would take.
+pub fn close_inherited() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: `close_range` takes integers alone and closes descriptors.
+    if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } == 0 {
+        return;
+    }
+    // macOS has no `close_range`, nor Linux before 5.9: every descriptor
+    // number this process could hold is closed in turn instead.
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes only into the struct it is given.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        tracing::warn!(
+            "could not read the open-file limit to close inherited descriptors: {}",
+            io::Error::last_os_error()
+        );
+        return;
+    }
+    let bound = platform_cap()
+        .map_or(limit.rlim_cur, |cap| limit.rlim_cur.min(cap))
+        .min(libc::c_int::MAX as libc::rlim_t) as libc::c_int;
+    for fd in 3..bound {
+        // SAFETY: nothing in this process refers to an inherited descriptor;
+        // closing a number nothing holds fails harmlessly.
+        unsafe { libc::close(fd) };
     }
 }
 

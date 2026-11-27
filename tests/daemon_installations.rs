@@ -185,6 +185,41 @@ fn zero_idle_timeout_allows_start_and_project_request() {
     assert_eq!(json_ok(exe, home.path(), "stop")["stopped"], true);
 }
 
+/// A daemon outlives the command that starts it, so it keeps none of that
+/// command's descriptors beyond stdio: a pipe the command held without
+/// close-on-exec, handed down by its own caller here, reaches its end once
+/// the caller and the command are gone, while the daemon still serves.
+#[test]
+fn a_started_daemon_keeps_no_descriptor_its_starter_inherited() {
+    let home = tempfile::tempdir().unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_symora"));
+    let _cleanup = Daemons {
+        home: home.path().to_path_buf(),
+        binaries: vec![exe.to_path_buf()],
+    };
+    // The shell's descriptor 3 is this test's pipe, without close-on-exec,
+    // and `daemon start` inherits it.
+    let mut starter = project_command(Path::new("sh"), home.path(), &[])
+        .arg("-c")
+        .arg(r#"exec 3>&1 && exec "$0" daemon start >/dev/null"#)
+        .arg(exe)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut pipe = starter.stdout.take().unwrap();
+    let (ended, end) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+        let _ = ended.send(());
+    });
+    assert!(starter.wait().unwrap().success());
+    assert_eq!(json_ok(exe, home.path(), "status")["running"], true);
+    assert!(
+        end.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+        "the daemon holds the pipe its starter inherited"
+    );
+}
+
 #[test]
 fn installations_run_independent_daemons_and_leave_legacy_files_untouched() {
     let home = tempfile::tempdir().unwrap();

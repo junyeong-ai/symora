@@ -41,6 +41,19 @@ fn main() {
         )
         .init();
 
+    let cli = parse_cli();
+    // Before the runtime opens descriptors of its own, so every one closed
+    // is inherited.
+    #[cfg(unix)]
+    if matches!(
+        &cli.command,
+        Commands::Daemon(DaemonArgs {
+            command: DaemonCommand::Serve
+        })
+    ) {
+        symora::infra::fd_limit::close_inherited();
+    }
+
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -49,7 +62,7 @@ fn main() {
         }
     };
 
-    match runtime.block_on(async_main()) {
+    match runtime.block_on(async_main(cli)) {
         // Exiting skips destructors, so the runtime is dropped first, which
         // waits for the work it holds: its tasks are dropped, stopping the
         // language servers this process started, and a handler writing
@@ -83,11 +96,11 @@ fn refuse(err: symora::cli::OutputError) -> ! {
 /// Clap's own rendering is prose on stderr with an empty stdout, which is the
 /// one failure an agent parsing this tool cannot read. `--help` and
 /// `--version` are not failures and keep clap's rendering.
-fn parse_cli() -> anyhow::Result<Cli> {
+fn parse_cli() -> Cli {
     use clap::error::ErrorKind;
 
     match Cli::try_parse() {
-        Ok(cli) => Ok(cli),
+        Ok(cli) => cli,
         Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
             let _ = e.print();
             std::process::exit(0);
@@ -132,9 +145,7 @@ fn usage_error(error: &clap::Error) -> symora::cli::OutputError {
 }
 
 /// Run the command; true when it reported a failure.
-async fn async_main() -> anyhow::Result<bool> {
-    let mut cli = parse_cli()?;
-
+async fn async_main(mut cli: Cli) -> anyhow::Result<bool> {
     let output_options = OutputOptions {
         format: cli
             .format
