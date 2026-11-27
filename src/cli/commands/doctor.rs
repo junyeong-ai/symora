@@ -145,7 +145,8 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
 
     // Narrow before probing: a single-language report must not pay for
     // spawning every other language's server.
-    let all_servers: Vec<_> = check_all_servers(servers::merged(&config.lsp.servers), app.root())
+    let configs = servers::merged(&config.lsp.servers);
+    let all_servers: Vec<_> = check_all_servers(configs.clone(), app.root())
         .into_iter()
         .filter(|s| requested.is_none_or(|language| s.language == language))
         .collect();
@@ -159,29 +160,38 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
     // Handshakes are independent, and a server that never answers costs its
     // whole tier budget — run them together so one unresponsive server
     // delays the report by its own timeout rather than by everyone else's.
+    // A server's version probe runs beside its handshake for the same
+    // reason, under the same budget.
     let runtime = Arc::new(LspRuntimeConfig::from(&config));
-    let serving = join_all(all_servers.iter().map(|server| {
+    let probed = join_all(all_servers.iter().map(|server| {
         let runtime = Arc::clone(&runtime);
+        let probe = configs[&server.language].clone();
+        let root = app.root().to_path_buf();
         async move {
             let Some(launch) = &server.launch else {
-                return false;
+                return (false, None);
             };
-            serves_workspace(
+            let version = tokio::task::spawn_blocking(move || probe.probe_version(&root));
+            let serves = serves_workspace(
                 server.language,
                 launch,
                 app.root(),
                 runtime,
                 server.init_timeout,
-            )
-            .await
+            );
+            let (serves, version) = tokio::join!(serves, version);
+            match version {
+                Ok(version) => (serves, version),
+                Err(e) => std::panic::resume_unwind(e.into_panic()),
+            }
         }
     }))
     .await;
 
     let languages: Vec<LanguageStatus> = all_servers
         .into_iter()
-        .zip(serving)
-        .map(|(s, serves)| {
+        .zip(probed)
+        .map(|(s, (serves, version))| {
             let overridden = s.source == ServerSource::Config;
             let install = if serves {
                 None
@@ -209,7 +219,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
                 server: s.name,
                 installed: s.installed,
                 serves,
-                version: s.version,
+                version,
                 tier: s.tier.as_str().to_string(),
                 symbol_extraction: SymbolExtractor::is_supported(s.language),
                 ast_search: crate::infra::ast::is_supported(s.language),

@@ -136,7 +136,10 @@ impl ServerConfig {
     /// binary has no usable `--version`, e.g. pyright-langserver probes
     /// the `pyright` CLI instead) with a hard timeout — an LSP stdio
     /// entrypoint handed an unknown flag can block on stdin, and a
-    /// diagnostic must never hang the report.
+    /// diagnostic must never hang the report. The timeout is the server's
+    /// start budget ([`Self::init_timeout`]), the one its handshake gets: a
+    /// machine loaded enough to need that long to start the server needs
+    /// it to start the probe too.
     pub fn probe_version(&self, root: &Path) -> Option<String> {
         let probe = self.version_command.unwrap_or(self.command.as_str());
         let path = resolve_command(probe, root).ok()?;
@@ -145,7 +148,7 @@ impl ServerConfig {
             args: vec![self.version_arg.to_string()],
             env: self.env.clone(),
         };
-        let output = run_with_timeout(&launch, root, Duration::from_secs(2))?;
+        let output = run_with_timeout(&launch, root, self.init_timeout())?;
         if !output.status.success() {
             // A failed probe blanks the version column; it must never
             // surface an error line as if it were a version string.
@@ -1214,7 +1217,6 @@ pub struct ServerHealth {
     /// An executable resolves at the effective command — a fact about the
     /// filesystem, not about what that executable does.
     pub installed: bool,
-    pub version: Option<String>,
     pub install_instruction: &'static str,
     pub tier: ServerTier,
     pub source: ServerSource,
@@ -1236,15 +1238,9 @@ pub fn check_all_servers(
     for (language, config) in configs {
         let launch = config.launch(root).ok();
         let installed = launch.is_some();
-        let version = if installed {
-            config.probe_version(root)
-        } else {
-            None
-        };
         results.push(ServerHealth {
             language,
             installed,
-            version,
             install_instruction: config.install.current(),
             tier: config.tier,
             source: config.source,
