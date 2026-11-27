@@ -17,16 +17,23 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           its workspace manifests declare (Cargo, npm or yarn, pnpm, uv, go.work; \
                           absent where none declares a workspace), and the entrypoints its \
                           manifests declare (Cargo targets, Python scripts and __main__.py, \
-                          package.json bin and main, Go main packages). Cheap orientation step \
-                          before deeper queries.",
+                          package.json bin and main, Go main packages), each with a kind of bin, \
+                          lib, script or main_module and its name — never a file merely named \
+                          like one. hints name a manifest that did not parse and a declared \
+                          entrypoint naming no file. Cheap orientation step before deeper \
+                          queries.",
             schema_object(&[], &[]),
         ),
         ToolDefinition::read_only(
             "get_file_overview",
-            "Compact map for one file: siblings, the tests that name it \
-                          (test files whose imports name it, its package's Go test files, its \
-                          Rust test regions, each marked by its evidence, with a hint saying \
-                          what the reading leaves out), and its shallow symbol tree. Use \
+            "Compact map for one file: siblings, the tests that name it, and its \
+                          shallow symbol tree. Each test carries its evidence: imports (its \
+                          imports name the file), imports_package (a Go import path or JVM \
+                          wildcard names its package), same_package (a Go _test.go file beside \
+                          it) or test_region (lines of the file compiled only under test); a \
+                          file sharing its name is not listed, the section's hint says what the \
+                          reading leaves out, and a language it does not read is the section's \
+                          unsupported error. Use \
                           find_references for semantic links and get_context with tests for the \
                           tests referencing one declaration. When nothing read the file's \
                           declarations, `backend` is omitted and `symbols` carries the error — \
