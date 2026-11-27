@@ -130,31 +130,17 @@ struct MapFileOutput {
     /// than only noted.
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     unread_paths: Vec<String>,
-    /// Omitted when nothing read the file's declarations — an empty list is
-    /// a file that declares none, which is a different fact.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    focus_symbols: Option<Vec<FocusSymbolOutput>>,
-    /// What produced `symbols` and `focus_symbols`, omitted with them.
+    /// What produced `symbols`, omitted when nothing read the file's
+    /// declarations — `symbols` then carries the error, where an empty list
+    /// would be a file that declares none.
     #[serde(skip_serializing_if = "Option::is_none")]
     backend: Option<crate::cli::SymbolBackend>,
     siblings: Section<String>,
     /// The tests whose evidence names this file (`tests_of`): each says
     /// which, and the section's hint says what its reading leaves out.
     tests: Section<TestFileOutput>,
+    /// The file's declarations in source order, once each.
     symbols: Section<SymbolOutput>,
-}
-
-#[derive(Debug, Serialize)]
-struct FocusSymbolOutput {
-    name: String,
-    kind: String,
-    file: String,
-    line: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    signature: Option<String>,
-    child_count: usize,
 }
 
 /// A list a limit cut, carrying the size of what it cut from and the cap
@@ -289,7 +275,7 @@ async fn execute_file(app: &App, path: &str, depth: u32, tests_limit: usize) -> 
     let unread_paths = scan.unread_at(ctx, app.root());
     let records = &scan.records;
 
-    let (backend, focus_symbols, symbols) = match crate::cli::declared_in(
+    let (backend, symbols) = match crate::cli::declared_in(
         app,
         &target.abs_path,
         FindSymbolsOptions::default().with_depth(depth).with_body(),
@@ -298,16 +284,15 @@ async fn execute_file(app: &App, path: &str, depth: u32, tests_limit: usize) -> 
     {
         Ok(answer) => {
             let symbols = answer.symbols;
-            let focus_symbols = build_focus_symbols(&symbols, ctx.root());
-            // `count` must describe the same domain as `items`: focus
-            // candidates, not every symbol in the file.
+            // `count` must describe the same domain as `items`: the
+            // declarations an overview lists, not every symbol in the file.
             let total = symbols
                 .iter()
-                .filter(|symbol| is_focus_symbol_candidate(symbol))
+                .filter(|symbol| is_overview_declaration(symbol))
                 .count();
             let items = symbols
                 .iter()
-                .filter(|symbol| is_focus_symbol_candidate(symbol))
+                .filter(|symbol| is_overview_declaration(symbol))
                 .take(12)
                 .map(|symbol| {
                     let mut out = SymbolOutput::from_symbol(symbol, ctx.root()).without_body();
@@ -321,11 +306,10 @@ async fn execute_file(app: &App, path: &str, depth: u32, tests_limit: usize) -> 
             ));
             (
                 Some(answer.backend),
-                Some(focus_symbols),
                 with_cap(Section::with_total(items, total), every),
             )
         }
-        Err(e) => (None, None, Section::error(e)),
+        Err(e) => (None, Section::error(e)),
     };
 
     let siblings = records
@@ -340,7 +324,6 @@ async fn execute_file(app: &App, path: &str, depth: u32, tests_limit: usize) -> 
         test_file: target.is_test,
         incomplete: !unread_paths.is_empty(),
         unread_paths,
-        focus_symbols,
         backend,
         siblings: limited(
             siblings,
@@ -562,84 +545,10 @@ fn path_depth(path: &str) -> usize {
     path.split('/').count()
 }
 
-fn build_focus_symbols(symbols: &[Symbol], root: &Path) -> Vec<FocusSymbolOutput> {
-    let mut candidates: Vec<_> = symbols
-        .iter()
-        .filter(|symbol| is_focus_symbol_candidate(symbol))
-        .collect();
-
-    candidates.sort_by(|a, b| {
-        focus_symbol_score(b)
-            .cmp(&focus_symbol_score(a))
-            .then_with(|| a.location.line.cmp(&b.location.line))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-
-    candidates
-        .into_iter()
-        .take(5)
-        .map(|symbol| FocusSymbolOutput {
-            name: symbol.name.clone(),
-            kind: symbol.kind.to_string(),
-            file: symbol
-                .location
-                .file
-                .strip_prefix(root)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| symbol.location.file.display().to_string()),
-            line: symbol.location.line,
-            name_path: symbol.name_path.clone(),
-            signature: symbol.signature.clone(),
-            child_count: symbol.children.len(),
-        })
-        .collect()
-}
-
-fn focus_symbol_score(symbol: &Symbol) -> i32 {
-    let base = match symbol.kind {
-        crate::models::symbol::SymbolKind::Function
-        | crate::models::symbol::SymbolKind::Method
-        | crate::models::symbol::SymbolKind::Constructor => 14,
-        crate::models::symbol::SymbolKind::Class
-        | crate::models::symbol::SymbolKind::Struct
-        | crate::models::symbol::SymbolKind::Enum
-        | crate::models::symbol::SymbolKind::Interface => 12,
-        crate::models::symbol::SymbolKind::Module
-        | crate::models::symbol::SymbolKind::Namespace
-        | crate::models::symbol::SymbolKind::Package => 10,
-        crate::models::symbol::SymbolKind::Constant
-        | crate::models::symbol::SymbolKind::Variable
-        | crate::models::symbol::SymbolKind::Object
-        | crate::models::symbol::SymbolKind::Impl => 8,
-        crate::models::symbol::SymbolKind::Property
-        | crate::models::symbol::SymbolKind::Field
-        | crate::models::symbol::SymbolKind::EnumMember => 4,
-        _ => 6,
-    };
-
-    let name_bonus = match symbol.name.as_str() {
-        "main" | "run" | "execute" | "handle" | "process" | "serve" => 4,
-        _ => 0,
-    };
-
-    let callable_child_bonus = symbol
-        .children
-        .iter()
-        .filter(|child| {
-            matches!(
-                child.kind,
-                crate::models::symbol::SymbolKind::Function
-                    | crate::models::symbol::SymbolKind::Method
-                    | crate::models::symbol::SymbolKind::Constructor
-            )
-        })
-        .count()
-        .min(6) as i32;
-
-    base + (symbol.children.len().min(4) as i32) + callable_child_bonus + name_bonus
-}
-
-fn is_focus_symbol_candidate(symbol: &Symbol) -> bool {
+/// Whether an overview lists the declaration: a callable or a type, a
+/// module, or a value — a low-level one (a field, a property) only where it
+/// holds callables.
+fn is_overview_declaration(symbol: &Symbol) -> bool {
     let has_callable_children = symbol.children.iter().any(|child| {
         matches!(
             child.kind,

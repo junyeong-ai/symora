@@ -19,14 +19,14 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::read_only(
             "get_file_overview",
-            "Compact map for one file: focus symbols, siblings, the tests that name it \
+            "Compact map for one file: siblings, the tests that name it \
                           (test files whose imports name it, its package's Go test files, its \
                           Rust test regions, each marked by its evidence, with a hint saying \
                           what the reading leaves out), and its shallow symbol tree. Use \
                           find_references for semantic links and get_context with tests for the \
-                          tests referencing one declaration. `focus_symbols` and \
-                          `backend` are omitted together when nothing read the file's \
-                          declarations — an empty list would say the file declares none.",
+                          tests referencing one declaration. When nothing read the file's \
+                          declarations, `backend` is omitted and `symbols` carries the error — \
+                          an empty list would say the file declares none.",
             schema_object(
                 &[
                     ("path", "string", "Project-relative file path"),
