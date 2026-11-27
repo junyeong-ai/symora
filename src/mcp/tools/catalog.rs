@@ -556,7 +556,38 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     ),
                 ],
             ),
-        ),
+        )
+        .with_output_schema(output_schema(&[
+            ("target", "object", "The symbol the position resolved to: { name, kind, file, line, column, \
+                 signature?, body?, anchor_status? }; anchor_status is present only when the \
+                 position did not resolve to a listed symbol"),
+            ("refs", "object", "Reference summary: { count, test, prod, files, modules, is_exported?, \
+                 indexing?, incomplete? }; incomplete marks count as a lower bound"),
+            ("hints", "array", "What the reference summary does not settle"),
+            (
+                "callers",
+                "object",
+                "Incoming calls as a list (count, showing, items of name, kind, file, line, \
+                 column, call_site)",
+            ),
+            (
+                "callees",
+                "object",
+                "Outgoing calls as a list (count, showing, items of name, kind, file, line, \
+                 column, call_site?, body?)",
+            ),
+            (
+                "types",
+                "object",
+                "Related types as a list (items of name, kind, file, line, column, detail?, \
+                 body?)",
+            ),
+            (
+                "tests",
+                "object",
+                "Related tests as a list (items of name, file, line, column)",
+            ),
+        ])),
         ToolDefinition::read_only(
             "get_impact",
             "Change-impact analysis at file:line[:column]: reference counts split by \
@@ -579,7 +610,35 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     ),
                 ],
             ),
-        ),
+        )
+        .with_output_schema(output_schema(&[
+            ("target", "object", "The symbol the position resolved to: { name, kind, file, line, column, \
+                 signature?, body?, anchor_status? }; anchor_status is present only when the \
+                 position did not resolve to a listed symbol"),
+            ("refs", "object", "Reference summary: { count, test, prod, files, modules, is_exported?, \
+                 indexing?, incomplete? }; incomplete marks count as a lower bound"),
+            (
+                "coverage",
+                "object",
+                "Test references: { count, files }, static references rather than execution",
+            ),
+            (
+                "blast_radius",
+                "object",
+                "Caller graph: { direct_callers, transitive_callers, depth, \
+                 max_depth_reached?, callers_truncated?, indexing?, failed_hops?, incomplete?, \
+                 dynamic_dispatch?, callers_by_depth, test_caller_ratio? }; incomplete marks \
+                 the counts a lower bound, and the flags before it name the cause. Absent when \
+                 no call hierarchy could be started",
+            ),
+            ("hints", "array", "What the counts do not settle"),
+            ("next_commands", "array", "Follow-ups the disclosures above call for"),
+            (
+                "files",
+                "array",
+                "Affected files, most-referenced first: { file, is_test, refs }",
+            ),
+        ])),
         ToolDefinition::read_only(
             "get_diff_impact",
             "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals; test references are not execution coverage. With callers, a row's callers is a list with count, showing and truncated, absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind.",
@@ -596,7 +655,46 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     ),
                 ),
             ], &[]),
-        ),
+        )
+        .with_output_schema(output_schema(&[
+            ("revision", "string", "The revision compared with"),
+            ("changed_files_count", "integer", "Files the diff changed"),
+            ("changed_symbols_count", "integer", "Rows in changes"),
+            (
+                "total_references",
+                "integer",
+                "Sum of the measured rows' refs; absent when no row was measured",
+            ),
+            (
+                "refs_status",
+                "string",
+                "The strongest row refs_status, making total_references a lower bound",
+            ),
+            (
+                "coverage",
+                "object",
+                "{ with_tests, without_tests, ratio? } over the measured rows",
+            ),
+            (
+                "unmeasured_files",
+                "array",
+                "Files whose changes could not be measured in full",
+            ),
+            (
+                "incomplete",
+                "boolean",
+                "Present (true) only when max_symbols stopped the analysis, so every count \
+                 is a lower bound",
+            ),
+            ("hints", "array", "Causes and remedies"),
+            (
+                "changes",
+                "array",
+                "Changed symbols: { name?, kind?, file, line, column, change_type, refs?, \
+                 test_refs?, prod_refs?, refs_status?, callers_status?, deletion?, callers? }; \
+                 callers is a list (count, showing, truncated?, items)",
+            ),
+        ])),
         ToolDefinition::read_only(
             "get_diagnostics",
             "LSP diagnostics (errors, warnings, hints) for one file. The \
