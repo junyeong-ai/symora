@@ -9,8 +9,8 @@ A reference is every whole-word occurrence of the name in a `.py` file under
 the root. An incoming call is an occurrence followed by `(` other than a
 declaration's own name, inside a function or method, which is the caller.
 
-Every request's method is appended to the file named by the first argument.
-`no-call-hierarchy` among the arguments leaves the provider out.
+Every message's method, and the name of the file it asks about, is appended
+to the file named by the first argument.
 """
 
 import json
@@ -21,7 +21,6 @@ import sys
 import urllib.parse
 
 log = pathlib.Path(sys.argv[1])
-modes = set(sys.argv[2:])
 root = None
 
 
@@ -130,9 +129,10 @@ while True:
             length = int(header.split(b":", 1)[1])
     message = json.loads(sys.stdin.buffer.read(length))
     method = message.get("method")
-    with log.open("a") as written:
-        written.write(f"{method}\n")
     params = message.get("params") or {}
+    asked = (params.get("textDocument") or params.get("item") or {}).get("uri")
+    with log.open("a") as written:
+        written.write(f"{method} {path_of(asked).name if asked else ''}\n")
     result = None
     if method == "initialize":
         root = path_of(params["rootUri"])
@@ -140,7 +140,7 @@ while True:
             "textDocumentSync": 1,
             "documentSymbolProvider": True,
             "referencesProvider": True,
-            "callHierarchyProvider": "no-call-hierarchy" not in modes,
+            "callHierarchyProvider": True,
         }}
     elif method == "initialized":
         send({"jsonrpc": "2.0", "method": "experimental/serverStatus",

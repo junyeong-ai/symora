@@ -247,10 +247,11 @@ pub enum LowerBound {
     /// server, so whatever it holds is missing from the answer. Kept apart
     /// from the cap because raising a limit does not make a server answer.
     LiveFileNotDescribed,
-    /// Analysis stopped at this many symbols before running out of candidates,
-    /// so the ones past the cap are absent from every count. Kept apart from
-    /// a failed analysis because raising the cap reaches them, where a failure
-    /// is what retrying is for.
+    /// Analysis stopped at this many symbols whose references are counted,
+    /// or as many deletions, before running out of candidates, so the ones
+    /// past the cap are absent from every count. Kept apart from a failed
+    /// analysis because raising the cap reaches them, where a failure is what
+    /// retrying is for.
     AnalysisCapped(usize),
     /// The command's language-server budget (`lsp.timeout_secs`, in seconds)
     /// ran out before every count was taken, so the rows marked `timed_out`
@@ -305,9 +306,9 @@ impl LowerBound {
                  count is a lower bound; raise --limit to reach them"
                 .to_string(),
             Self::AnalysisCapped(symbols) => format!(
-                "Analysis stopped at {symbols} symbol(s) before running out of candidates, so \
-                 those past the cap are missing from the counts; raise --max-symbols to reach \
-                 them"
+                "Analysis stopped at {symbols} symbol(s) whose references are counted, or \
+                 as many deletions, before running out of candidates, so those past the cap \
+                 are missing from the counts; raise --max-symbols to reach them"
             ),
             Self::AnalysisTimedOut(secs) => format!(
                 "The language-server budget (lsp.timeout_secs = {secs}) ran out before every \

@@ -641,7 +641,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ])),
         ToolDefinition::read_only(
             "get_diff_impact",
-            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals; refs_status_counts and callers_status_counts count the rows of each status; test references are not execution coverage. With callers, a row's callers is a list with count, showing and truncated, absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind.",
+            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals; refs_status_counts and callers_status_counts count the rows of each status; test references are not execution coverage. Documentation and configuration files (Markdown, YAML, TOML, JSON) are listed in unmeasured_files rather than read by key. With callers, a row's callers is a list with count, showing and truncated, absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind.",
             schema_object(&[
                 ("revision", "string", "One base revision, not a revision range; default HEAD"),
                 ("staged", "boolean", "Compare staged changes instead of the working tree"),
@@ -650,7 +650,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     "max_symbols",
                     "integer",
                     &format!(
-                        "Maximum changed symbols to analyze; default {DIFF_IMPACT_MAX_SYMBOLS}, \
+                        "Maximum added and modified symbols whose references are counted, \
+                         and apart from them, deleted symbols listed, so a deletion never \
+                         takes a counted symbol's place; default {DIFF_IMPACT_MAX_SYMBOLS}, \
                          0 means unlimited"
                     ),
                 ),
@@ -686,13 +688,14 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             (
                 "unmeasured_files",
                 "array",
-                "Files whose changes could not be measured in full",
+                "Files whose changes could not be measured in full, documentation and \
+                 configuration among them; hints name the causes",
             ),
             (
                 "incomplete",
                 "boolean",
-                "Present (true) only when max_symbols stopped the analysis, so every count \
-                 is a lower bound",
+                "Present (true) only when max_symbols stopped the analysis, leaving changed \
+                 symbols unlisted, so every count is a lower bound",
             ),
             ("hints", "array", "Causes and remedies"),
             (

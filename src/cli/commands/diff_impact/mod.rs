@@ -40,7 +40,9 @@ pub struct DiffImpactArgs {
     #[arg(long)]
     pub callers: bool,
 
-    /// Maximum changed symbols to analyze (0 = unlimited)
+    /// Maximum added and modified symbols whose references are counted, and
+    /// apart from them, deleted symbols listed (0 = unlimited): a deletion,
+    /// which has none to count, never takes a counted symbol's place
     #[arg(long, default_value_t = crate::constants::defaults::DIFF_IMPACT_MAX_SYMBOLS)]
     pub max_symbols: usize,
 }
@@ -71,20 +73,24 @@ pub struct DiffImpactOutput {
     pub coverage: DiffCoverage,
     /// Files whose changes could not be measured in full: nothing could read
     /// the symbols of their changed lines (removed lines are read by the
-    /// grammar compiled into symora alone), they are symbolic links, whose
+    /// grammar compiled into symora alone), they hold documentation or
+    /// configuration (Markdown, MDX, YAML, TOML, JSON), whose keys and
+    /// headings are not read as symbols, they are symbolic links, whose
     /// lines are a path rather than source, git reports them as binary and
     /// names no lines, or — with `--staged` — unstaged edits sit over the
     /// staged ones, so the lines the diff names are not the lines on disk.
     /// What was not measured is absent from `changes`, so the result is a
-    /// lower bound for these files. `hints` names the binary and staged causes; a file listed
-    /// without one is a link or one whose symbols could not be read. Omitted
-    /// when empty.
+    /// lower bound for these files. `hints` names the documentation,
+    /// binary and staged causes; a file listed without one is a link or one
+    /// whose symbols could not be read. Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unmeasured_files: Vec<String>,
-    /// The analysis stopped before running out of changed symbols, so every
-    /// count here is a lower bound. Carried in the shared shape's words so a
-    /// reader treats it as it treats any other short answer. Omitted when the
-    /// whole diff was analysed.
+    /// `--max-symbols` stopped the analysis: the added and modified symbols,
+    /// or the deletions, past it are not listed, nor, once the counted
+    /// symbols reach it, the files after the one it stopped in, so every
+    /// count here is a lower bound. Carried in the shared shape's
+    /// words so a reader treats it as it treats any other short answer.
+    /// Omitted when the whole diff was analysed.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub incomplete: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -230,6 +236,25 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     }
     unmeasured.extend(links);
 
+    let documents: BTreeSet<PathBuf> = hunks
+        .iter()
+        .filter(|hunk| documents_or_configures(&hunk.file))
+        .map(|hunk| hunk.file.clone())
+        .collect();
+    if !documents.is_empty() {
+        hunks.retain(|hunk| !documents.contains(&hunk.file));
+        let named: Vec<String> = documents
+            .iter()
+            .map(|file| relative_display(file, root))
+            .collect();
+        hints.push(format!(
+            "Documentation and configuration files are not read as symbols: {}. Read their diff \
+             for what changed.",
+            name_some(&named)
+        ));
+        unmeasured.extend(documents);
+    }
+
     if !args.staged {
         let untracked: Vec<String> = untracked_files(root)?
             .iter()
@@ -331,6 +356,15 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     Ok(())
 }
 
+/// Whether a file holds documentation or configuration (Markdown, MDX,
+/// YAML, TOML, JSON), which search leaves out unless named. Their servers
+/// list keys and headings as symbols, a row each that few of them can count
+/// references for, and a lockfile holds thousands of them.
+fn documents_or_configures(file: &Path) -> bool {
+    let language = Language::from_path(file);
+    language != Language::Unknown && !language.is_code()
+}
+
 /// How many rows carry each status, the rows without one left out.
 fn status_counts<'a>(statuses: impl Iterator<Item = Option<&'a str>>) -> BTreeMap<&'a str, usize> {
     let mut counts = BTreeMap::new();
@@ -376,8 +410,9 @@ fn symbol_change_type(
     }
 }
 
-/// The changed symbols a diff's hunks were assigned to, bounded by
-/// `--max-symbols`, and the files whose lines could not be assigned.
+/// The changed symbols a diff's hunks were assigned to, those whose
+/// references are counted bounded by `--max-symbols`, and the files whose
+/// lines could not be assigned.
 struct HunkAnalysis {
     changes: Vec<ChangedSymbolImpact>,
     unmeasured: Vec<PathBuf>,
@@ -405,17 +440,45 @@ struct Plan {
     answers: Vec<FileSymbols>,
     unmeasured: Vec<PathBuf>,
     max_symbols: usize,
+    /// The rows whose references are to be asked.
+    live: usize,
+    /// The rows the diff alone answers: deletions.
+    settled: usize,
     /// Work was left undone because the cap was reached.
     capped: bool,
 }
 
 impl Plan {
-    /// Whether another changed symbol may be reported. When none may, the
-    /// analysis is recorded as having stopped short.
-    fn has_room(&mut self) -> bool {
-        let full = self.max_symbols > 0 && self.rows.len() >= self.max_symbols;
-        self.capped |= full;
-        !full
+    /// Whether the cap leaves no room for another symbol whose references
+    /// are counted.
+    fn full(&self) -> bool {
+        self.max_symbols > 0 && self.live >= self.max_symbols
+    }
+
+    /// Plans a symbol whose references are to be counted, unless the cap
+    /// leaves no room for it, when the analysis is recorded as having
+    /// stopped short and false is returned.
+    fn measure(&mut self, row: Row) -> bool {
+        if self.full() {
+            self.capped = true;
+            return false;
+        }
+        self.live += 1;
+        self.rows.push(row);
+        true
+    }
+
+    /// Plans a row the diff alone answers, a deletion, which has no
+    /// references to ask and so takes none of the room `measure` counts.
+    /// The cap bounds these apart, so a diff that removes a whole module
+    /// lists its first deletions rather than every one of them.
+    fn settle(&mut self, impact: ChangedSymbolImpact) {
+        if self.max_symbols > 0 && self.settled >= self.max_symbols {
+            self.capped = true;
+            return;
+        }
+        self.settled += 1;
+        self.rows.push(Row::Settled(impact));
     }
 }
 
@@ -472,31 +535,33 @@ async fn analyze_hunks(
     }
 }
 
-/// Each changed symbol's row, in file order, bounded by `--max-symbols`.
+/// Each changed symbol's row, in path order. `--max-symbols` bounds the
+/// rows whose references are counted and, apart from them, the deletions
+/// listed, so a deletion never takes the place of a symbol whose references
+/// would be counted. The analysis stops at the first file the cap leaves no
+/// room for a counted symbol in, which with every file after it is not read.
 async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbols: usize) -> Plan {
     let root = app.output.root();
     let mut by_file: BTreeMap<&PathBuf, Vec<&DiffHunk>> = BTreeMap::new();
     for hunk in hunks {
         by_file.entry(&hunk.file).or_default().push(hunk);
     }
-    // Code is planned before configuration and prose (TOML, YAML, JSON,
-    // Markdown), each in path order, so a cap a large diff reaches is not
-    // spent on their keys and headings while changed code goes unreported.
-    let mut file_hunks: Vec<(&PathBuf, Vec<&DiffHunk>)> = by_file.into_iter().collect();
-    file_hunks.sort_by_key(|(file, _)| !Language::from_path(file).is_code());
 
     let mut analysis = Plan {
         rows: Vec::new(),
         answers: Vec::new(),
         unmeasured: Vec::new(),
         max_symbols,
+        live: 0,
+        settled: 0,
         capped: false,
     };
     // Kept apart from `analysis` until every file is read: a file's
     // declarations are borrowed from here while its rows join the plan.
     let mut answers: Vec<FileSymbols> = Vec::new();
-    for (file, hunks) in file_hunks {
-        if !analysis.has_room() {
+    for (file, hunks) in by_file {
+        if analysis.full() {
+            analysis.capped = true;
             break;
         }
 
@@ -552,14 +617,11 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
             Some(Preimage::Unparsed) => analysis.unmeasured.push(file.clone()),
             Some(Preimage::Unavailable) => {
                 for hunk in &removing {
-                    if !analysis.has_room() {
-                        break;
-                    }
-                    analysis.rows.push(Row::Settled(unresolved_deletion(
+                    analysis.settle(unresolved_deletion(
                         DeletionResolution::PreimageUnavailable,
                         hunk,
                         root,
-                    )));
+                    ));
                 }
             }
             Some(Preimage::Parsed(before)) => {
@@ -573,18 +635,10 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                     .iter()
                     .filter(|h| matches!(h.change_type, ChangeType::Deleted))
                 {
-                    if !analysis.has_room() {
-                        break;
-                    }
                     let declared: Vec<&Symbol> = declared_in_removed(before, hunk).collect();
                     for symbol in &declared {
-                        if !analysis.has_room() {
-                            break;
-                        }
                         deleted.push(identity(symbol));
-                        analysis
-                            .rows
-                            .push(Row::Settled(deleted_row(symbol, &hunk.old_file, root)));
+                        analysis.settle(deleted_row(symbol, &hunk.old_file, root));
                     }
                     let enclosing: Vec<&Symbol> = current_symbols
                         .map(|current| {
@@ -592,11 +646,11 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                         })
                         .unwrap_or_default();
                     if enclosing.is_empty() && declared.is_empty() {
-                        analysis.rows.push(Row::Settled(unresolved_deletion(
+                        analysis.settle(unresolved_deletion(
                             DeletionResolution::NoSymbolInRange,
                             hunk,
                             root,
-                        )));
+                        ));
                     }
                     modified_by_removal.extend(enclosing);
                 }
@@ -617,7 +671,7 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                     .filter(|h| matches!(h.change_type, ChangeType::Modified))
                     .copied()
                     .collect();
-                if !replacing.is_empty() && analysis.has_room() {
+                if !replacing.is_empty() {
                     match &on_disk {
                         None => analysis.unmeasured.push(file.clone()),
                         Some(now) => {
@@ -657,17 +711,9 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                                 }
                             }
                             for ((hunk, symbol), chosen) in replaced.into_iter().zip(chosen) {
-                                if !chosen {
-                                    continue;
+                                if chosen {
+                                    analysis.settle(deleted_row(symbol, &hunk.old_file, root));
                                 }
-                                if !analysis.has_room() {
-                                    break;
-                                }
-                                analysis.rows.push(Row::Settled(deleted_row(
-                                    symbol,
-                                    &hunk.old_file,
-                                    root,
-                                )));
                             }
                         }
                     }
@@ -689,15 +735,14 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                         if !seen.insert((sym.location.line, sym.location.column)) {
                             continue;
                         }
-                        if !analysis.has_room() {
-                            break;
-                        }
-                        analysis.rows.push(Row::Live {
+                        if !analysis.measure(Row::Live {
                             answer,
                             file: file.clone(),
                             symbol: sym.clone(),
                             change_type: ChangeType::Modified,
-                        });
+                        }) {
+                            break;
+                        }
                     }
                 }
             }
@@ -723,10 +768,6 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
         };
 
         for hunk in live_hunks {
-            if !analysis.has_room() {
-                break;
-            }
-
             let removed_a_declaration = match &preimage {
                 Some(Preimage::Parsed(before)) => {
                     declared_in_removed(before, hunk).next().is_some()
@@ -738,10 +779,6 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                     continue;
                 }
 
-                if !analysis.has_room() {
-                    break;
-                }
-
                 let change_type = symbol_change_type(
                     &hunk.change_type,
                     sym.location.line,
@@ -749,19 +786,19 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                     hunk.line_count,
                 );
 
-                analysis.rows.push(Row::Live {
+                if !analysis.measure(Row::Live {
                     answer,
                     file: file.clone(),
                     symbol: sym.clone(),
                     change_type,
-                });
+                }) {
+                    break;
+                }
             }
         }
     }
 
     analysis.answers = answers;
-    // Listed in path order, whichever order the files were planned in.
-    analysis.unmeasured.sort();
     analysis
 }
 

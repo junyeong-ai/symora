@@ -2259,69 +2259,14 @@ fn a_capped_diff_analysis_says_its_counts_are_a_lower_bound() {
     );
 }
 
-/// A cap reached on a diff that changes configuration and code reports the
-/// changed code first, whichever path sorts first: taplo lists a `.toml`
-/// file's keys, which become rows of their own and in path order would fill
-/// the cap. The Python file is read by the grammar, its server configured
-/// away, so only taplo's presence decides whether the test can run.
-#[cfg(unix)]
+/// A deletion has no references to count, so it takes none of the room
+/// `--max-symbols` makes for the symbols whose references are counted: the
+/// cap bounds the deletions listed apart from them. The analysis stops at
+/// the file the cap leaves no room for a counted symbol in, so the files
+/// after it, deletions and all, are not listed, and the answer says it is
+/// short.
 #[test]
-fn a_cap_reports_changed_code_before_changed_configuration() {
-    let taplo = Command::new("taplo")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    if !taplo {
-        eprintln!("skipped: taplo does not run here");
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let repo = dir.path();
-    git(repo, &["init", "-q"]);
-    git(repo, &["config", "user.email", "t@example.com"]);
-    git(repo, &["config", "user.name", "t"]);
-    std::fs::create_dir(repo.join(".symora")).unwrap();
-    std::fs::write(
-        repo.join(".symora/config.toml"),
-        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright-langserver\"\n",
-    )
-    .unwrap();
-    std::fs::write(repo.join("a.toml"), "[deps]\nx = \"1\"\ny = \"1\"\n").unwrap();
-    std::fs::write(repo.join("b.py"), "def one():\n    pass\n").unwrap();
-    git(repo, &["add", "a.toml", "b.py"]);
-    git(repo, &["commit", "-qm", "init"]);
-    std::fs::write(repo.join("a.toml"), "[deps]\nx = \"2\"\ny = \"2\"\n").unwrap();
-    std::fs::write(repo.join("b.py"), "def one():\n    return 1\n").unwrap();
-
-    let analyse = |max: &str| json_ok(repo, &["diff-impact", "--max-symbols", max]);
-    let files = |page: &serde_json::Value| -> Vec<String> {
-        page["changes"]
-            .as_array()
-            .expect("changes")
-            .iter()
-            .map(|row| row["file"].as_str().unwrap_or("").to_string())
-            .collect()
-    };
-    let whole = analyse("0");
-    let all = files(&whole);
-    assert!(
-        all.iter().filter(|file| *file == "a.toml").count() >= 2,
-        "taplo lists the changed keys, each a row: {whole}"
-    );
-    assert_eq!(all.first().map(String::as_str), Some("b.py"), "{whole}");
-
-    let capped = analyse("1");
-    assert_eq!(files(&capped), ["b.py"], "{capped}");
-    assert_eq!(capped["incomplete"].as_bool(), Some(true), "{capped}");
-}
-
-/// Rows for removed declarations come first and can fill the cap on their
-/// own, which leaves the declarations a rename replaced and the ones it
-/// added unanalysed, so the answer is a lower bound there too.
-#[test]
-fn a_cap_reached_on_removed_declarations_says_its_counts_are_a_lower_bound() {
+fn a_deletion_takes_none_of_the_caps_room() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     git(repo, &["init", "-q"]);
@@ -2332,58 +2277,142 @@ fn a_cap_reached_on_removed_declarations_says_its_counts_are_a_lower_bound() {
         "def gone():\n    pass\n\n\ndef keep():\n    pass\n\n\ndef old_name():\n    pass\n",
     )
     .unwrap();
+    std::fs::write(
+        repo.join("b.py"),
+        "def stays():\n    pass\n\n\ndef dropped():\n    pass\n",
+    )
+    .unwrap();
     git(repo, &["add", "-A"]);
     git(repo, &["commit", "-qm", "init"]);
     std::fs::write(
         repo.join("a.py"),
-        "def keep():\n    pass\n\n\ndef new_name():\n    pass\n",
+        "def keep():\n    return 1\n\n\ndef new_name():\n    pass\n",
     )
     .unwrap();
+    std::fs::write(repo.join("b.py"), "def stays():\n    pass\n").unwrap();
 
     let analyse = |max: &str| {
-        json_ok(
+        let page = json_ok(
             repo,
             &["--deterministic", "diff-impact", "--max-symbols", max],
-        )
+        );
+        let mut rows: Vec<String> = page["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .map(|row| format!("{} {}", row["name"].as_str().unwrap(), row["change_type"]))
+            .collect();
+        rows.sort();
+        (page, rows)
     };
-    let capped = analyse("1");
-    assert_eq!(capped["changed_symbols_count"], 1, "{capped}");
-    assert_eq!(capped["changes"][0]["change_type"], "deleted", "{capped}");
+    let (capped, rows) = analyse("1");
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.ends_with("\"deleted\""))
+            .count(),
+        1,
+        "one deletion is listed beside the one changed symbol the cap admits: {capped}"
+    );
+    assert_eq!(capped["changed_symbols_count"], 2, "{capped}");
     assert_eq!(capped["incomplete"].as_bool(), Some(true), "{capped}");
 
-    let whole = analyse("0");
-    let names: Vec<&str> = whole["changes"]
-        .as_array()
-        .expect("changes")
-        .iter()
-        .filter_map(|item| item["name"].as_str())
-        .collect();
-    assert!(
-        ["gone", "old_name", "new_name"]
-            .iter()
-            .all(|name| names.contains(name)),
-        "{whole}"
+    let (full, rows) = analyse("2");
+    assert_eq!(
+        rows,
+        [
+            "gone \"deleted\"",
+            "keep \"modified\"",
+            "new_name \"modified\"",
+            "old_name \"deleted\""
+        ],
+        "b.py, after the file the cap filled, is not read: {full}"
     );
+    assert_eq!(full["incomplete"].as_bool(), Some(true), "{full}");
+    assert!(
+        full["hints"][0]
+            .as_str()
+            .is_some_and(|hint| hint.contains("--max-symbols")),
+        "the cause of `incomplete`, the cap, leads the hints: {full}"
+    );
+
+    let (whole, rows) = analyse("3");
+    assert!(rows.contains(&"dropped \"deleted\"".to_string()), "{whole}");
+    assert_eq!(rows.len(), 5, "{whole}");
     assert_eq!(whole["incomplete"].as_bool(), None, "{whole}");
     // `--deterministic` counts no reference, so there is no total to state,
     // only the reason none was taken, for each row it was not.
     assert!(whole.get("total_references").is_none(), "{whole}");
     assert_eq!(
         whole["refs_status_counts"],
-        serde_json::json!({"not_consulted": 1}),
+        serde_json::json!({"not_consulted": 2}),
         "{whole}"
     );
 }
 
-/// A repository whose Python files `tests/fixtures/lsp/reference_server.py`
-/// serves, logging the methods it is asked to `log`, with `base` committed
-/// and `head` written over it in the working tree. `None` where python3 does
-/// not run, which the fake needs.
+/// Documentation and configuration — keys a TOML server lists, headings a
+/// Markdown one does — are not broken into a row each: the files are listed
+/// among the unmeasured ones with a hint saying why, no server is asked
+/// about them, and the cap counts the changed code alone.
 #[cfg(unix)]
-fn reference_served_repo(
-    files: &[(&str, &str, &str)],
-    server_args: &[&str],
-) -> Option<tempfile::TempDir> {
+#[test]
+fn documentation_and_configuration_are_listed_unmeasured_rather_than_by_key() {
+    let Some(dir) = reference_served_repo(&[
+        (
+            "a.toml",
+            "[deps]\nx = \"1\"\ny = \"1\"\n",
+            "[deps]\nx = \"2\"\ny = \"2\"\n",
+        ),
+        ("README.md", "# Title\n\nold\n", "# Title\n\nnew\n"),
+        (
+            "b.py",
+            "def one():\n    pass\n",
+            "def one():\n    return 1\n",
+        ),
+    ]) else {
+        return;
+    };
+    let repo = dir.path();
+    let page = diff_impact_in_process(repo, &["--max-symbols", "1"]);
+    assert_eq!(
+        named_rows(&page),
+        [("one".to_string(), "modified".to_string())],
+        "{page}"
+    );
+    assert_eq!(
+        page["unmeasured_files"],
+        serde_json::json!(["README.md", "a.toml"]),
+        "{page}"
+    );
+    assert!(page.get("incomplete").is_none(), "{page}");
+    assert!(
+        page["hints"]
+            .as_array()
+            .is_some_and(|hints| hints.iter().any(|hint| {
+                hint.as_str().is_some_and(|hint| {
+                    hint.starts_with(
+                        "Documentation and configuration files are not read as symbols: \
+                         README.md, a.toml.",
+                    )
+                })
+            })),
+        "{page}"
+    );
+    let asked = std::fs::read_to_string(repo.join(".symora/log")).unwrap();
+    assert!(
+        asked
+            .lines()
+            .all(|line| !line.ends_with(" a.toml") && !line.ends_with(" README.md")),
+        "no server is asked about them: {asked}"
+    );
+}
+
+/// A repository whose Python, TOML and Markdown files
+/// `tests/fixtures/lsp/reference_server.py` serves, logging what it is asked
+/// to `.symora/log`, and whose Go server is not installed, with each file's
+/// `base` committed and its `head` written over it in the working tree.
+/// `None` where python3 does not run, which the fake needs.
+#[cfg(unix)]
+fn reference_served_repo(files: &[(&str, &str, &str)]) -> Option<tempfile::TempDir> {
     if Command::new("python3").arg("--version").output().is_err() {
         eprintln!("skipped: the reference fixture requires python3");
         return None;
@@ -2404,13 +2433,12 @@ fn reference_served_repo(
     }
     let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/lsp/reference_server.py");
-    let mut args = vec![
-        server.to_str().unwrap().to_string(),
-        repo.join(".symora/log").to_str().unwrap().to_string(),
-    ];
-    args.extend(server_args.iter().map(|arg| arg.to_string()));
+    let fake =
+        serde_json::json!({"command": "python3", "args": [server, repo.join(".symora/log")]});
     let config = serde_json::json!({"lsp": {"servers": {
-        "python": {"command": "python3", "args": args},
+        "python": fake,
+        "toml": fake,
+        "markdown": fake,
         "go": {"command": "/nonexistent/gopls"},
     }}});
     std::fs::create_dir(repo.join(".symora")).unwrap();
@@ -2448,21 +2476,18 @@ fn diff_impact_in_process(repo: &std::path::Path, args: &[&str]) -> serde_json::
 #[cfg(unix)]
 #[test]
 fn the_summary_counts_the_rows_of_each_reference_status() {
-    let Some(dir) = reference_served_repo(
-        &[
-            (
-                "a.py",
-                "def one():\n    return 1\n\n\ndef two():\n    return one()\n",
-                "def one():\n    return 2\n\n\ndef two():\n    return one() + 1\n",
-            ),
-            (
-                "b.go",
-                "package b\n\nfunc Three() int { return 3 }\n",
-                "package b\n\nfunc Three() int { return 4 }\n",
-            ),
-        ],
-        &[],
-    ) else {
+    let Some(dir) = reference_served_repo(&[
+        (
+            "a.py",
+            "def one():\n    return 1\n\n\ndef two():\n    return one()\n",
+            "def one():\n    return 2\n\n\ndef two():\n    return one() + 1\n",
+        ),
+        (
+            "b.go",
+            "package b\n\nfunc Three() int { return 3 }\n",
+            "package b\n\nfunc Three() int { return 4 }\n",
+        ),
+    ]) else {
         return;
     };
     let page = diff_impact_in_process(dir.path(), &[]);
