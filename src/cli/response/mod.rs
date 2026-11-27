@@ -347,10 +347,15 @@ fn recount_bodies(value: &mut serde_json::Value) {
 }
 
 /// Reduce a serialized response toward `max_chars` by dropping whole trailing
-/// items from its `Section`-shaped lists, largest list first. `showing`
-/// shrinks with the items, `truncated` is set, and one disclosure hint
-/// naming `output.max_response_chars` lands on the largest list before
-/// measuring, so its own length is budgeted. `count` and per-item shape
+/// items from its `Section`-shaped lists: the lists inside another list's
+/// items first, the most deeply nested of them before the rest, and among
+/// lists nested alike the largest first. A list inside an item is that item's
+/// detail — `diff-impact`'s callers of a changed symbol — which a command
+/// asked about the item can list again, while an item dropped from its list
+/// takes its own identity and counts with it. `showing` shrinks with the
+/// items, `truncated` is set, and one disclosure hint naming
+/// `output.max_response_chars` lands on the largest list before measuring,
+/// so its own length is budgeted. `count` and per-item shape
 /// are never touched, and the value is never sliced: when even zero items
 /// stays over the ceiling, the reduced-but-whole JSON is emitted as-is.
 ///
@@ -380,16 +385,27 @@ pub fn fit_to_char_budget(
     }
 
     let mut candidates = Vec::new();
-    collect_section_paths(value, &mut String::new(), &mut candidates);
+    collect_section_paths(value, &mut String::new(), 0, &mut candidates);
     if candidates.is_empty() {
         return false;
     }
-    // Largest items array first; the stable sort keeps document order on
-    // ties, and collection order is document order.
-    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.items_len));
+    // Most deeply nested first, then largest items array; the stable sort
+    // keeps document order on ties, and collection order is document order.
+    candidates.sort_by_key(|candidate| {
+        (
+            std::cmp::Reverse(candidate.nesting),
+            std::cmp::Reverse(candidate.items_len),
+        )
+    });
+    let largest = candidates
+        .iter()
+        .enumerate()
+        .max_by_key(|(order, candidate)| (candidate.items_len, std::cmp::Reverse(*order)))
+        .map(|(_, candidate)| candidate.path.clone())
+        .expect("a candidate was collected");
 
     if let Some(node) = value
-        .pointer_mut(&candidates[0].path)
+        .pointer_mut(&largest)
         .and_then(serde_json::Value::as_object_mut)
     {
         let hint = format!(
@@ -463,7 +479,7 @@ pub fn fit_to_char_budget(
             return true;
         }
         // Even zero items leaves the response over the ceiling — keep the
-        // emptied list and continue with the next-largest one.
+        // emptied list and continue with the next one.
     }
     dropped
 }
@@ -471,27 +487,38 @@ pub fn fit_to_char_budget(
 struct SectionCandidate {
     /// JSON Pointer to the Section-shaped node.
     path: String,
-    /// Serialized length of its `items` array — the shrink-order key.
+    /// How many Section-shaped lists hold it in their items — the first
+    /// shrink-order key.
+    nesting: usize,
+    /// Serialized length of its `items` array — the second shrink-order key.
     items_len: usize,
 }
 
 fn collect_section_paths(
     value: &serde_json::Value,
     path: &mut String,
+    nesting: usize,
     out: &mut Vec<SectionCandidate>,
 ) {
     match value {
         serde_json::Value::Object(map) => {
-            if is_section_shaped(map) {
+            let section = is_section_shaped(map);
+            if section {
                 let items_len = serde_json::to_string(&map["items"])
                     .map(|s| s.len())
                     .unwrap_or(0);
                 out.push(SectionCandidate {
                     path: path.clone(),
+                    nesting,
                     items_len,
                 });
             }
             for (key, child) in map {
+                let nesting = if section && key == "items" {
+                    nesting + 1
+                } else {
+                    nesting
+                };
                 let base = path.len();
                 path.push('/');
                 for ch in key.chars() {
@@ -501,7 +528,7 @@ fn collect_section_paths(
                         _ => path.push(ch),
                     }
                 }
-                collect_section_paths(child, path, out);
+                collect_section_paths(child, path, nesting, out);
                 path.truncate(base);
             }
         }
@@ -510,7 +537,7 @@ fn collect_section_paths(
                 let base = path.len();
                 path.push('/');
                 path.push_str(&index.to_string());
-                collect_section_paths(child, path, out);
+                collect_section_paths(child, path, nesting, out);
                 path.truncate(base);
             }
         }
@@ -1061,6 +1088,52 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|h| h.as_str().unwrap().contains("output.max_response_chars"))
+        );
+    }
+
+    #[test]
+    fn fit_drops_the_lists_inside_items_before_the_items() {
+        // diff-impact-like: each changed symbol carries a list of callers.
+        let rows: Vec<serde_json::Value> = (1..=6)
+            .map(|row| {
+                let callers: Vec<serde_json::Value> = (1..=8)
+                    .map(|caller| serde_json::json!({ "name": format!("caller_{row}_{caller}") }))
+                    .collect();
+                serde_json::json!({
+                    "name": format!("changed_{row}"),
+                    "refs": 8,
+                    "callers": { "count": 8, "showing": 8, "items": callers },
+                })
+            })
+            .collect();
+        let mut value = serde_json::json!({
+            "changes": { "count": 6, "showing": 6, "items": rows },
+        });
+        let budget = 900;
+
+        assert!(fit_to_char_budget(&mut value, budget, &compact_chars));
+
+        assert!(compact_chars(&value) <= budget, "{value}");
+        let changes = &value["changes"];
+        assert_eq!(changes["showing"], 6, "{value}");
+        assert!(changes.get("truncated").is_none(), "{value}");
+        let rows = changes["items"].as_array().unwrap();
+        assert!(
+            rows.iter()
+                .all(|row| row["callers"]["count"] == 8 && row["refs"] == 8),
+            "{value}"
+        );
+        assert!(
+            rows.iter().any(|row| row["callers"]["truncated"] == true),
+            "{value}"
+        );
+        assert!(
+            changes["hints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|h| h.as_str().unwrap().contains("output.max_response_chars")),
+            "the hint lands on the largest list: {value}"
         );
     }
 

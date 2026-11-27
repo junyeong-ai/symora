@@ -2091,7 +2091,7 @@ fn a_statement_declaring_several_names_is_each_ones_declaration() {
 
     std::fs::write(repo.join("p.go"), source.replace("\t2,", "\t3,")).unwrap();
     let page = json_ok(repo, &["diff-impact"]);
-    let mut rows: Vec<String> = page["changes"]
+    let mut rows: Vec<String> = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -2296,7 +2296,7 @@ fn a_deletion_takes_none_of_the_caps_room() {
             repo,
             &["--deterministic", "diff-impact", "--max-symbols", max],
         );
-        let mut rows: Vec<String> = page["changes"]
+        let mut rows: Vec<String> = page["changes"]["items"]
             .as_array()
             .expect("changes")
             .iter()
@@ -2313,7 +2313,7 @@ fn a_deletion_takes_none_of_the_caps_room() {
         1,
         "one deletion is listed beside the one changed symbol the cap admits: {capped}"
     );
-    assert_eq!(capped["changed_symbols_count"], 2, "{capped}");
+    assert_eq!(capped["changes"]["count"], 2, "{capped}");
     assert_eq!(capped["incomplete"].as_bool(), Some(true), "{capped}");
     assert_eq!(
         capped["unmeasured_files"],
@@ -2557,7 +2557,7 @@ fn the_summary_counts_the_rows_of_each_reference_status() {
         return;
     };
     let page = diff_impact_in_process(dir.path(), &[]);
-    let rows: Vec<(&str, Option<&str>)> = page["changes"]
+    let rows: Vec<(&str, Option<&str>)> = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -2604,7 +2604,7 @@ fn repo_with_changed_callables() -> Option<tempfile::TempDir> {
 /// callers' names with each call site's line.
 #[cfg(unix)]
 fn callers_by_row(page: &serde_json::Value) -> Vec<(String, Option<String>, Vec<(String, u64)>)> {
-    page["changes"]
+    page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -2660,8 +2660,11 @@ fn callers_are_read_off_the_references_counted() {
         ],
         "{page}"
     );
-    assert_eq!(page["changes"][0]["callers"]["count"], 2, "{page}");
-    assert!(page["changes"][1].get("callers").is_none(), "{page}");
+    assert_eq!(page["changes"]["items"][0]["callers"]["count"], 2, "{page}");
+    assert!(
+        page["changes"]["items"][1].get("callers").is_none(),
+        "{page}"
+    );
     assert_eq!(
         page["callers_status_counts"],
         serde_json::json!({"not_callable": 1, "references_derived": 1}),
@@ -2672,6 +2675,94 @@ fn callers_are_read_off_the_references_counted() {
         !asked.contains("callHierarchy"),
         "no call hierarchy is asked: {asked}"
     );
+}
+
+/// The rows are the shared list, so a response past `output.max_response_chars`
+/// is cut to fit like any other: a row's callers, the detail one `callers`
+/// query lists again, before the rows, which take their counts with them.
+#[cfg(unix)]
+#[test]
+fn a_response_past_its_size_target_cuts_callers_before_rows() {
+    let changed = |value: u32| {
+        (0..6)
+            .map(|n| format!("def changed_{n}():\n    return {value}\n\n\n"))
+            .collect::<String>()
+    };
+    let calls = (0..6)
+        .map(|n| format!("changed_{n}()"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let callers = (0..6)
+        .map(|k| format!("def caller_{k}():\n    return {calls}\n\n\n"))
+        .collect::<String>();
+    let imports = format!(
+        "from a import {}\n\n\n{callers}",
+        (0..6)
+            .map(|n| format!("changed_{n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let Some(dir) = reference_served_repo(&[
+        ("a.py", &changed(1), &changed(2)),
+        ("b.py", &imports, &imports),
+    ]) else {
+        return;
+    };
+    let repo = dir.path();
+    let config = std::fs::read_to_string(repo.join(".symora/config.toml")).unwrap();
+    let analyse = |ceiling: usize, args: &[&str]| {
+        std::fs::write(
+            repo.join(".symora/config.toml"),
+            format!("{config}\n[output]\nmax_response_chars = {ceiling}\n"),
+        )
+        .unwrap();
+        let page = diff_impact_in_process(repo, args);
+        let chars = serde_json::to_string(&page).unwrap().chars().count();
+        (page, chars)
+    };
+    let sized = |page: &serde_json::Value| {
+        page["changes"]["hints"].as_array().is_some_and(|hints| {
+            hints
+                .iter()
+                .any(|hint| hint.as_str().unwrap().contains("max_response_chars"))
+        })
+    };
+    let (whole, whole_chars) = analyse(0, &["--callers"]);
+    let (_, rows_chars) = analyse(0, &[]);
+    assert!(
+        whole["changes"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["callers"]["showing"] == 6),
+        "{whole}"
+    );
+
+    let ceiling = (whole_chars + rows_chars) / 2;
+    let (page, chars) = analyse(ceiling, &["--callers"]);
+    assert!(chars <= ceiling, "{chars} > {ceiling}: {page}");
+    assert_eq!(page["changes"]["count"], 6, "{page}");
+    assert_eq!(page["changes"]["showing"], 6, "every row stays: {page}");
+    let rows = page["changes"]["items"].as_array().unwrap();
+    assert!(
+        rows.iter()
+            .all(|row| row["refs"] == 7 && row["callers"]["count"] == 6),
+        "six calls and the import each: {page}"
+    );
+    assert!(
+        rows.iter().any(|row| row["callers"]["truncated"] == true),
+        "{page}"
+    );
+    assert!(sized(&page), "{page}");
+
+    let ceiling = rows_chars / 2;
+    let (page, chars) = analyse(ceiling, &[]);
+    assert!(chars <= ceiling, "{chars} > {ceiling}: {page}");
+    assert_eq!(page["changes"]["count"], 6, "{page}");
+    assert_eq!(page["changes"]["truncated"], true, "{page}");
+    assert!(page["changes"]["showing"].as_u64().unwrap() < 6, "{page}");
+    assert_eq!(page["total_references"], 42, "totals stay whole: {page}");
+    assert!(sized(&page), "{page}");
 }
 
 /// `--call-hierarchy` asks the server's call hierarchy for every changed
@@ -2851,7 +2942,7 @@ fn a_python_constructors_callers_are_its_classs_calls() {
     };
     for mode in ["--callers", "--call-hierarchy"] {
         let page = diff_impact_in_process(repo, &[mode]);
-        let row = page["changes"]
+        let row = page["changes"]["items"]
             .as_array()
             .expect("changes")
             .iter()
@@ -2933,7 +3024,7 @@ fn a_diff_in_a_serverless_language_still_names_what_changed() {
     .unwrap();
 
     let page = json_ok(repo, &["diff-impact", "HEAD~1"]);
-    let names: Vec<&str> = page["changes"]
+    let names: Vec<&str> = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -2947,7 +3038,7 @@ fn a_diff_in_a_serverless_language_still_names_what_changed() {
         page["unmeasured_files"].is_null(),
         "a file the grammar read is not unmeasured: {page}"
     );
-    for change in page["changes"].as_array().expect("changes") {
+    for change in page["changes"]["items"].as_array().expect("changes") {
         assert!(
             change["refs"].is_null(),
             "no server can count references here, so none are claimed: {page}"
@@ -2997,9 +3088,12 @@ fn a_repository_with_no_commit_is_measured_against_the_empty_tree() {
         (&["--deterministic", "diff-impact", "--staged"], false),
     ] {
         let page = json_ok(repo, args);
-        assert_eq!(page["changes"][0]["name"], "added", "{args:?}: {page}");
         assert_eq!(
-            page["changes"][0]["change_type"], "added",
+            page["changes"]["items"][0]["name"], "added",
+            "{args:?}: {page}"
+        );
+        assert_eq!(
+            page["changes"]["items"][0]["change_type"], "added",
             "{args:?}: {page}"
         );
         if untracked {
@@ -3061,7 +3155,7 @@ fn a_users_diff_configuration_does_not_change_what_is_measured() {
         let page = json_ok(repo, &["--deterministic", "diff-impact"]);
         git(repo, &["config", "--unset", key]);
 
-        let mut changed: Vec<&str> = page["changes"]
+        let mut changed: Vec<&str> = page["changes"]["items"]
             .as_array()
             .expect("changes")
             .iter()
@@ -3078,7 +3172,7 @@ fn a_users_diff_configuration_does_not_change_what_is_measured() {
         .output()
         .expect("symora binary should exist");
     let page: serde_json::Value = common::parse_response(&out.stdout).expect("JSON on stdout");
-    let mut changed: Vec<&str> = page["changes"]
+    let mut changed: Vec<&str> = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -3144,7 +3238,7 @@ fn which_lines_changed_does_not_depend_on_the_users_diff_algorithm() {
         if let Some((key, _)) = setting {
             git(repo, &["config", "--unset", key]);
         }
-        let mut rows: Vec<(String, String)> = page["changes"]
+        let mut rows: Vec<(String, String)> = page["changes"]["items"]
             .as_array()
             .expect("changes")
             .iter()
@@ -3183,7 +3277,7 @@ fn a_change_that_names_no_lines_is_still_counted() {
 
     let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert_eq!(page["changed_files_count"], 2, "{page}");
-    assert_eq!(page["changed_symbols_count"], 0, "{page}");
+    assert_eq!(page["changes"]["count"], 0, "{page}");
     assert!(page["unmeasured_files"].is_null(), "{page}");
     assert!(page["hints"].is_null(), "{page}");
 }
@@ -3202,7 +3296,7 @@ fn a_rename_is_measured_the_same_whatever_the_rename_setting() {
             .collect::<String>()
     };
     let rows = |page: &serde_json::Value| {
-        let mut rows: Vec<String> = page["changes"]
+        let mut rows: Vec<String> = page["changes"]["items"]
             .as_array()
             .expect("changes")
             .iter()
@@ -3314,7 +3408,7 @@ fn a_file_name_git_quotes_is_measured_under_its_own_name() {
     std::fs::write(repo.join("back\\slash.py"), "def keep():\n    return 1\n").unwrap();
 
     let page = json_ok(repo, &["--deterministic", "diff-impact"]);
-    let rows: Vec<String> = page["changes"]
+    let rows: Vec<String> = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -3356,7 +3450,7 @@ fn a_file_name_that_is_not_utf8_is_measured() {
     .unwrap();
 
     let page = json_ok(repo, &["--deterministic", "diff-impact"]);
-    let rows: Vec<String> = page["changes"]
+    let rows: Vec<String> = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -3443,7 +3537,7 @@ fn removed_lines_no_grammar_reads_are_unmeasured() {
 
     let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert_eq!(page["changed_files_count"], 4, "{page}");
-    let names: Vec<&str> = page["changes"]
+    let names: Vec<&str> = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -3494,7 +3588,7 @@ fn a_declaration_replaced_in_place_is_deleted_only_when_it_is_gone() {
     .unwrap();
 
     let page = json_ok(repo, &["--deterministic", "diff-impact"]);
-    let deleted: Vec<String> = page["changes"]
+    let deleted: Vec<String> = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -3561,7 +3655,7 @@ fn of_same_named_declarations_the_one_not_declared_again_is_deleted() {
     .unwrap();
 
     let page = json_ok(repo, &["diff-impact"]);
-    let mut deleted: Vec<String> = page["changes"]
+    let mut deleted: Vec<String> = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -3606,7 +3700,7 @@ fn a_local_the_grammar_reads_is_never_reported_deleted() {
     .unwrap();
 
     let page = json_ok(repo, &["--deterministic", "diff-impact"]);
-    let rows: Vec<String> = page["changes"]
+    let rows: Vec<String> = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -4125,7 +4219,7 @@ fn an_annotation_removed_from_a_type_modifies_that_type() {
 }
 
 fn named_rows(page: &serde_json::Value) -> Vec<(String, String)> {
-    page["changes"]
+    page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -4164,7 +4258,7 @@ fn a_base_that_is_not_text_leaves_its_file_unmeasured() {
 
     let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert!(
-        page["changes"]
+        page["changes"]["items"]
             .as_array()
             .expect("changes")
             .iter()
@@ -4207,8 +4301,12 @@ fn a_symbolic_link_is_counted_but_not_read_through() {
 
     let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert_eq!(page["changed_files_count"], 4, "{page}");
-    assert_eq!(page["changes"][0]["name"], "three", "{page}");
-    assert_eq!(page["changes"].as_array().map(Vec::len), Some(1), "{page}");
+    assert_eq!(page["changes"]["items"][0]["name"], "three", "{page}");
+    assert_eq!(
+        page["changes"]["items"].as_array().map(Vec::len),
+        Some(1),
+        "{page}"
+    );
     assert_eq!(
         page["unmeasured_files"],
         serde_json::json!(["blob.py", "alias.py", "current.py"]),
@@ -4262,7 +4360,7 @@ fn a_staged_change_under_a_mode_change_alone_is_measured() {
     std::fs::set_permissions(repo.join("m.py"), std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let page = json_ok(repo, &["--deterministic", "diff-impact", "--staged"]);
-    assert_eq!(page["changes"][0]["name"], "a", "{page}");
+    assert_eq!(page["changes"]["items"][0]["name"], "a", "{page}");
     assert!(page["unmeasured_files"].is_null(), "{page}");
     assert!(page["hints"].is_null(), "{page}");
 }
@@ -4327,7 +4425,7 @@ fn a_file_git_reports_as_binary_is_counted_and_disclosed() {
 
     let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert_eq!(page["changed_files_count"], 2, "{page}");
-    assert_eq!(page["changes"][0]["name"], "a", "{page}");
+    assert_eq!(page["changes"]["items"][0]["name"], "a", "{page}");
     assert_eq!(
         page["unmeasured_files"],
         serde_json::json!(["gen.py"]),
@@ -4363,7 +4461,7 @@ fn a_diff_range_is_refused_with_the_revisions_that_express_it() {
 
     let single = json_ok(repo.path(), &["--deterministic", "diff-impact", "HEAD~1"]);
     assert!(
-        single["changes"]
+        single["changes"]["items"]
             .as_array()
             .expect("changes")
             .iter()
@@ -4387,7 +4485,7 @@ fn a_diff_run_from_a_subdirectory_measures_that_subdirectory() {
         page["changed_files_count"], 1,
         "top.py lies outside the project: {page}"
     );
-    let gone = page["changes"]
+    let gone = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -4423,7 +4521,7 @@ fn staged_lines_under_unstaged_edits_are_unmeasured_and_say_why() {
         serde_json::json!(["pkg/m.py"]),
         "{page}"
     );
-    assert_eq!(page["changed_symbols_count"], 0, "{page}");
+    assert_eq!(page["changes"]["count"], 0, "{page}");
     assert_eq!(
         page["changed_files_count"], 1,
         "an unmeasured file is still a changed one: {page}"

@@ -747,8 +747,8 @@ fn impact_output_full() {
     assert_json_snapshot!(out);
 }
 
-/// A diff-impact summary counts the rows of each status, and a changed
-/// function's callers read off its references are the shared list marked
+/// A diff-impact summary counts the rows of each status, the rows are the
+/// shared list, and a changed function's callers read off its references are the shared list marked
 /// `references_derived`; a class row says `not_callable` and lists none; a
 /// deletion carries neither counts nor callers.
 #[test]
@@ -775,7 +775,6 @@ fn diff_impact_output_with_status_counts_and_derived_callers() {
     let out = DiffImpactOutput {
         revision: "HEAD".to_string(),
         changed_files_count: 2,
-        changed_symbols_count: 3,
         total_references: Some(4),
         refs_status_counts: BTreeMap::from([("indexing_degraded", 1)]),
         callers_status_counts: BTreeMap::from([("not_callable", 1), ("references_derived", 1)]),
@@ -791,7 +790,7 @@ fn diff_impact_output_with_status_counts_and_derived_callers() {
              their diff for what changed."
                 .to_string(),
         ],
-        changes: vec![
+        changes: Section::new(vec![
             ChangedSymbolImpact {
                 refs: Some(3),
                 test_refs: Some(1),
@@ -816,7 +815,7 @@ fn diff_impact_output_with_status_counts_and_derived_callers() {
                 deletion: Some(DeletionResolution::Resolved),
                 ..row("retired", "function", 40)
             },
-        ],
+        ]),
     };
     assert_json_snapshot!(out);
 }

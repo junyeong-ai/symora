@@ -673,7 +673,7 @@ fn diff_impact_hands_a_changed_local_to_its_function() {
         .output()
         .expect("run symora");
     let page: Value = common::parse_response(&output.stdout).expect("JSON on stdout");
-    let rows: Vec<String> = page["changes"]
+    let rows: Vec<String> = page["changes"]["items"]
         .as_array()
         .expect("changes")
         .iter()
@@ -689,7 +689,7 @@ fn diff_impact_hands_a_changed_local_to_its_function() {
         "{page}"
     );
     assert!(
-        page["changes"][1]["refs"].is_u64(),
+        page["changes"]["items"][1]["refs"].is_u64(),
         "pyright answered, so the function's references are counted: {page}"
     );
 }
@@ -745,7 +745,7 @@ fn diff_impact_gives_a_class_the_lines_no_member_covers() {
             .output()
             .expect("run symora");
         let page: Value = common::parse_response(&output.stdout).expect("JSON on stdout");
-        let rows: Vec<String> = page["changes"]
+        let rows: Vec<String> = page["changes"]["items"]
             .as_array()
             .expect("changes")
             .iter()
@@ -753,7 +753,7 @@ fn diff_impact_gives_a_class_the_lines_no_member_covers() {
             .collect();
         assert_eq!(rows, [r#""Service" "modified""#], "{change}: {page}");
         assert!(
-            page["changes"][0]["refs"].is_u64(),
+            page["changes"]["items"][0]["refs"].is_u64(),
             "{change}: pyright answered, so the class's references are counted: {page}"
         );
     }

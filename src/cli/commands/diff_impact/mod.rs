@@ -62,7 +62,6 @@ pub struct DiffImpactArgs {
 pub struct DiffImpactOutput {
     pub revision: String,
     pub changed_files_count: usize,
-    pub changed_symbols_count: usize,
     /// The reference counts of the changed symbols whose counts were
     /// measured, summed. Omitted when none was: a failed lookup counted
     /// nothing, and a deleted symbol has no live references to count.
@@ -108,7 +107,7 @@ pub struct DiffImpactOutput {
     pub incomplete: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
-    pub changes: Vec<ChangedSymbolImpact>,
+    pub changes: Section<ChangedSymbolImpact>,
 }
 
 /// Test coverage summary for diff analysis (aggregate over all changed symbols)
@@ -370,7 +369,6 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     ctx.print_success(DiffImpactOutput {
         revision: args.revision,
         changed_files_count: changed_files.len(),
-        changed_symbols_count: changes.len(),
         total_references: total_refs,
         refs_status_counts,
         callers_status_counts,
@@ -379,7 +377,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
             without_tests,
             ratio: coverage_ratio,
         },
-        changes,
+        changes: Section::new(changes),
         unmeasured_files: unmeasured
             .iter()
             .map(|file| relative_display(file, root))

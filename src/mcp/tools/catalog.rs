@@ -644,7 +644,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ])),
         ToolDefinition::read_only(
             "get_diff_impact",
-            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals; refs_status_counts and callers_status_counts count the rows of each status; test references are not execution coverage. Documentation and configuration files (Markdown, YAML, TOML, JSON) are listed in unmeasured_files rather than read by key. With callers, a changed function's, method's or constructor's callers is a list with count, showing and truncated, read off the references its count was taken from (callers_status references_derived, not verified calls); another kind's row reads not_callable, and call_hierarchy asks the server instead. callers is absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind.",
+            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals; refs_status_counts and callers_status_counts count the rows of each status; test references are not execution coverage. Documentation and configuration files (Markdown, YAML, TOML, JSON) are listed in unmeasured_files rather than read by key. changes is a list with count, showing and truncated, and with callers, a changed function's, method's or constructor's callers is one too, read off the references its count was taken from (callers_status references_derived, not verified calls); another kind's row reads not_callable, and call_hierarchy asks the server instead. callers is absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind.",
             schema_object(&[
                 ("revision", "string", "One base revision, not a revision range; default HEAD"),
                 ("staged", "boolean", "Compare staged changes instead of the working tree"),
@@ -676,7 +676,6 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(output_schema(&[
             ("revision", "string", "The revision compared with"),
             ("changed_files_count", "integer", "Files the diff changed"),
-            ("changed_symbols_count", "integer", "Rows in changes"),
             (
                 "total_references",
                 "integer",
@@ -716,11 +715,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             ("hints", "array", "Causes and remedies"),
             (
                 "changes",
-                "array",
-                "Changed symbols: { name?, kind?, file, line, column, change_type, refs?, \
-                 test_refs?, prod_refs?, refs_status?, callers_status?, deletion?, callers? }; \
-                 callers is a list (count, showing, truncated?, items) of { name, kind, file, \
-                 line, column, call_site }",
+                "object",
+                "Changed symbols as a list (count, showing, truncated?, items) of { name?, \
+                 kind?, file, line, column, change_type, refs?, test_refs?, prod_refs?, \
+                 refs_status?, callers_status?, deletion?, callers? }; callers is a list of the \
+                 same shape of { name, kind, file, line, column, call_site }",
             ),
         ])),
         ToolDefinition::read_only(
