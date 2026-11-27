@@ -4,6 +4,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod progress;
+
 fn copy_binary(destination: &Path) {
     // Copy in a child so this process never holds the executable open for
     // writing. A concurrent fork can inherit that descriptor until exec,
@@ -376,7 +378,7 @@ fn uninstall_stops_its_installation_and_removes_daemon_root() {
     assert!(!home.path().join(".symora").exists());
     assert!(std::os::unix::net::UnixStream::connect(second_socket).is_err());
     let pid: libc::pid_t = second_status["pid"].as_u64().unwrap().try_into().unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + progress::wait();
     loop {
         if unsafe { libc::kill(pid, 0) } == -1 {
             assert_eq!(
@@ -396,15 +398,12 @@ fn uninstall_stops_its_installation_and_removes_daemon_root() {
 fn stopped_daemon_socket(exe: &Path, home: &Path) -> (PathBuf, serde_json::Value) {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    use std::time::Duration;
 
     json_ok(exe, home, "start");
     let status = json_ok(exe, home, "status");
     let socket = PathBuf::from(status["socket_path"].as_str().unwrap());
     let mut stream = UnixStream::connect(&socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(progress::wait())).unwrap();
     let request =
         symora::daemon::protocol::Request::new(1, symora::daemon::protocol::methods::PING, None);
     writeln!(stream, "{}", serde_json::to_string(&request).unwrap()).unwrap();
@@ -426,7 +425,7 @@ fn accept_request(
 ) {
     use std::time::{Duration, Instant};
 
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + progress::wait();
     let (stream, _) = loop {
         match listener.accept() {
             Ok(connection) => break connection,
@@ -443,15 +442,12 @@ fn accept_request(
 
 fn read_request(stream: &std::os::unix::net::UnixStream) -> symora::daemon::protocol::Request {
     use std::io::{BufRead, BufReader};
-    use std::time::Duration;
 
     // The listener is polled nonblocking, and macOS accepted sockets inherit
     // that mode: a read before the client's write fails at once despite its
     // timeout.
     stream.set_nonblocking(false).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(progress::wait())).unwrap();
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).unwrap();
     serde_json::from_str(&line).unwrap()
@@ -530,7 +526,7 @@ fn concurrent_readers_cannot_replace_a_mutation_request_snapshot() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + progress::wait();
         while !root.join("ready").exists() {
             if mutation.try_wait().unwrap().is_some() || Instant::now() >= deadline {
                 let _ = mutation.kill();
@@ -574,7 +570,7 @@ fn concurrent_readers_cannot_replace_a_mutation_request_snapshot() {
             "{mode} did not sync the external change"
         );
 
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + progress::wait();
         while mutation.try_wait().unwrap().is_none() {
             if Instant::now() >= deadline {
                 let _ = mutation.kill();
@@ -681,7 +677,7 @@ fn assert_accepted_project_request_is_not_retried(close: RequestClose) {
         writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
         drop(stream);
         let mut connections = 0;
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + progress::wait();
         while !client_finished.load(Ordering::Acquire) {
             assert!(Instant::now() < deadline, "client did not finish");
             let stream = match listener.accept() {

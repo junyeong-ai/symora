@@ -10,6 +10,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 mod common;
+mod progress;
 
 use common::{SYMORA, no_global_config};
 
@@ -245,7 +246,7 @@ fn mcp_serve_exits_on_a_signal_while_its_input_is_open() {
 
     // SAFETY: the pid is the child this test started.
     unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + progress::wait();
     while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -274,7 +275,7 @@ fn mcp_serve_ends_when_its_input_cannot_be_read() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn symora mcp serve");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + progress::wait();
     while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -4577,7 +4578,7 @@ fn a_command_stops_what_its_language_server_started() {
     // SAFETY: signal 0 only asks whether the process exists.
     let alive = |pid: libc::pid_t| unsafe { libc::kill(pid, 0) } == 0;
     let stops = |pid: libc::pid_t| {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + progress::wait();
         while alive(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -4646,22 +4647,30 @@ fn a_command_stops_what_its_language_server_started() {
         }
         let mut command = command.spawn().unwrap();
         let server = root.path().join("server.pid");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !server.exists() && Instant::now() < deadline {
+        let deadline = Instant::now() + progress::wait();
+        while !server.exists() && command.try_wait().unwrap().is_none() && Instant::now() < deadline
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
+        assert!(server.exists(), "the server never recorded its pid");
         let (server, helper) = (pid_in(&server), pid_in(&root.path().join("helper.pid")));
         let pid = command.id() as libc::pid_t;
         // SAFETY: the pid is the command this test started.
         unsafe { libc::kill(pid, libc::SIGHUP) };
+        // A command that ignores hangups has a second to show it, which a
+        // passing run waits out; one that stops waits only for its exit.
         let hung_up = exits(
             &mut command,
-            Duration::from_secs(if nohup { 1 } else { 10 }),
+            if nohup {
+                Duration::from_secs(1)
+            } else {
+                progress::wait()
+            },
         );
         if nohup {
             // SAFETY: as above.
             unsafe { libc::kill(pid, libc::SIGTERM) };
-            exits(&mut command, Duration::from_secs(10));
+            exits(&mut command, progress::wait());
         }
         let _ = command.kill();
         let stopped = [stops(helper), stops(server)];
