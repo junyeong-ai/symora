@@ -121,24 +121,9 @@ pub(super) fn to_lsp_position(
     Position::new(line0, character)
 }
 
-pub(super) fn check_feature_support(
-    manager: &LspManager,
-    file: &Path,
-    feature: LspFeature,
-) -> Result<SupportLevel, LspError> {
-    let lang = Language::from_path(file);
-    let level = get_support_level(lang, feature);
-
-    if level == SupportLevel::None {
-        return Err(unsupported_error(manager, file, feature));
-    }
-
-    Ok(level)
-}
-
 /// The `FeatureNotSupported` error for a feature, naming the server and a
 /// working alternative — the one place that shape is built, shared by the
-/// static gate, the live pre-flight gate, and the post-flight reclassifier.
+/// live pre-flight gate and the post-flight reclassifier.
 pub(super) fn unsupported_error(
     manager: &LspManager,
     file: &Path,

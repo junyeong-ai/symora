@@ -120,11 +120,6 @@ pub fn get_support_level(language: Language, feature: LspFeature) -> SupportLeve
     }
 }
 
-/// Check if a feature is supported (Full or Partial)
-pub fn is_feature_supported(language: Language, feature: LspFeature) -> bool {
-    get_support_level(language, feature) != SupportLevel::None
-}
-
 /// What to run instead when a server cannot answer a feature. It is followed
 /// as written, so every command it names must be one the CLI accepts.
 pub fn get_alternative_suggestion(language: Language, feature: LspFeature) -> String {

@@ -74,8 +74,7 @@ pub(super) async fn goto_definition(
     line: u32,
     column: u32,
 ) -> Result<Indexed<Option<Definition>>, LspError> {
-    let named =
-        goto_locations(service, file, line, column, "textDocument/definition", None).await?;
+    let named = goto_locations(service, file, line, column, "textDocument/definition").await?;
     let best = select_best_definition(
         named.data.iter().map(|(wire, _)| wire.uri.as_str()),
         service.manager.root(),
@@ -114,19 +113,7 @@ pub(super) async fn goto_type_definition(
     line: u32,
     column: u32,
 ) -> Result<Indexed<Option<Location>>, LspError> {
-    let named = goto_locations(
-        service,
-        file,
-        line,
-        column,
-        "textDocument/typeDefinition",
-        // No static capability gate: typeDefinition is near-universal and
-        // degrades to definition on servers that lack it; get_support_level
-        // never yields None for it, so a gate here would be inert dead code. A
-        // genuine -32601 from the server is already mapped to honest Unsupported.
-        None,
-    )
-    .await?;
+    let named = goto_locations(service, file, line, column, "textDocument/typeDefinition").await?;
     Ok(Indexed::new(
         named.data.into_iter().next().map(|(_, location)| location),
         named.indexing,
@@ -142,12 +129,7 @@ async fn goto_locations(
     line: u32,
     column: u32,
     method: &str,
-    feature: Option<LspFeature>,
 ) -> Result<Indexed<Vec<(LspLocation, Location)>>, LspError> {
-    if let Some(feat) = feature {
-        check_feature_support(&service.manager, file, feat)?;
-    }
-
     let max_file_size = service.max_file_size_bytes();
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
