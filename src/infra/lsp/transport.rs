@@ -1,5 +1,4 @@
 use std::io;
-use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -88,97 +87,80 @@ impl Transport {
 pub async fn write_request(
     stdin: OwnedMutexGuard<Option<ChildStdin>>,
     request: &Request,
-    timeout: Duration,
 ) -> io::Result<()> {
     let json = serde_json::to_string(request)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    write_message(stdin, json, timeout).await
+    write_message(stdin, json).await
 }
 
 /// Write an LSP notification to stdin
 pub async fn write_notification(
     stdin: OwnedMutexGuard<Option<ChildStdin>>,
     notification: &Notification,
-    timeout: Duration,
 ) -> io::Result<()> {
     let json = serde_json::to_string(notification)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    write_message(stdin, json, timeout).await
+    write_message(stdin, json).await
 }
 
 pub async fn write_notifications(
     stdin: OwnedMutexGuard<Option<ChildStdin>>,
     notifications: &[Notification],
-    timeout: Duration,
 ) -> io::Result<()> {
     let mut frames = String::new();
     for notification in notifications {
         let json = serde_json::to_string(notification).map_err(io::Error::other)?;
         frames.push_str(&format!("Content-Length: {}\r\n\r\n{}", json.len(), json));
     }
-    write_frames(stdin, frames, timeout).await
+    write_frames(stdin, frames).await
 }
 
 /// Write an LSP response to stdin (for server-initiated requests)
 pub async fn write_response(
     stdin: OwnedMutexGuard<Option<ChildStdin>>,
     response: &super::protocol::Response,
-    timeout: Duration,
 ) -> io::Result<()> {
     let json = serde_json::to_string(response)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    write_message(stdin, json, timeout).await
+    write_message(stdin, json).await
 }
 
 /// Write a raw JSON message with LSP framing
-async fn write_message<W>(
-    stdin: OwnedMutexGuard<Option<W>>,
-    json: String,
-    timeout: Duration,
-) -> io::Result<()>
+async fn write_message<W>(stdin: OwnedMutexGuard<Option<W>>, json: String) -> io::Result<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let message = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
-    write_frames(stdin, message, timeout).await
+    write_frames(stdin, message).await
 }
 
-async fn write_frames<W>(
-    mut stdin: OwnedMutexGuard<Option<W>>,
-    message: String,
-    timeout: Duration,
-) -> io::Result<()>
+/// Write whole frames, holding the stream until the server has taken them.
+///
+/// The write is a task of its own, so a caller that stops waiting — its
+/// budget spent, its future dropped — leaves the frames to finish rather
+/// than half sent. Nothing bounds how long the server takes to read them: a
+/// server busy with one long request reads nothing meanwhile, and a server
+/// slow to read has not exited. Only a failed write ends the stream, since a
+/// frame cut short there leaves nothing a later frame could follow.
+async fn write_frames<W>(mut stdin: OwnedMutexGuard<Option<W>>, message: String) -> io::Result<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     tracing::trace!(bytes = message.len(), "Writing LSP frames");
-    let deadline = crate::infra::deadline::expires_at(timeout);
-    // Keep transmission ownership after caller cancellation; close incomplete streams.
     tokio::spawn(async move {
-        let write = async {
-            let stream = stdin.as_mut().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotConnected,
-                    "Language server stdin is closed",
-                )
-            })?;
-            stream.write_all(message.as_bytes()).await?;
-            stream.flush().await
-        };
-        let result = match deadline {
-            Some(end) => tokio::time::timeout_at(end, write)
-                .await
-                .unwrap_or_else(|_| {
-                    Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "LSP frame write timed out",
-                    ))
-                }),
-            None => write.await,
-        };
+        let stream = stdin.as_mut().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "Language server stdin is closed",
+            )
+        })?;
+        let mut result = stream.write_all(message.as_bytes()).await;
+        if result.is_ok() {
+            result = stream.flush().await;
+        }
         if result.is_err() {
             stdin.take();
         }
@@ -192,6 +174,7 @@ where
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::Mutex;
 
     #[tokio::test]
@@ -202,21 +185,14 @@ mod tests {
         let first = format!("Content-Length: {}\r\n\r\n{body}", body.len());
         let send = {
             let writer = Arc::clone(&writer);
-            tokio::spawn(async move {
-                write_message(writer.lock_owned().await, body, Duration::from_secs(30)).await
-            })
+            tokio::spawn(async move { write_message(writer.lock_owned().await, body).await })
         };
         let mut received = vec![0; first.len()];
         reader.read_exact(&mut received[..1]).await.unwrap();
         send.abort();
         assert!(send.await.unwrap_err().is_cancelled());
         let next = tokio::spawn(async move {
-            write_message(
-                writer.lock_owned().await,
-                "{}".to_string(),
-                Duration::from_secs(30),
-            )
-            .await
+            write_message(writer.lock_owned().await, "{}".to_string()).await
         });
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -235,22 +211,42 @@ mod tests {
         next.await.unwrap().unwrap();
     }
 
+    /// A server that takes its input late — busy with one long request — is
+    /// still sent the whole frame, and the stream stays open for the next.
     #[tokio::test]
-    async fn a_stalled_frame_closes_the_writer_instead_of_reusing_a_partial_stream() {
+    async fn a_frame_read_late_is_finished_after_its_caller_stops_waiting() {
         let (stream, mut reader) = tokio::io::duplex(1);
         let writer = Arc::new(Mutex::new(Some(stream)));
-        let error = write_message(
-            Arc::clone(&writer).lock_owned().await,
-            "{}".to_string(),
-            Duration::ZERO,
+        let frame = b"Content-Length: 2\r\n\r\n{}";
+        let waited = tokio::time::timeout(
+            Duration::from_millis(50),
+            write_message(Arc::clone(&writer).lock_owned().await, "{}".to_string()),
         )
-        .await
-        .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        .await;
+        assert!(waited.is_err(), "a one-byte pipe holds no whole frame");
+
+        let mut received = vec![0; frame.len()];
+        tokio::time::timeout(Duration::from_secs(5), reader.read_exact(&mut received))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, frame);
+        let stream = tokio::time::timeout(Duration::from_secs(5), writer.lock())
+            .await
+            .unwrap();
+        assert!(stream.is_some(), "the stream outlives a slow read");
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_closes_the_stream() {
+        let (stream, reader) = tokio::io::duplex(1);
+        drop(reader);
+        let writer = Arc::new(Mutex::new(Some(stream)));
+        let error = write_message(Arc::clone(&writer).lock_owned().await, "{}".to_string())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         assert!(writer.lock().await.is_none());
-        let mut partial = Vec::new();
-        reader.read_to_end(&mut partial).await.unwrap();
-        assert!(partial.len() < b"Content-Length: 2\r\n\r\n{}".len());
     }
 
     #[test]

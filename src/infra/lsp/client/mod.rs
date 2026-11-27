@@ -17,7 +17,7 @@ use super::protocol::{
     ResponseError, UnregistrationParams, error_codes,
 };
 use super::transport::{Transport, write_notification, write_request, write_response};
-use super::watch::{FileChange, WATCHED_FILES_METHOD, WatchRegistry};
+use super::watch::{Backlog, FileChange, WATCHED_FILES_METHOD, WatchRegistry};
 use crate::error::LspError;
 use crate::models::lsp::path_to_uri;
 use crate::models::symbol::Language;
@@ -275,12 +275,48 @@ fn send_cancellation(
                 Notification::new("$/cancelRequest", Some(serde_json::json!({ "id": id })));
             let writer = stdin.lock_owned().await;
             if writer.is_some() {
-                write_notification(writer, &notification, timeout).await?;
+                write_notification(writer, &notification).await?;
             }
             Ok(())
         })
         .await;
     })
+}
+
+/// Write a server's watched-file backlog until it is empty. Holds the input
+/// and the backlog, never the client, so a server is not kept running by
+/// changes it was about to be told.
+async fn flush_watched_files(
+    backlog: Arc<std::sync::Mutex<Backlog>>,
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    language: Language,
+) {
+    loop {
+        let Some(changes) = backlog
+            .lock()
+            .expect("watched-file backlog poisoned")
+            .next_write()
+        else {
+            return;
+        };
+        let params = serde_json::to_value(DidChangeWatchedFilesParams { changes })
+            .expect("watched-file events serialize");
+        let notification = Notification::new(WATCHED_FILES_METHOD, Some(params));
+        let writer = Arc::clone(&stdin).lock_owned().await;
+        let written = if writer.is_some() {
+            write_notification(writer, &notification).await
+        } else {
+            Err(std::io::ErrorKind::NotConnected.into())
+        };
+        if let Err(e) = written {
+            tracing::debug!("{language} missed watched-file changes: {e}");
+            backlog
+                .lock()
+                .expect("watched-file backlog poisoned")
+                .abandon();
+            return;
+        }
+    }
 }
 
 struct DocumentSyncGuard<'a> {
@@ -334,6 +370,7 @@ pub struct LspClient {
     /// manager decides, by [`FileWatch`](super::watch::FileWatch).
     file_watching: bool,
     watched_files: std::sync::Mutex<WatchRegistry>,
+    watched_backlog: Arc<std::sync::Mutex<Backlog>>,
     /// Kept only for a language whose server is offered pull diagnostics.
     pull_providers: std::sync::Mutex<PullProviders>,
     /// The settings snapshot used for this session's configuration replies.
@@ -387,6 +424,7 @@ impl LspClient {
             initialized: AtomicBool::new(false),
             file_watching,
             watched_files: std::sync::Mutex::new(WatchRegistry::default()),
+            watched_backlog: Arc::default(),
             pull_providers: std::sync::Mutex::new(PullProviders::default()),
             settings: RwLock::new(None),
         })
@@ -467,9 +505,20 @@ impl LspClient {
         self.initialized.load(Ordering::Acquire)
     }
 
+    /// Whether the server's input is open. A write holds it until the server
+    /// has read the frame, however long that takes, and closes it only on
+    /// failing, so a held input is an open one: asking never waits on a
+    /// server busy with something else.
+    fn input_open(&self) -> bool {
+        match self.stdin.try_lock() {
+            Ok(stdin) => stdin.is_some(),
+            Err(_) => true,
+        }
+    }
+
     /// Check if server is running
     pub async fn is_running(&self) -> bool {
-        if self.terminated.load(Ordering::Acquire) || self.stdin.lock().await.is_none() {
+        if self.terminated.load(Ordering::Acquire) || !self.input_open() {
             return false;
         }
         let mut process = self.process.lock().await;
@@ -580,13 +629,9 @@ impl LspClient {
         }
         admit();
         self.initialized.store(true, Ordering::Release);
-        super::transport::write_notifications(
-            stdin_guard,
-            &notifications,
-            self.config.request_timeout(),
-        )
-        .await
-        .map_err(|e| self.handshake_failure(e.into()))?;
+        super::transport::write_notifications(stdin_guard, &notifications)
+            .await
+            .map_err(|e| self.handshake_failure(e.into()))?;
 
         Ok(())
     }
@@ -707,7 +752,7 @@ impl LspClient {
             if stdin_guard.is_none() {
                 return Err(LspError::NotConnected);
             }
-            write_request(stdin_guard, &request, self.config.request_timeout()).await?;
+            write_request(stdin_guard, &request).await?;
         }
 
         match rx.await {
@@ -750,7 +795,7 @@ impl LspClient {
             if stdin_guard.is_none() {
                 return Err(LspError::NotConnected);
             }
-            write_notification(stdin_guard, &notification, self.config.request_timeout()).await?;
+            write_notification(stdin_guard, &notification).await?;
 
             Ok(())
         })
@@ -1392,15 +1437,19 @@ impl LspClient {
             },
         };
 
-        // A dropped response wedges the server's pending-request map;
-        // wait for the writer instead of silently giving up on contention.
-        let stdin_guard = Arc::clone(&self.stdin).lock_owned().await;
-        if stdin_guard.is_some()
-            && let Err(e) =
-                write_response(stdin_guard, &response, self.config.request_timeout()).await
-        {
-            tracing::warn!("Failed to answer {} from server: {e}", request.method);
-        }
+        // A dropped response wedges the server's pending-request map, so the
+        // answer waits for the input however long the server takes to read
+        // it — off the reader, which would otherwise stop draining a server
+        // that cannot read until its own output is drained.
+        let stdin = Arc::clone(&self.stdin);
+        tokio::spawn(async move {
+            let stdin_guard = stdin.lock_owned().await;
+            if stdin_guard.is_some()
+                && let Err(e) = write_response(stdin_guard, &response).await
+            {
+                tracing::warn!("Failed to answer {} from server: {e}", request.method);
+            }
+        });
     }
 
     /// Sections use the same settings snapshot throughout a server session.
@@ -1525,7 +1574,9 @@ impl LspClient {
     }
 
     /// Tell the server about the changes on disk its watchers asked for.
-    pub async fn did_change_watched_files(&self, changes: &[FileChange]) {
+    /// They join its [`Backlog`], so the caller never waits on the server and
+    /// no budget of anyone's cuts them off while it lives.
+    pub fn did_change_watched_files(&self, changes: &[FileChange]) {
         let events = self
             .watched_files
             .lock()
@@ -1534,10 +1585,17 @@ impl LspClient {
         if events.is_empty() {
             return;
         }
-        let params = serde_json::to_value(DidChangeWatchedFilesParams { changes: events })
-            .expect("watched-file events serialize");
-        if let Err(e) = self.notify(WATCHED_FILES_METHOD, Some(params)).await {
-            tracing::debug!("{} missed watched-file changes: {e}", self.language);
+        let start_flush = self
+            .watched_backlog
+            .lock()
+            .expect("watched-file backlog poisoned")
+            .queue(events);
+        if start_flush {
+            tokio::spawn(flush_watched_files(
+                Arc::clone(&self.watched_backlog),
+                Arc::clone(&self.stdin),
+                self.language,
+            ));
         }
     }
 

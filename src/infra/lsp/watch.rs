@@ -225,6 +225,72 @@ impl WatchRegistry {
     }
 }
 
+/// A backlog this long is compacted before it grows further.
+const COMPACT_FROM: usize = 4096;
+
+/// The changes chosen for one server and not yet written to it.
+///
+/// A server busy with one long request reads nothing until it is done, and
+/// the changes reported meanwhile are what it must hear before it answers
+/// again, so they wait here for as long as it lives — in the order they
+/// happened, written by one flush at a time.
+#[derive(Default)]
+pub struct Backlog {
+    events: Vec<FileEvent>,
+    flushing: bool,
+    compact_at: usize,
+}
+
+impl Backlog {
+    /// Queue `events`, and say whether the caller is to start the flush.
+    pub fn queue(&mut self, events: Vec<FileEvent>) -> bool {
+        self.events.extend(events);
+        if self.events.len() >= self.compact_at.max(COMPACT_FROM) {
+            compact(&mut self.events);
+            self.compact_at = 2 * self.events.len();
+        }
+        !std::mem::replace(&mut self.flushing, true)
+    }
+
+    /// The events the flush writes next, or `None` once there are none and
+    /// the flush ends.
+    pub fn next_write(&mut self) -> Option<Vec<FileEvent>> {
+        if self.events.is_empty() {
+            self.flushing = false;
+            return None;
+        }
+        self.compact_at = 0;
+        Some(std::mem::take(&mut self.events))
+    }
+
+    /// The server's input is gone, so nothing queued can reach it.
+    pub fn abandon(&mut self) {
+        self.events.clear();
+        self.flushing = false;
+    }
+}
+
+/// Keep the last of each kind of change to each path, in the order they
+/// happened. A server reads a changed path as it is on disk when it gets to
+/// it, so an earlier report of the same change to the same path tells it
+/// nothing the last does not; and the last reports keep their order, so a
+/// path deleted and recreated, or a directory removed and refilled, ends as
+/// the tree did. A backlog of churn — the same files rewritten over and
+/// over while the server reads nothing — stays as long as the paths it
+/// touched rather than the writes it saw.
+fn compact(events: &mut Vec<FileEvent>) {
+    let mut last = vec![false; events.len()];
+    let mut seen = HashSet::new();
+    for (index, event) in events.iter().enumerate().rev() {
+        last[index] = seen.insert((event.uri.as_str(), event.change));
+    }
+    let mut index = 0;
+    events.retain(|_| {
+        index += 1;
+        last[index - 1]
+    });
+}
+
 /// One batch of watcher output, reduced to what a server must be told.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Batch {
@@ -786,6 +852,62 @@ mod tests {
                 ]
             ),
             ["file:///w/main.go:Changed"]
+        );
+    }
+
+    fn file_event(uri: &str, change: FileChangeType) -> FileEvent {
+        FileEvent {
+            uri: uri.to_string(),
+            change,
+        }
+    }
+
+    #[test]
+    fn a_backlog_starts_one_flush_until_it_runs_dry() {
+        use FileChangeType::*;
+        let mut backlog = Backlog::default();
+        assert!(backlog.queue(vec![file_event("file:///w/a.go", Created)]));
+        assert!(!backlog.queue(vec![file_event("file:///w/b.go", Created)]));
+        assert_eq!(backlog.next_write().map(|events| events.len()), Some(2));
+        assert!(!backlog.queue(vec![file_event("file:///w/c.go", Created)]));
+        assert_eq!(backlog.next_write().map(|events| events.len()), Some(1));
+        assert_eq!(backlog.next_write(), None);
+        assert!(backlog.queue(vec![file_event("file:///w/d.go", Created)]));
+        backlog.abandon();
+        assert!(backlog.queue(vec![file_event("file:///w/e.go", Created)]));
+    }
+
+    /// A backlog of churn keeps the last of each change to each path, in
+    /// the order those happened, so the server ends where the tree did.
+    #[test]
+    fn a_long_backlog_keeps_the_last_of_each_change_in_order() {
+        use FileChangeType::*;
+        let mut backlog = Backlog::default();
+        let mut churn: Vec<FileEvent> = (0..COMPACT_FROM)
+            .flat_map(|_| {
+                [
+                    file_event("file:///w/a.pyc", Created),
+                    file_event("file:///w/a.pyc", Changed),
+                    file_event("file:///w/a.pyc", Deleted),
+                ]
+            })
+            .collect();
+        churn.extend([
+            file_event("file:///w/a.pyc", Created),
+            file_event("file:///w/pkg", Deleted),
+            file_event("file:///w/pkg/m.py", Created),
+        ]);
+        backlog.queue(churn);
+        let events = backlog.next_write().unwrap();
+        assert_eq!(
+            events,
+            [
+                file_event("file:///w/a.pyc", Changed),
+                file_event("file:///w/a.pyc", Deleted),
+                file_event("file:///w/a.pyc", Created),
+                file_event("file:///w/pkg", Deleted),
+                file_event("file:///w/pkg/m.py", Created),
+            ]
         );
     }
 

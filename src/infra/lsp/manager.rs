@@ -403,7 +403,7 @@ impl LspManager {
             Batch::Changes(changes) => {
                 super::client::note_workspace_content_changed();
                 for (_, client) in self.pooled_clients() {
-                    client.did_change_watched_files(&changes).await;
+                    client.did_change_watched_files(&changes);
                 }
             }
             Batch::Rescan => {
@@ -752,8 +752,10 @@ pub(crate) mod tests {
     /// Each keeps its stdout open for as long as it runs (`3>&1`), since the
     /// client takes a closed stdout for a server that exited. `deaf` stops
     /// reading before it answers `initialize`, so the client's `initialized`
-    /// meets a closed pipe. Any of them holds its answer while the test
-    /// holds the start ([`FakeServer::hold`]).
+    /// meets a closed pipe. `stall` is `watch` reading nothing after it
+    /// registers until the test resumes it ([`FakeServer::resume`]), as a
+    /// server busy with one long request reads nothing. Any of them holds
+    /// its answer while the test holds the start ([`FakeServer::hold`]).
     #[cfg(unix)]
     pub(crate) mod server_lifetime {
         use super::*;
@@ -786,7 +788,7 @@ if [ "$2" = env ]; then
 fi
 case "$2" in
   reject) body='{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"no workspace"}}' ;;
-  serve|watch|exits|deaf|env) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
+  serve|watch|stall|exits|deaf|env) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
   hang) exec sleep 600 ;;
 esac
 IFS= read -r _
@@ -794,9 +796,10 @@ IFS= read -r _
 while [ -e "${1%/*}/hold" ]; do sleep 0.05; done
 [ "$2" = deaf ] && exec 0<&-
 printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
-if [ "$2" = watch ]; then
+if [ "$2" = watch ] || [ "$2" = stall ]; then
   body='{"jsonrpc":"2.0","id":"w1","method":"client/registerCapability","params":{"registrations":[{"id":"go-files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.go"}]}}]}}'
   printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+  [ "$2" = stall ] && while [ ! -e "${1%/*}/resume" ]; do sleep 0.05; done
   exec cat 3>&1 >"$4"
 fi
 [ "$2" = exits ] && exec cat 3>&1 >/dev/null
@@ -901,6 +904,11 @@ exec sleep 600
 
             fn release(&self) {
                 std::fs::remove_file(self.dir.path().join("hold")).unwrap();
+            }
+
+            /// Let a `stall` server read its input again.
+            fn resume(&self) {
+                std::fs::write(self.dir.path().join("resume"), "").unwrap();
             }
 
             /// Everything the client wrote to a `watch` server after it
@@ -1402,6 +1410,42 @@ exec sleep 600
             );
 
             drop((client, manager));
+            fake.assert_all_gone().await;
+        }
+
+        /// A server that reads nothing for longer than the request budget —
+        /// busy with one long request, as pyright is with a find-references
+        /// over a cold workspace — while files change under the watch is
+        /// still the pooled server once it reads again, and hears every
+        /// change. Taking its full input for an exit replaced it with a cold
+        /// one on every command that met the churn. The budget is the full
+        /// start budget, so the server starts within it; the stall outlasts
+        /// it, which a write was once cut off at.
+        #[tokio::test]
+        async fn a_server_that_reads_late_is_kept_and_hears_every_change() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("stall", 0);
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+
+            // Several times what a pipe holds (64 KiB on Linux and macOS),
+            // so a write waits on the server.
+            let name = "n".repeat(200);
+            for index in 0..400 {
+                std::fs::write(fake.dir.path().join(format!("{name}{index}.go")), "").unwrap();
+            }
+            std::fs::write(fake.dir.path().join("last.go"), "").unwrap();
+            tokio::time::sleep(
+                Duration::from_secs(START_BUDGET_SECS) + Duration::from_millis(1500),
+            )
+            .await;
+            fake.resume();
+
+            let again = bounded(manager.get_client(Language::Go)).await.unwrap();
+            assert!(Arc::ptr_eq(&client, &again), "the server was replaced");
+            bounded(fake.until_received("last.go")).await;
+            assert_eq!(fake.pids().len(), 1);
+
+            drop((client, again, manager));
             fake.assert_all_gone().await;
         }
 
