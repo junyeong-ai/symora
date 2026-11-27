@@ -315,6 +315,17 @@ pub struct WorkspaceWatcher {
 
 pub type RawEvent = notify::Result<notify::Event>;
 
+/// The event kinds [`reduce`] reads. Opening, closing and attribute changes
+/// say nothing a server is told, and inotify, which filters by kind in the
+/// kernel, would otherwise queue one for every read below the root — a test
+/// run importing each module, a server or this watch walking the tree — in
+/// the queue whose overflow costs a rescan. A rescan notice is of no kind
+/// and always arrives.
+const REDUCED_KINDS: notify::EventKindMask = notify::EventKindMask::CREATE
+    .union(notify::EventKindMask::REMOVE)
+    .union(notify::EventKindMask::MODIFY_DATA)
+    .union(notify::EventKindMask::MODIFY_NAME);
+
 impl WorkspaceWatcher {
     /// Watch `root`, returning the watcher, the stream of raw events, and the
     /// path the events are reported under (the root with symlinks resolved).
@@ -329,7 +340,9 @@ impl WorkspaceWatcher {
             },
             // A link out of the project would widen the watch to whatever it
             // points at; the tree the servers were given is the project's.
-            notify::Config::default().with_follow_symlinks(false),
+            notify::Config::default()
+                .with_follow_symlinks(false)
+                .with_event_kinds(REDUCED_KINDS),
         )?;
         let mut this = Self {
             watcher,
@@ -1518,6 +1531,40 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         false
+    }
+
+    /// Reading the tree queues nothing: inotify's queue holds only events
+    /// that report a change, so readers cannot overflow it into a rescan.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reading_the_tree_queues_no_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("pkg")).unwrap();
+        std::fs::write(root.join("pkg/a.py"), "x = 1\n").unwrap();
+        let (_watcher, mut events, _) = WorkspaceWatcher::start(&root).unwrap();
+        std::fs::read_to_string(root.join("pkg/a.py")).unwrap();
+        assert_eq!(std::fs::read_dir(root.join("pkg")).unwrap().count(), 1);
+        // Written last, so every event the reads queued arrives before it.
+        std::fs::write(root.join("written.py"), "").unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut before = Vec::new();
+        'arrived: while std::time::Instant::now() < deadline {
+            while let Ok(event) = events.try_recv() {
+                let event = event.unwrap();
+                if event.paths.iter().any(|p| p == &root.join("written.py")) {
+                    break 'arrived;
+                }
+                before.push(event.kind);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the write never arrived"
+        );
+        assert!(before.is_empty(), "reads queued {before:?}");
     }
 
     #[cfg(target_os = "linux")]
