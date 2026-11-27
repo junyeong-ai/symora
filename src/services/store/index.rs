@@ -59,7 +59,9 @@ const META_TREE_FINGERPRINT: &str = "tree_fingerprint";
 /// them. A build skips a file whose bytes have not changed, so without this an
 /// index would keep serving rows an older set of queries produced — short by
 /// the declaration forms the newer set was written to reach, and saying
-/// nothing about it.
+/// nothing about it. Recorded as soon as a build empties the store, since
+/// every row from then on is this binary's, so a build interrupted before it
+/// published leaves rows the next one can keep rather than extract again.
 const META_EXTRACTOR: &str = "extractor";
 
 /// How long opening a store waits for a build to release the index before
@@ -956,6 +958,12 @@ impl Store {
                     )?;
                     tx.execute("DELETE FROM symbols", [])?;
                     tx.execute("DELETE FROM files", [])?;
+                    // Every row written from here on is this binary's. Said
+                    // now rather than at publication, so a build that stops
+                    // partway — a first build cut off by the caller's own
+                    // timeout — leaves rows the next build skips as current
+                    // instead of a store it has to empty and start again.
+                    write_meta(&tx, META_EXTRACTOR, &extraction_digest())?;
                 }
                 if !defer_text_index {
                     tx.execute_batch(TEXT_INDEX_TRIGGERS)?;
@@ -2548,6 +2556,61 @@ mod tests {
         store.index(IndexOptions::default()).await.unwrap();
         assert!(store.build_scope().await.unwrap().is_some());
         assert_eq!(store.stats().await.unwrap().symbol_count, 1);
+    }
+
+    /// A first build cut off partway — by a caller that stopped waiting for
+    /// the search that started it — still reads as never built, and the next
+    /// build keeps what it finished instead of emptying the store again. A
+    /// tree whose build outlasts every caller's patience would otherwise
+    /// never be indexed, each attempt throwing the last one's work away.
+    #[tokio::test]
+    async fn a_first_build_cut_off_partway_resumes_where_it_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let finished = root.join("finished.rs");
+        tokio::fs::write(&finished, "pub fn alpha() {}\n")
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("pending.rs"), "pub fn beta() {}\n")
+            .await
+            .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        // The window a first build opens, and the one file it got through.
+        assert!(!store.extraction_matches().await.unwrap());
+        store.begin_build(Reindex::FromScratch, true).await.unwrap();
+        store.index_file(&finished).await.unwrap();
+        // Mark that file's row, so extracting it again would show.
+        store
+            .db
+            .call(|conn| {
+                conn.execute("UPDATE symbols SET name = 'kept_from_the_cut'", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open(root, StoreConfig::default()).await.unwrap();
+        assert!(
+            matches!(
+                reopened.search_symbols("beta", 10, None, None, &[]).await,
+                Err(StoreError::NotInitialized)
+            ),
+            "what a cut-off build wrote answers for nothing until a build publishes"
+        );
+        reopened.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(
+            total_matches(&reopened, "kept_from_the_cut").await,
+            1,
+            "the file the cut-off build finished is kept, not extracted again"
+        );
+        assert_eq!(total_matches(&reopened, "beta").await, 1);
+        reopened
+            .text_index_integrity()
+            .await
+            .expect("the resumed build's text index describes every row");
+        assert_eq!(reopened.matching_lines("alpha").await, 1);
     }
 
     impl Store {
