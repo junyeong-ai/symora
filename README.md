@@ -118,10 +118,6 @@ symora map summary
 ```json
 {
   "root": "/home/dev/shopflow",
-  "next_commands": [
-    "symora map file -- 'src/main.ts'",
-    "symora symbols --depth 1 -- 'src/main.ts'"
-  ],
   "total_files": 84,
   "code_files": 67,
   "support_files": 17,

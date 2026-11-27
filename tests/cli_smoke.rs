@@ -7451,6 +7451,13 @@ fn generated_followups_preserve_shell_arguments_and_option_boundaries() {
     std::fs::create_dir(root.join(directory)).unwrap();
     let file = format!("{directory}/main.py");
     std::fs::write(root.join(&file), "def main():\n    return 1\n").unwrap();
+    // A second match in another file is what makes search suggest a file's
+    // follow-ups at all.
+    std::fs::write(
+        root.join(format!("{directory}/second.py")),
+        "def main():\n    return 2\n",
+    )
+    .unwrap();
     let query = "-O'Reilly $(printf expanded)";
     std::fs::write(root.join("style.css"), format!("/* {query} */\n")).unwrap();
 
@@ -7474,15 +7481,28 @@ fn generated_followups_preserve_shell_arguments_and_option_boundaries() {
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
     };
 
-    let summary = json_ok(root, &["--deterministic", "map", "summary"]);
-    let map_file = summary["next_commands"]
+    json_ok(root, &["--deterministic", "search", "index", "build"]);
+    let found = json_ok(
+        root,
+        &[
+            "--deterministic",
+            "search",
+            "symbols",
+            "--lang",
+            "python",
+            "main",
+        ],
+    );
+    let first = found["items"][0]["file"].clone();
+    assert!(first.as_str().unwrap().starts_with(directory), "{found}");
+    let map_file = found["next_commands"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(serde_json::Value::as_str)
         .find(|command| command.starts_with("symora map file "))
         .expect("file follow-up");
-    assert_eq!(execute_followup(map_file)["file"], file);
+    assert_eq!(execute_followup(map_file)["file"], first);
 
     let search = json_ok(
         root,

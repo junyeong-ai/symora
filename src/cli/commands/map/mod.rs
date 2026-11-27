@@ -73,8 +73,6 @@ struct MapSummaryOutput {
     /// than only noted.
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     unread_paths: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    next_commands: Vec<String>,
     total_files: usize,
     code_files: usize,
     support_files: usize,
@@ -228,7 +226,6 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
         limit,
         Cap::Option("--limit"),
     );
-    let next_commands = map_summary_next_commands(&entrypoints.items);
 
     let response = MapSummaryOutput {
         root: ctx.root().display().to_string(),
@@ -242,7 +239,6 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
         languages,
         top_directories,
         entrypoints,
-        next_commands,
     };
 
     ctx.print_success(response);
@@ -579,17 +575,6 @@ fn is_overview_declaration(symbol: &Symbol) -> bool {
             | crate::models::symbol::SymbolKind::Object
             | crate::models::symbol::SymbolKind::Impl
     ) || has_callable_children
-}
-
-fn map_summary_next_commands(entrypoints: &[EntryPointOutput]) -> Vec<String> {
-    let Some(entrypoint) = entrypoints.first() else {
-        return Vec::new();
-    };
-    let file = shell_arg(&entrypoint.file);
-    vec![
-        format!("symora map file -- {file}"),
-        format!("symora symbols --depth 1 -- {file}"),
-    ]
 }
 
 #[cfg(test)]
