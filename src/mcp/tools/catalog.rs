@@ -46,7 +46,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Symbol discovery by name or path-like pattern (e.g. 'Handler/process', \
                           '*/method') across the workspace, for when you don't know the file. \
                           body or signature reads each match's source, so a known declaration \
-                          needs no second call.",
+                          needs no second call. A language coverage_gaps lists was not covered, \
+                          so a match's absence there proves nothing: search it with \
+                          search_content or search_ast, or fix what its reason names.",
             {
                 let mut schema = schema_object(
                     &[
@@ -59,7 +61,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         (
                             "kind",
                             "string",
-                            "Optional kind filter (function, class, struct, ...)",
+                            "Optional kind filter (function, class, struct, ...); the index and \
+                             a server can name one declaration's kind differently, so a zero \
+                             under it is unverified",
                         ),
                         (
                             "body",
@@ -100,7 +104,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "What Symora can answer for in this workspace, per language: whether the \
                           language server serves it, and whether the index extractor and \
                           tree-sitter grammar cover it with no server installed. Branch on this \
-                          instead of discovering a language's limits by a failed call.",
+                          instead of discovering a language's limits by a failed call. serves \
+                          confirms the server's handshake, not its import resolution or \
+                          complete references.",
             schema_object(
                 &[(
                     "language",
@@ -159,7 +165,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "get_index_status",
             "Whether the symbol/content index is built and what it covers. An unbuilt or \
                           narrowed index changes what search_symbols and search_content can \
-                          answer, so read this before treating a zero as absence.",
+                          answer, so read this before treating a zero as absence. languages \
+                          lists what the last completed build extracts symbols for, empty when \
+                          none has completed (last_indexed 0), and a symbol search is complete \
+                          only for those.",
             schema_object(&[], &[]),
         )
         .with_output_schema(output_schema(&[
@@ -417,7 +426,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           chain when reachable, or an honest 3-state verdict (found / \
                           not_reached_within_bound / no_static_path) that never overclaims — \
                           dynamic dispatch stays a disclosed lower bound, never an absolute \
-                          'unreachable'.",
+                          'unreachable'. target_status reads for `to` as anchor_status does for \
+                          the anchor; not_a_symbol or unavailable there forces \
+                          not_reached_within_bound, which is then not authoritative.",
             with_required(
                 with_extra(
                     location_schema(),
@@ -533,7 +544,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::read_only(
             "get_context",
-            "Aggregated symbol context: callers, callees, related types, and tests. Set with_bodies=true for complete source bodies sharing body_tokens in target/callee/type order. Bodies that do not fit are omitted with body_omitted; source-size fitting can also omit bodies. bodies_included counts emitted section bodies. Missing bodies can be unresolvable or absent in source.",
+            "Aggregated symbol context: callers, callees, related types, and tests. Set with_bodies=true for complete source bodies sharing body_tokens in target/callee/type order. Bodies that do not fit are omitted with body_omitted; source-size fitting can also omit bodies. bodies_included counts emitted section bodies. Missing bodies can be unresolvable or absent in source. refs.is_exported appears only where the compiler decides visibility, so its absence is not false.",
             with_extra(
                 location_schema(),
                 &[
@@ -608,7 +619,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           explicit traversal limits (`blast_radius`). `is_exported` appears only for \
                           languages whose compiler decides visibility, and is absent \
                           elsewhere rather than read off a naming convention. Use depth=1 \
-                          for quick surveys, a greater depth when tracing wider caller reach.",
+                          for quick surveys, a greater depth when tracing wider caller reach. \
+                          blast_radius is absent when no call hierarchy could be started, which \
+                          is not zero callers; its dynamic_dispatch, present for a trait or \
+                          interface or one of its methods, means callers through \
+                          implementations are left out of its counts.",
             with_extra(
                 location_schema(),
                 &[
@@ -654,7 +669,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ])),
         ToolDefinition::read_only(
             "get_diff_impact",
-            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals: refs_status marks a lower bound (indexing_degraded) or why no count was taken (timed_out when the lsp.timeout_secs budget ran out, unsupported, unavailable), and refs_status_counts and callers_status_counts count the rows of each status, so a total is a lower bound by those rows alone; test references are not execution coverage. Documentation and configuration files (Markdown, YAML, TOML, JSON) are listed in unmeasured_files rather than read by key. changes is a list with count, showing and truncated, and with callers, a changed function's, method's or constructor's callers is one too, read off the references its count was taken from (callers_status references_derived, not verified calls): every callable whose code holds one, a use as a value counted like a call, an import outside a callable not at all; another kind's row reads not_callable, and call_hierarchy asks the server instead. callers is absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind.",
+            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes; untracked files are in neither, and a working-tree run names them in hints. Reports changed symbols, static references, and unmeasured files; total_references is absent when no row was measured. Check incomplete, unmeasured_files, and each row's refs_status and callers_status before interpreting totals: refs_status marks a lower bound (indexing_degraded) or why no count was taken (timed_out when the lsp.timeout_secs budget ran out, unsupported, unavailable), and refs_status_counts and callers_status_counts count the rows of each status, so a total is a lower bound by those rows alone; test references are not execution coverage. Documentation and configuration files (Markdown, YAML, TOML, JSON) are listed in unmeasured_files rather than read by key. changes is a list with count, showing and truncated, and with callers, a changed function's, method's or constructor's callers is one too, read off the references its count was taken from (callers_status references_derived, not verified calls): every callable whose code holds one, a use as a value counted like a call, an import outside a callable not at all; another kind's row reads not_callable, and call_hierarchy asks the server instead. callers is absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind, and its position is the first line it removed.",
             schema_object(&[
                 ("revision", "string", "One base revision, not a revision range; default HEAD"),
                 ("staged", "boolean", "Compare staged changes instead of the working tree"),
@@ -771,7 +786,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     (
                         "with_suggestions",
                         "boolean",
-                        "Attach LSP quickfix code actions per diagnostic (default false)",
+                        "Attach LSP quickfix code actions per diagnostic; suggestions_status \
+                         unavailable means the lookup failed, so none listed is unknown \
+                         (default false)",
                     ),
                 ],
                 &["file"],
@@ -976,8 +993,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "delete_symbol",
             "Delete the symbol's full definition. Target by file + symbol \
                           path (e.g. 'Class/method') or by file:line[:column] — exactly one of \
-                          symbol or line. Always reports references outside the deleted span \
-                          that would dangle; set expect_no_references=true to refuse the \
+                          symbol or line. Reports the references outside the deleted span that \
+                          would dangle as dangling_references, count 0 included, whenever the \
+                          check ran; otherwise references_status (unsupported, unavailable) \
+                          says why, and they are unknown. Set expect_no_references=true to \
+                          refuse the \
                           delete unless verified reference-free (fail-closed when \
                           unverifiable). ⚠ Mutates source files when dry_run is false.",
             with_extra(
