@@ -3024,7 +3024,7 @@ fn callers_without_call_hierarchy_name_none_for_a_type() {
     assert!(
         class["hints"][0]
             .as_str()
-            .is_some_and(|hint| hint.contains("`Shape` is a class")),
+            .is_some_and(|hint| hint.contains("`Shape` (class) is no function")),
         "{class}"
     );
 }

@@ -75,12 +75,13 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
                 // A type's or a value's references are annotations, imports
                 // and reads rather than calls, so none is read as a caller.
                 if let Some(symbol) = anchor.symbol.as_ref().filter(|s| !s.kind.is_callable()) {
-                    let mut hints = vec![format!(
-                        "`{}` is a {}, no function, method or constructor, and its server has \
-                         no call hierarchy: its references are uses rather than calls, so none \
-                         is read as a caller; `symora refs` lists them",
-                        symbol.name, symbol.kind
-                    )];
+                    let at = format!(
+                        "{}:{}:{}",
+                        ctx.relative_path(&anchor.file),
+                        anchor.line,
+                        anchor.column
+                    );
+                    let mut hints = vec![not_callable_hint(symbol, &at)];
                     hints.extend(anchor.inbound_hints(ctx.root(), "callers"));
                     ctx.print_success(CallersOutput {
                         section: Section::with_total(Vec::new(), 0).with_hints(hints),
@@ -152,6 +153,20 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
     Ok(())
 }
 
+/// Why a symbol that is no function, method or constructor names no
+/// caller, its kind in parentheses so no article has to agree with it. `at`
+/// is its position, where its uses are asked for.
+fn not_callable_hint(symbol: &Symbol, at: &str) -> String {
+    format!(
+        "`{}` ({}) is no function, method or constructor, and its server has no call \
+         hierarchy: its references are uses rather than calls, so none is read as a caller. \
+         Its uses: symora refs -- {}",
+        symbol.name,
+        symbol.kind,
+        crate::cli::utils::shell_arg(at)
+    )
+}
+
 /// Derive callers from plain references when the server lacks call
 /// hierarchy, as `diff-impact --callers` derives them
 /// ([`callers_from_references`]): every caller, one per callable however
@@ -199,6 +214,34 @@ async fn fallback_from_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kinds begin with vowels and consonants alike (`impl`, `object`,
+    /// `class`), so the hint names one without an article to agree with it.
+    #[test]
+    fn a_not_callable_hint_needs_no_article_and_names_a_command_that_runs() {
+        for kind in [
+            crate::models::symbol::SymbolKind::Impl,
+            crate::models::symbol::SymbolKind::Object,
+            crate::models::symbol::SymbolKind::Class,
+        ] {
+            let symbol = Symbol::new(
+                "Shape".to_string(),
+                kind,
+                Location::point(PathBuf::from("/p/a.py"), 1, 7),
+            );
+            let hint = not_callable_hint(&symbol, "a.py:1:7");
+            assert!(
+                hint.starts_with(&format!("`Shape` ({kind}) is no function")),
+                "{hint}"
+            );
+            assert!(
+                !hint.contains(" a impl") && !hint.contains(" a object"),
+                "{hint}"
+            );
+            assert!(hint.ends_with("symora refs -- 'a.py:1:7'"), "{hint}");
+            crate::cli::assert_named_commands_parse(&hint);
+        }
+    }
 
     #[test]
     fn exact_call_hierarchy_omits_callers_status() {
