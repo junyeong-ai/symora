@@ -1463,14 +1463,14 @@ exec sleep 600
             fake.assert_all_gone().await;
         }
 
-        /// A server that reads nothing for longer than the request budget —
-        /// busy with one long request, as pyright is with a find-references
-        /// over a cold workspace — while files change under the watch is
-        /// still the pooled server once it reads again, and hears every
-        /// change. Taking its full input for an exit replaced it with a cold
-        /// one on every command that met the churn. The budget is the full
-        /// start budget, so the server starts within it; the stall outlasts
-        /// it, which a write was once cut off at.
+        /// A frame whose caller stops waiting while the server reads
+        /// nothing — busy with one long request, as pyright is with a
+        /// find-references over a cold workspace — is still written whole,
+        /// and the server is still the pooled one once it reads again, and
+        /// hears every change made meanwhile. Closing its input when the
+        /// caller's budget ran out took it for an exited server and replaced
+        /// it with a cold one. The server starts under the full start budget;
+        /// only the frame's caller is held to a short one.
         #[tokio::test]
         async fn a_server_that_reads_late_is_kept_and_hears_every_change() {
             let fake = FakeServer::new();
@@ -1478,21 +1478,24 @@ exec sleep 600
             let client = bounded(manager.get_client(Language::Go)).await.unwrap();
 
             // Several times what a pipe holds (64 KiB on Linux and macOS),
-            // so a write waits on the server.
-            let name = "n".repeat(200);
-            for index in 0..400 {
-                std::fs::write(fake.dir.path().join(format!("{name}{index}.go")), "").unwrap();
-            }
-            std::fs::write(fake.dir.path().join("last.go"), "").unwrap();
-            tokio::time::sleep(
-                Duration::from_secs(START_BUDGET_SECS) + Duration::from_millis(1500),
-            )
-            .await;
+            // so its caller gives up with most of it unwritten.
+            let payload = format!("{}frame-end", "x".repeat(256 * 1024));
+            let sent = crate::infra::deadline::scope(
+                Duration::from_millis(500),
+                client.notify(
+                    "test/large",
+                    Some(serde_json::json!({ "payload": payload })),
+                ),
+            );
+            assert!(matches!(bounded(sent).await, Err(LspError::Timeout(_))));
+            std::fs::write(fake.dir.path().join("changed.go"), "").unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
             fake.resume();
 
             let again = bounded(manager.get_client(Language::Go)).await.unwrap();
             assert!(Arc::ptr_eq(&client, &again), "the server was replaced");
-            bounded(fake.until_received("last.go")).await;
+            bounded(fake.until_received("frame-end\"}}")).await;
+            bounded(fake.until_received("changed.go")).await;
             assert_eq!(fake.pids().len(), 1);
 
             drop((client, again, manager));
