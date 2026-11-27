@@ -5,6 +5,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::cli::call_graph::{self, Direction, WalkConfig};
+use crate::cli::response::share;
 use crate::error::LspError;
 use crate::models::symbol::SymbolKind;
 use crate::services::TestScope;
@@ -136,8 +137,7 @@ pub async fn compute(
     let direct_callers = buckets.first().map(|b| b.count).unwrap_or(0);
     let transitive_callers: usize = buckets.iter().map(|b| b.count).sum();
     let total_test: usize = buckets.iter().map(|b| b.test).sum();
-    let test_ratio =
-        (transitive_callers > 0).then(|| coarse(total_test as f64 / transitive_callers as f64));
+    let test_ratio = share(total_test, transitive_callers);
     let depth_reached = buckets.last().map(|b| b.depth).unwrap_or(0);
 
     Ok(BlastRadius {
@@ -213,10 +213,6 @@ async fn detect_dynamic_dispatch(
             implementations: None,
         }),
     }
-}
-
-fn coarse(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
 }
 
 #[cfg(test)]

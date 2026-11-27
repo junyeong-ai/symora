@@ -12,7 +12,7 @@ use crate::cli::errors::OutputError;
 use crate::cli::response::disclosure::{CoverageReason, DIFF_IN_PARTS, LowerBound, name_some};
 use crate::cli::response::{
     CallHierarchyOutput, INDEXING_DEGRADED, LocationOutput, NOT_CALLABLE, REFERENCES_DERIVED,
-    ReferenceCount, Section,
+    ReferenceCount, Section, share,
 };
 use crate::cli::utils::{members_at_deletion, members_at_line, shell_arg};
 use crate::cli::{FileSymbols, SymbolBackend, declarations_of, declared_in};
@@ -134,7 +134,7 @@ pub struct DiffCoverage {
     /// when nothing was measurable (an empty or pure-deletion diff), so a ratio
     /// is never asserted over zero measurements as a vacuous 1.0.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ratio: Option<f32>,
+    pub ratio: Option<f64>,
 }
 
 /// Changed symbol impact data (pure fact). Added/Modified rows carry the
@@ -416,11 +416,6 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         .filter(|c| c.test_refs.is_some_and(|t| t > 0))
         .count();
     let without_tests = measurable.saturating_sub(with_tests);
-    let coverage_ratio = if measurable == 0 {
-        None
-    } else {
-        Some(with_tests as f32 / measurable as f32)
-    };
 
     let output = DiffImpactOutput {
         revision: args.revision,
@@ -432,7 +427,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         coverage: DiffCoverage {
             with_tests,
             without_tests,
-            ratio: coverage_ratio,
+            ratio: share(with_tests, measurable),
         },
         changes: Section::new(changes),
         unmeasured_files: unmeasured

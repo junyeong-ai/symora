@@ -146,6 +146,16 @@ pub const REFERENCES_DERIVED: &str = "references_derived";
 /// caller.
 pub const NOT_CALLABLE: &str = "not_callable";
 
+/// `part` as a share of `whole`, to the hundredth, or `None` for a share of
+/// nothing, which is not zero. Every ratio an answer states is this one
+/// figure: counts are exact, so digits past the second carry nothing of
+/// them, and computed in `f32` the share would print that type's rounding
+/// error once the output layer widens it to JSON's `f64`
+/// (`0.18518517911434174` for 5 of 27).
+pub fn share(part: usize, whole: usize) -> Option<f64> {
+    (whole > 0).then(|| (part as f64 / whole as f64 * 100.0).round() / 100.0)
+}
+
 /// A listed declaration's reference counts, as a `symbols --refs` or
 /// `diff-impact` row carries them, or why none was taken.
 pub enum ReferenceCount {
@@ -269,6 +279,23 @@ mod tests {
     use crate::cli::analysis::Anchor;
     use crate::cli::utils::AnchorResolution;
     use crate::models::symbol::{Language, Location, SymbolKind};
+
+    /// A ratio reaches the reader as the output layer emits it: through
+    /// `serde_json::Value`, whose numbers are `f64`.
+    #[test]
+    fn a_share_is_emitted_to_the_hundredth() {
+        let emitted = |part, whole| {
+            serde_json::to_value(share(part, whole))
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(emitted(5, 27), "0.19");
+        assert_eq!(emitted(1, 3), "0.33");
+        assert_eq!(emitted(2, 3), "0.67");
+        assert_eq!(emitted(3, 3), "1.0");
+        assert_eq!(emitted(0, 4), "0.0");
+        assert_eq!(share(0, 0), None, "a share of nothing is not zero");
+    }
 
     fn analysis(
         symbol: Option<Symbol>,

@@ -20,7 +20,7 @@ mod symbol;
 
 pub use analysis::{
     AffectedFileOutput, INDEXING_DEGRADED, ImpactOutput, NOT_CALLABLE, REFERENCES_DERIVED,
-    RefOutput, ReferenceCount, RefsOutput, TargetOutput, TestCoverageOutput, TestOutput,
+    RefOutput, ReferenceCount, RefsOutput, TargetOutput, TestCoverageOutput, TestOutput, share,
 };
 pub use editing::{
     ActionOutput, ApplyActionOutput, CallerFileDiagnostics, CallerVerification, EditDiagnostics,
