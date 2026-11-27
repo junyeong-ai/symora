@@ -11,8 +11,10 @@ declaration's own name, inside a function or method, which is the caller.
 
 Every message's method, and the name of the file it asks about, is appended
 to the file named by the first argument. `no-call-hierarchy` among the
-arguments after it leaves the call hierarchy provider out, and
-`unanswered-references` leaves every references request without a reply.
+arguments after it leaves the call hierarchy provider out,
+`unanswered-references` leaves every references request without a reply, and
+`method-not-found` answers every other request it does not serve with
+JSON-RPC MethodNotFound, as a server that lacks the feature does.
 """
 
 import json
@@ -178,5 +180,9 @@ while True:
     elif method == "exit":
         sys.exit()
     elif "id" not in message or method is None:
+        continue
+    elif "method-not-found" in modes and method != "shutdown":
+        send({"jsonrpc": "2.0", "id": message["id"],
+              "error": {"code": -32601, "message": f"Unhandled method {method}"}})
         continue
     send({"jsonrpc": "2.0", "id": message["id"], "result": result})

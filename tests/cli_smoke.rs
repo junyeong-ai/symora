@@ -2973,6 +2973,57 @@ fn callers_without_call_hierarchy_name_none_for_a_type() {
     );
 }
 
+/// A request the server answers with JSON-RPC MethodNotFound is a feature it
+/// lacks, and the answer names that feature and what to run instead,
+/// whichever command asked — not a pointer to `doctor`, which lists no
+/// server's features.
+#[cfg(unix)]
+#[test]
+fn a_request_the_server_does_not_implement_names_an_alternative() {
+    let source = "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n";
+    let Some(dir) = reference_served_repo(&[("a.py", source, source)]) else {
+        return;
+    };
+    let repo = dir.path();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/reference_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"python": {
+        "command": "python3",
+        "args": [server, repo.join(".symora/log"), "method-not-found"],
+    }}}});
+    std::fs::write(
+        repo.join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    for (args, feature) in [
+        (&["def", "a.py:6:12"][..], "go to definition"),
+        (&["typedef", "a.py:6:12"], "go to type definition"),
+        (&["hover", "a.py:6:12"], "hover"),
+        (&["actions", "list", "a.py:6:12"], "code actions"),
+        (&["rename", "a.py:1:5", "renamed", "--dry-run"], "rename"),
+        (&["callees", "a.py:5"], "outgoing calls"),
+    ] {
+        let out = run_in(repo, args);
+        assert!(!out.status.success(), "{args:?} succeeded");
+        let json = common::parse_response(&out.stdout).expect("JSON on stdout");
+        let error = &json["error"];
+        assert_eq!(error["code"], "unsupported", "{args:?}: {json}");
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&format!("does not support '{feature}'"))),
+            "{args:?}: {json}"
+        );
+        let hint = error["hint"].as_str().unwrap_or_default();
+        assert!(
+            hint.contains("symora ") && !hint.contains("doctor"),
+            "{args:?}: {json}"
+        );
+    }
+}
+
 /// Python runs `__init__` where its class is called, and its server reports
 /// those calls as references to the class alone, as this fake does: the
 /// constructor's own references and incoming calls are none. Its callers are

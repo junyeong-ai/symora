@@ -2,6 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::LspError;
+use crate::infra::lsp::LspFeature;
+use crate::infra::lsp::protocol::error_codes;
 use crate::models::lsp::{ApplyActionResult, CodeAction, CodeActionKind, path_to_uri};
 
 use super::converters::*;
@@ -16,8 +18,9 @@ pub(super) async fn code_actions(
 ) -> Result<Vec<CodeAction>, LspError> {
     // No static capability gate: code actions are near-universal and
     // get_support_level never yields None for CodeActions, so a gate here would
-    // be inert dead code. A server that lacks them returns -32601 (mapped to
-    // honest Unsupported) or an empty set (an honest "no actions here").
+    // be inert dead code. A server that lacks them returns -32601 (the
+    // `unsupported` naming what to do instead) or an empty set (an honest "no
+    // actions here").
     let max_file_size = service.max_file_size_bytes();
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
@@ -52,7 +55,10 @@ pub(super) async fn code_actions(
 
                 let response: Option<Vec<serde_json::Value>> = client
                     .request("textDocument/codeAction", Some(params))
-                    .await?;
+                    .await
+                    .map_err(|err| {
+                        unsupported_if_unimplemented(err, &manager, &file, LspFeature::CodeActions)
+                    })?;
 
                 let mut actions: Vec<CodeAction> = response
                     .unwrap_or_default()
@@ -143,9 +149,24 @@ pub(super) async fn apply_code_action(
                     // report "applied, zero changes" for an action that
                     // was never materialized. Erring also routes the
                     // retryable codes through `execute_with_retry`.
+                    // A server that lists such an action but implements no
+                    // resolve has offered one it cannot materialize.
                     let resolved: Option<serde_json::Value> = client
                         .request("codeAction/resolve", Some(raw_action.clone()))
-                        .await?;
+                        .await
+                        .map_err(|err| match err {
+                            LspError::ServerError { code, .. }
+                                if code == error_codes::METHOD_NOT_FOUND =>
+                            {
+                                LspError::UnsupportedEdit(
+                                    "Code action provided no workspace edit and its server \
+                                     implements no codeAction/resolve to compute one. Pick a \
+                                     different action from `actions list`."
+                                        .to_string(),
+                                )
+                            }
+                            other => other,
+                        })?;
                     edit = resolved.as_ref().and_then(|r| r.get("edit").cloned());
                 }
 

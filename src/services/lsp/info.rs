@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::LspError;
-use crate::infra::lsp::LspClient;
 use crate::infra::lsp::protocol::{Hover, TextDocumentIdentifier, TextDocumentPositionParams};
+use crate::infra::lsp::{LspClient, LspFeature};
 use crate::models::diagnostic::{Diagnostic, DiagnosticsReport, DiagnosticsStatus};
 use crate::models::lsp::{HoverInfo, Indexed, path_to_uri};
 
@@ -45,7 +45,10 @@ pub(super) async fn hover(
 
                 let result: Option<Hover> = client
                     .request("textDocument/hover", Some(serde_json::to_value(params)?))
-                    .await?;
+                    .await
+                    .map_err(|err| {
+                        unsupported_if_unimplemented(err, &manager, &file, LspFeature::Hover)
+                    })?;
 
                 let mut conv = PositionConverter::new(client.position_encoding().await)
                     .with_content(&file, &content);
@@ -66,7 +69,7 @@ pub(super) async fn diagnostics(
     service: &DefaultLspService,
     file: &Path,
 ) -> Result<DiagnosticsReport, LspError> {
-    use crate::infra::lsp::capabilities::{LspFeature, SupportLevel, get_support_level};
+    use crate::infra::lsp::capabilities::{SupportLevel, get_support_level};
     use crate::infra::lsp::protocol::LspDiagnosticSeverity;
     use crate::infra::lsp::protocol::LspDiagnosticTag;
     use crate::models::diagnostic::{DiagnosticSeverity, DiagnosticTag};

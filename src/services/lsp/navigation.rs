@@ -46,7 +46,10 @@ pub(super) async fn find_references(
 
                 let result: serde_json::Value = client
                     .request("textDocument/references", Some(params))
-                    .await?;
+                    .await
+                    .map_err(|err| {
+                        unsupported_if_unimplemented(err, &manager, &file, LspFeature::FindReferences)
+                    })?;
 
                 if result.is_null() {
                     return Ok(indexing.finish(Vec::new()));
@@ -74,7 +77,15 @@ pub(super) async fn goto_definition(
     line: u32,
     column: u32,
 ) -> Result<Indexed<Option<Definition>>, LspError> {
-    let named = goto_locations(service, file, line, column, "textDocument/definition").await?;
+    let named = goto_locations(
+        service,
+        file,
+        line,
+        column,
+        "textDocument/definition",
+        LspFeature::GotoDefinition,
+    )
+    .await?;
     let best = select_best_definition(
         named.data.iter().map(|(wire, _)| wire.uri.as_str()),
         service.manager.root(),
@@ -113,7 +124,15 @@ pub(super) async fn goto_type_definition(
     line: u32,
     column: u32,
 ) -> Result<Indexed<Vec<Location>>, LspError> {
-    let named = goto_locations(service, file, line, column, "textDocument/typeDefinition").await?;
+    let named = goto_locations(
+        service,
+        file,
+        line,
+        column,
+        "textDocument/typeDefinition",
+        LspFeature::GotoTypeDefinition,
+    )
+    .await?;
     // A composite type names one definition per type it is built from
     // (rust-analyzer answers `Vec<Foo>` with `Vec`, `Foo` and `Global`), so
     // the first alone would drop the project's own type behind a library's.
@@ -134,18 +153,17 @@ async fn goto_locations(
     file: &Path,
     line: u32,
     column: u32,
-    method: &str,
+    method: &'static str,
+    feature: LspFeature,
 ) -> Result<Indexed<Vec<(LspLocation, Location)>>, LspError> {
     let max_file_size = service.max_file_size_bytes();
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
-    let method = method.to_string();
 
     service
         .execute_with_retry(&file, |client| {
             let file = file.clone();
             let manager = Arc::clone(&manager);
-            let method = method.clone();
             async move {
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
@@ -164,8 +182,9 @@ async fn goto_locations(
                 };
 
                 let result: serde_json::Value = client
-                    .request(&method, Some(serde_json::to_value(params)?))
-                    .await?;
+                    .request(method, Some(serde_json::to_value(params)?))
+                    .await
+                    .map_err(|err| unsupported_if_unimplemented(err, &manager, &file, feature))?;
 
                 // Each target is decoded from the wire encoding here, where the
                 // client (and so the encoding) is in scope.

@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::LspError;
-use crate::infra::lsp::IndexingState;
 use crate::infra::lsp::protocol::{DocumentSymbol, SymbolInformation};
+use crate::infra::lsp::{IndexingState, LspFeature};
 use crate::models::lsp::{FindSymbolsOptions, Indexed, path_to_uri};
 use crate::models::symbol::{Language, Symbol};
 use crate::services::symbols::SymbolExtractor;
@@ -33,7 +33,7 @@ pub(super) async fn find_symbols(
             let client_fut = service.get_client_for_file(&file_path);
             let content_clone = content.clone();
             let file_clone = file_path.clone();
-            let root = service.manager.root().to_path_buf();
+            let manager = Arc::clone(&service.manager);
             async move {
                 let client = client_fut.await?;
                 let uri = path_to_uri(&file_clone);
@@ -42,19 +42,24 @@ pub(super) async fn find_symbols(
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri }
                 });
+                let unimplemented = |err| {
+                    unsupported_if_unimplemented(err, &manager, &file_clone, LspFeature::FindSymbol)
+                };
 
                 let mut result: serde_json::Value = client
                     .request("textDocument/documentSymbol", Some(params.clone()))
-                    .await?;
+                    .await
+                    .map_err(unimplemented)?;
 
                 // `null` from a server that hasn't reached readiness is a
                 // non-answer, not "no symbols". Give the workspace its
                 // bounded indexing wait and ask once more before judging.
                 if result.is_null() && client.indexing_state() != IndexingState::Ready {
-                    let _ = ensure_indexed(&client, &file_clone, &root).await;
+                    let _ = ensure_indexed(&client, &file_clone, manager.root()).await;
                     result = client
                         .request("textDocument/documentSymbol", Some(params))
-                        .await?;
+                        .await
+                        .map_err(unimplemented)?;
                 }
 
                 let mut conv = PositionConverter::new(client.position_encoding().await)

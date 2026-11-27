@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::LspError;
+use crate::infra::lsp::LspFeature;
 use crate::models::lsp::{Indexed, PrepareRenameResult, RenameResult, path_to_uri};
 
 use super::converters::*;
@@ -136,7 +137,10 @@ pub(super) async fn rename(
                     "position": to_lsp_position(line, column, &content, client.position_encoding().await),
                     "newName": new_name
                 });
-                let result: serde_json::Value = client.request("textDocument/rename", Some(params)).await?;
+                let result: serde_json::Value = client
+                    .request("textDocument/rename", Some(params))
+                    .await
+                    .map_err(|err| unsupported_if_unimplemented(err, &manager, &file, LspFeature::Rename))?;
                 let snapshots = client.validate_workspace_edit(&result).await?;
                 verify_workspace_edit_target(
                     &file,

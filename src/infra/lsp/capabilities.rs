@@ -153,7 +153,28 @@ pub fn get_alternative_suggestion(language: Language, feature: LspFeature) -> St
         }
 
         // Default
-        _ => "This feature may not be available for this language.".into(),
+        _ => default_alternative(feature).into(),
+    }
+}
+
+/// What answers in a feature's place whatever the language: the commands
+/// that read the tree, the index or the text rather than this request.
+fn default_alternative(feature: LspFeature) -> &'static str {
+    use LspFeature::*;
+
+    match feature {
+        FindSymbol => "Try: symora --deterministic symbols <file>",
+        FindReferences => "Try: symora search content \"<symbol>\"",
+        GotoDefinition => "Try: symora search symbols \"<symbol>\"",
+        GotoTypeDefinition => "Try: symora hover <location> or symora def <location>",
+        FindImplementations | IncomingCalls => "Try: symora refs <location>",
+        OutgoingCalls => "Read the calls in its body: symora search symbols \"<symbol>\" --body",
+        Hover => "Try: symora search symbols \"<symbol>\" --signature",
+        Diagnostics => "Run the project's own compiler or linter for the file's diagnostics.",
+        Rename => "Find its occurrences with: symora search content \"<symbol>\"",
+        CodeActions => {
+            "Make the change by declaration: symora edit replace-body <location> --body - --dry-run"
+        }
     }
 }
 
@@ -200,6 +221,36 @@ mod tests {
                     language, feature,
                 ));
             }
+        }
+    }
+
+    /// A server that lacks a feature is answered with what to do instead, in
+    /// every language: a command that answers without the request, or for
+    /// diagnostics, the project's own checks.
+    #[test]
+    fn every_feature_a_server_can_lack_names_what_to_run_instead() {
+        use LspFeature::*;
+
+        for language in Language::all() {
+            for feature in [
+                FindSymbol,
+                FindReferences,
+                GotoDefinition,
+                GotoTypeDefinition,
+                FindImplementations,
+                Hover,
+                Rename,
+                IncomingCalls,
+                OutgoingCalls,
+                CodeActions,
+            ] {
+                let suggestion = get_alternative_suggestion(language, feature);
+                assert!(
+                    suggestion.contains("symora "),
+                    "{language:?} {feature:?}: {suggestion}"
+                );
+            }
+            assert!(get_alternative_suggestion(language, Diagnostics).contains("compiler"));
         }
     }
 }

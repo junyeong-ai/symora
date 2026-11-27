@@ -181,10 +181,13 @@ fn classify_server_error(code: i32, message: &str, full: String) -> OutputError 
 
     // Standard JSON-RPC + LSP reserved codes win first.
     match code {
+        // Each feature's request names its own alternative where it is made
+        // (`FeatureNotSupported`); a request that reaches here is one no
+        // feature stands for, and a text search answers in any language.
         error_codes::METHOD_NOT_FOUND => {
             return OutputError::new(ErrorCode::Unsupported, full).with_hint(
-                "Method not implemented by this language server. \
-                 Run 'symora doctor' to check supported features.",
+                "This language server does not implement the request, so asking again \
+                 cannot answer it. Try: symora search content \"<symbol>\"",
             );
         }
         error_codes::INVALID_PARAMS => {
@@ -420,7 +423,9 @@ mod tests {
         }
         .into();
         assert!(matches!(err.code, ErrorCode::Unsupported));
-        assert!(err.hint.is_some());
+        let hint = err.hint.expect("a remedy");
+        assert!(hint.contains("symora search content"), "{hint}");
+        crate::cli::assert_named_commands_parse(&hint);
     }
 
     #[test]
