@@ -644,19 +644,33 @@ pub(crate) mod tests {
             let manager = Arc::clone(&manager);
             async move { manager.shutdown_all().await }
         });
-        let exits = tokio::time::timeout(Duration::from_secs(3), async {
+        let progress = Duration::from_secs(2 * server_lifetime::START_BUDGET_SECS);
+        let told = tokio::time::timeout(progress, async {
             while !root.path().join("python").exists() || !root.path().join("go").exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await;
+        // A server holds in `exit` until released, so both still run when
+        // both were told before the pool waited on either. Told one after
+        // the other, the first was stopped before the second heard, so the
+        // order is read from what ran rather than from how fast it acted.
+        let both_held = told.is_ok()
+            && ["python", "go"].into_iter().all(|server| {
+                let pid = std::fs::read_to_string(root.path().join(server)).unwrap();
+                std::process::Command::new("kill")
+                    .args(["-0", pid.trim()])
+                    .status()
+                    .unwrap()
+                    .success()
+            });
         std::fs::write(release, "").unwrap();
-        tokio::time::timeout(Duration::from_secs(5), stopping)
+        tokio::time::timeout(progress, stopping)
             .await
             .unwrap()
             .unwrap();
         assert!(
-            exits.is_ok(),
+            both_held,
             "every server must receive exit before waiting for process termination"
         );
         assert!(!python.is_running().await);
