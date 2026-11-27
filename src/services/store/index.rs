@@ -1146,8 +1146,18 @@ impl Store {
     }
 
     pub async fn index(&self, options: IndexOptions) -> Result<IndexStats, StoreError> {
-        let _lock = self.own_index().await?;
-        self.do_index(options).await
+        {
+            let _lock = self.own_index().await?;
+            self.do_index(options).await?;
+        }
+        // A build owns the index until it publishes, and no longer. Settling
+        // the storage it freed and counting what it wrote change no row, and
+        // a lock held through them reads as a build in progress to every
+        // search that waited for this one — which would then qualify the
+        // answer just published as the snapshot before it.
+        let _ = self.reclaim_free_pages().await;
+        let _ = self.checkpoint().await;
+        self.stats().await
     }
 
     /// Whether a build owns the index right now — a fact any process can read,
@@ -1180,7 +1190,7 @@ impl Store {
         }
     }
 
-    async fn do_index(&self, options: IndexOptions) -> Result<IndexStats, StoreError> {
+    async fn do_index(&self, options: IndexOptions) -> Result<(), StoreError> {
         let filter = FileFilter::new(&self.project_root);
         let scope = BuildScope::from_options(&options.languages);
         let extensions = scope.extensions();
@@ -1287,10 +1297,7 @@ impl Store {
         unread_paths.dedup_by(|a, b| a.path == b.path);
 
         self.publish_build(epoch, &scope, fingerprints, unread_paths, defer_text_index)
-            .await?;
-        let _ = self.reclaim_free_pages().await;
-        let _ = self.checkpoint().await;
-        self.stats().await
+            .await
     }
 
     /// Whether the rows in the store were produced by this binary's queries.
@@ -2844,6 +2851,60 @@ mod tests {
 
         store.index(IndexOptions::default()).await.unwrap();
         assert_eq!(store.build_scope().await.unwrap(), Some(BuildScope::All));
+    }
+
+    /// A build owns the index until it publishes, and not through the upkeep
+    /// after it. A search that waited for the build reads the index the
+    /// moment it publishes, and a lock still held then reads as a rebuild in
+    /// progress: the answer the build just published would be qualified as
+    /// the snapshot before it.
+    #[tokio::test]
+    async fn a_build_releases_the_index_once_it_publishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn upkeep_probe() {}\n")
+            .await
+            .unwrap();
+        let store = std::sync::Arc::new(Store::open(root, StoreConfig::default()).await.unwrap());
+        let reader = Store::open(root, StoreConfig::default()).await.unwrap();
+
+        // A reader holding a snapshot from before the build keeps the build's
+        // closing checkpoint waiting — truncating the log waits out readers —
+        // which holds the build in its upkeep long enough to look at.
+        let pin = rusqlite::Connection::open(Store::db_path(root)).unwrap();
+        pin.execute_batch("BEGIN").unwrap();
+        pin.query_row("SELECT COUNT(*) FROM meta", [], |row| row.get::<_, i64>(0))
+            .unwrap();
+
+        let building = tokio::spawn({
+            let store = std::sync::Arc::clone(&store);
+            async move { store.index(IndexOptions::default()).await }
+        });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while reader.build_scope().await.unwrap().is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the build never published"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let mut owned_after_publishing = false;
+        for _ in 0..10 {
+            owned_after_publishing |= reader.build_in_progress();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let still_in_upkeep = !building.is_finished();
+        pin.execute_batch("COMMIT").unwrap();
+        building.await.unwrap().unwrap();
+
+        assert!(
+            still_in_upkeep,
+            "the probe has to run while the build is still settling its storage"
+        );
+        assert!(
+            !owned_after_publishing,
+            "a published build still read as one in progress"
+        );
     }
 
     /// A build only marks the index whole while it still owns the epoch it
