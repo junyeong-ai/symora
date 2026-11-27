@@ -415,6 +415,35 @@ mod tests {
         );
     }
 
+    /// A capability gap's answer says what is missing once and what to do
+    /// instead once, each in its own field.
+    #[test]
+    fn a_capability_gap_states_its_remedy_in_the_hint_alone() {
+        let gap: OutputError = LspError::FeatureNotSupported {
+            language: crate::models::symbol::Language::Toml,
+            server: "taplo".into(),
+            feature: "go to definition".into(),
+            suggestion: "Try: symora search symbols \"<symbol>\"".into(),
+        }
+        .into();
+        assert_eq!(
+            gap.message,
+            "Toml (taplo) does not support 'go to definition'"
+        );
+        assert_eq!(
+            gap.hint.as_deref(),
+            Some("Try: symora search symbols \"<symbol>\"")
+        );
+
+        let language: OutputError = LspError::UnsupportedLanguage("Klingon".into()).into();
+        assert_eq!(language.message, "Unsupported language: Klingon");
+        assert!(
+            language
+                .hint
+                .is_some_and(|hint| hint.contains("symora doctor"))
+        );
+    }
+
     #[test]
     fn server_error_method_not_found_maps_to_unsupported() {
         let err: OutputError = LspError::ServerError {

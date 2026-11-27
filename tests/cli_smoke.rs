@@ -3133,6 +3133,10 @@ fn a_request_the_server_does_not_implement_names_an_alternative() {
             hint.contains("symora ") && !hint.contains("doctor"),
             "{args:?}: {json}"
         );
+        assert!(
+            !error["message"].as_str().unwrap().contains(hint),
+            "the remedy is stated once, in the hint: {json}"
+        );
     }
 }
 

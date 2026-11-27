@@ -30,10 +30,14 @@ pub enum LspError {
         install_hint: String,
     },
 
-    #[error("Unsupported language: {0}. Run 'symora doctor' to see supported languages.")]
+    /// The remedy, `symora doctor`'s list of languages, is the caller's to
+    /// show apart from the message, as `ServerNotInstalled`'s is.
+    #[error("Unsupported language: {0}")]
     UnsupportedLanguage(String),
 
-    #[error("{language:?} ({server}) does not support '{feature}'. {suggestion}")]
+    /// The message states which feature the server lacks; `suggestion`, what
+    /// to run instead, is the caller's to show apart from it.
+    #[error("{language:?} ({server}) does not support '{feature}'")]
     FeatureNotSupported {
         language: Language,
         server: String,
