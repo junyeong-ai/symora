@@ -396,6 +396,10 @@ mod tests {
             "delete_symbol",
         ] {
             let tool = tool(name);
+            assert!(
+                tool.description.contains("exactly one of symbol or line"),
+                "{name}: the description states the addressing rule the schema cannot"
+            );
             let required = required_of(tool);
             assert!(required.contains(&"file"), "{name}: must require file");
             assert!(

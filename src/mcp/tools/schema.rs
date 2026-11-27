@@ -72,13 +72,9 @@ pub fn edit_target_schema() -> Value {
                 "symbol",
                 "string",
                 "Symbol path within the file (e.g. 'Class/method'), as returned by \
-                 search_symbols or list_file_symbols. Pass exactly one of symbol or line.",
+                 search_symbols or list_file_symbols",
             ),
-            (
-                "line",
-                "integer",
-                "1-indexed line number of the symbol. Pass exactly one of symbol or line.",
-            ),
+            ("line", "integer", "1-indexed line number of the symbol"),
             (
                 "column",
                 "integer",

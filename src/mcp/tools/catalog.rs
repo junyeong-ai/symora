@@ -324,8 +324,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "no_fallback",
                         "boolean",
                         "Refuse the references-derived approximation when the server lacks call \
-                         hierarchy (default false). With it true, a weak server yields a structured \
-                         unsupported result instead of reference-based, non-verified call edges.",
+                         hierarchy, returning unsupported instead (default false)",
                     ),
                 ],
             ),
@@ -558,7 +557,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     (
                         "with_bodies",
                         "boolean",
-                        "Attach complete bodies under the shared body_tokens budget; target first, then callees and types (default false)",
+                        "Attach complete bodies under body_tokens (default false)",
                     ),
                     (
                         "body_tokens",
@@ -663,8 +662,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     "callers",
                     "boolean",
                     "List each changed function's, method's and constructor's callers, read off \
-                     the references its count was taken from (callers_status: \
-                     references_derived); another kind's row says not_callable",
+                     the references its count was taken from",
                 ),
                 (
                     "call_hierarchy",
@@ -805,11 +803,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::mutating(
             "rename_symbol",
             "LSP rename for the symbol at file:line:column. Returns the affected \
-                          file list and per-file edit count. Set dry_run=true to preview \
-                          without writing. Application requires confirmed workspace readiness. \
-                          Under indexing unconfirmed, compare each file's edit_count in a \
-                          dry_run with find_references for the target, which leaves out the \
-                          declaration the rename also edits, then apply with \
+                          file list and per-file edit count. Application requires confirmed \
+                          workspace readiness. Under indexing unconfirmed, compare each file's \
+                          edit_count in a dry_run with find_references for the target, which \
+                          leaves out the declaration the rename also edits, then apply with \
                           accept_unconfirmed; the response keeps the marker, so check that no \
                           reference kept the old name. timed_out permits previews only. Every \
                           file is checked before any is written, but a write that fails \
@@ -853,11 +850,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::mutating(
             "apply_code_action",
             "Apply a code action by exact title at file:line:column. Use \
-                          `list_code_actions` first to discover titles. Set dry_run=true to \
-                          preview. Every file is checked before any is written, but a write \
-                          that fails partway leaves earlier files modified; the error's hint \
-                          names them, so inspect those before retrying. ⚠ Mutates source files \
-                          when dry_run is false.",
+                          `list_code_actions` first to discover titles. Every file is checked \
+                          before any is written, but a write that fails partway leaves earlier \
+                          files modified; the error's hint names them, so inspect those before \
+                          retrying. ⚠ Mutates source files when dry_run is false.",
             with_required(
                 with_extra(
                     position_exact_location_schema(),
@@ -983,8 +979,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           symbol or line. Always reports references outside the deleted span \
                           that would dangle; set expect_no_references=true to refuse the \
                           delete unless verified reference-free (fail-closed when \
-                          unverifiable). Set dry_run=true to preview. ⚠ Mutates source files \
-                          when dry_run is false.",
+                          unverifiable). ⚠ Mutates source files when dry_run is false.",
             with_extra(
                 edit_target_schema(),
                 &[
