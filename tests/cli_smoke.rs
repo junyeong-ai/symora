@@ -5798,6 +5798,126 @@ fn a_map_list_says_how_much_the_limit_cut_from_it() {
     assert_eq!(file["siblings"]["showing"], 8, "{file}");
 }
 
+/// A workspace's packages are what its manifests list, each a row of its
+/// own: a workspace under one directory is otherwise one `top_directories`
+/// row holding all of them.
+#[cfg(unix)]
+#[test]
+fn map_summary_lists_the_packages_workspace_manifests_declare() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let write = |path: &str, content: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    };
+    let packages = |summary: &serde_json::Value| {
+        summary["packages"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|package| {
+                format!(
+                    "{} {} {} {}",
+                    package["path"].as_str().unwrap(),
+                    package["name"].as_str().unwrap_or("-"),
+                    package["manifest"].as_str().unwrap(),
+                    package["file_count"]
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // No workspace manifest: no packages row at all, rather than an empty
+    // list that would read as a workspace of none.
+    write("Cargo.toml", "[package]\nname = \"solo\"\n");
+    write("src/lib.rs", "pub fn f() {}\n");
+    let solo = json_ok(root, &["--deterministic", "map", "summary"]);
+    assert!(solo.get("packages").is_none(), "{solo}");
+
+    write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/*\"]\nexclude = [\"crates/skip\"]\n",
+    );
+    std::fs::remove_file(root.join("src/lib.rs")).unwrap();
+    write("crates/a/Cargo.toml", "[package]\nname = \"crate-a\"\n");
+    write("crates/a/src/lib.rs", "pub fn a() {}\n");
+    write("crates/a/src/extra.rs", "pub fn x() {}\n");
+    write("crates/skip/Cargo.toml", "[package]\nname = \"skipped\"\n");
+    write("crates/skip/src/lib.rs", "pub fn s() {}\n");
+    write(
+        "crates/a/tests/fixture/Cargo.toml",
+        "[workspace]\nmembers = [\"*\"]\n",
+    );
+
+    // A flow sequence over several lines, which a line reading takes for
+    // no packages at all.
+    write(
+        "pnpm-workspace.yaml",
+        "packages: [\n  'web/*',\n  '!web/old'\n  ]\n",
+    );
+    write("package.json", "{\"private\": true}\n");
+    write("web/app/package.json", "{\"name\": \"@acme/app\"}\n");
+    write("web/app/index.ts", "export const a = 1;\n");
+    write("web/old/package.json", "{\"name\": \"old\"}\n");
+
+    write(
+        "py/pyproject.toml",
+        "[project]\nname = \"py-root\"\n[tool.uv.workspace]\nmembers = [\"libs/*\"]\n",
+    );
+    write("py/libs/one/pyproject.toml", "[project]\nname = \"one\"\n");
+    write("py/libs/one/src/one/__init__.py", "");
+    write("py/tool.py", "X = 1\n");
+
+    write("go.work", "go 1.22\n\nuse (\n\t`./svc` // the service\n)\n");
+    write("svc/go.mod", "module example.com/svc\n");
+    write("svc/main.go", "package main\n\nfunc main() {}\n");
+
+    let summary = json_ok(root, &["--deterministic", "map", "summary"]);
+    assert_eq!(
+        packages(&summary),
+        [
+            "crates/a crate-a Cargo.toml 2",
+            "py py-root pyproject.toml 1",
+            "py/libs/one one pyproject.toml 1",
+            "svc example.com/svc go.mod 1",
+            "web/app @acme/app package.json 1",
+        ],
+        "{summary}"
+    );
+
+    // A manifest that does not parse is named, not taken for no workspace.
+    let says = |summary: &serde_json::Value, opening: &str| {
+        summary["hints"].as_array().is_some_and(|hints| {
+            hints
+                .iter()
+                .any(|hint| hint.as_str().is_some_and(|hint| hint.starts_with(opening)))
+        })
+    };
+    write("Cargo.toml", "[workspace\n");
+    let broken = json_ok(root, &["--deterministic", "map", "summary"]);
+    assert!(says(&broken, "Cargo.toml could not be parsed"), "{broken}");
+    write("go.work", "go 1.22\n\nuse (\n\t./svc\n");
+    let broken = json_ok(root, &["--deterministic", "map", "summary"]);
+    assert!(says(&broken, "go.work could not be parsed"), "{broken}");
+
+    // A pnpm-workspace.yaml declares a workspace whether or not it parses:
+    // its root is still a package, and what it lists is said to be unread.
+    let pnpm = tempfile::tempdir().unwrap();
+    std::fs::write(pnpm.path().join("package.json"), "{\"name\": \"root\"}\n").unwrap();
+    std::fs::write(
+        pnpm.path().join("pnpm-workspace.yaml"),
+        "packages: [\n  \"packages/*\"\n]\n",
+    )
+    .unwrap();
+    let broken = json_ok(pnpm.path(), &["--deterministic", "map", "summary"]);
+    assert!(
+        says(&broken, "pnpm-workspace.yaml could not be parsed"),
+        "{broken}"
+    );
+    assert_eq!(broken["packages"]["items"][0]["name"], "root", "{broken}");
+}
+
 /// `map file` names a file's tests by evidence: an import naming it, its
 /// package's build, a region its language compiles only under test. A file
 /// sharing its name is none of those — in a workspace several packages hold

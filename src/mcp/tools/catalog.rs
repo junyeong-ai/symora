@@ -13,8 +13,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition::read_only(
             "get_project_overview",
-            "High-level project map: language breakdown, top directories, and \
-                          probable entrypoints. Cheap orientation step before deeper queries.",
+            "High-level project map: language breakdown, top directories, the packages \
+                          its workspace manifests declare (Cargo, npm or yarn, pnpm, uv, go.work; \
+                          absent where none declares a workspace), and probable entrypoints. \
+                          Cheap orientation step before deeper queries.",
             schema_object(&[], &[]),
         ),
         ToolDefinition::read_only(

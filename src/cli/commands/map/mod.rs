@@ -17,8 +17,10 @@ use crate::models::symbol::{Language, Symbol};
 
 mod modfile;
 mod tests_of;
+mod workspace;
 
 use tests_of::TestFileOutput;
+use workspace::PackageOutput;
 
 #[derive(Args, Debug)]
 #[command(
@@ -33,7 +35,7 @@ pub struct MapArgs {
 pub enum MapCommand {
     /// High-level project map
     Summary {
-        /// Maximum top-level directories and entrypoints to show
+        /// Maximum top-level directories, packages and entrypoints to show
         #[arg(long, default_value_t = defaults::MAP_SUMMARY_LIMIT)]
         limit: usize,
     },
@@ -73,6 +75,9 @@ struct MapSummaryOutput {
     /// than only noted.
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     unread_paths: Vec<String>,
+    /// What kept a manifest's declarations from being read.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    hints: Vec<String>,
     total_files: usize,
     code_files: usize,
     support_files: usize,
@@ -80,6 +85,12 @@ struct MapSummaryOutput {
     directories: usize,
     languages: Vec<LanguageMapOutput>,
     top_directories: Section<DirectoryMapOutput>,
+    /// The packages the workspace manifests list (Cargo `[workspace]`,
+    /// npm or yarn `workspaces`, `pnpm-workspace.yaml`, uv
+    /// `[tool.uv.workspace]`, `go.work`), largest first; absent where none
+    /// declares a workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    packages: Option<Section<PackageOutput>>,
     entrypoints: Section<EntryPointOutput>,
 }
 
@@ -165,7 +176,9 @@ pub async fn execute(args: MapArgs, app: &App) -> Result<()> {
 
 async fn execute_summary(app: &App, limit: usize) -> Result<()> {
     let ctx = &app.output;
-    let scan = scan_project_files(app);
+    let mut scan = scan_project_files(app);
+    let declared = workspace::read(&scan.records, app.root());
+    scan.unread_paths.extend(declared.unread);
     let unread_paths = scan.unread_at(ctx, app.root());
     let records = scan.records;
     let code_records: Vec<_> = records
@@ -231,6 +244,7 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
         root: ctx.root().display().to_string(),
         incomplete: !unread_paths.is_empty(),
         unread_paths,
+        hints: declared.hints,
         total_files: records.len(),
         code_files: code_records.len(),
         support_files: records.len().saturating_sub(code_records.len()),
@@ -238,6 +252,9 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
         directories: dirs.len(),
         languages,
         top_directories,
+        packages: declared
+            .packages
+            .map(|packages| limited(packages, limit, Cap::Option("--limit"))),
         entrypoints,
     };
 

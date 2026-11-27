@@ -626,7 +626,7 @@ fn script_lookup<'p>(
 
 /// `reference` read from `directory`, both project-relative, with `.` and
 /// `..` folded; `None` where it climbs above the project root.
-fn joined(directory: &str, reference: &str) -> Option<String> {
+pub(super) fn joined(directory: &str, reference: &str) -> Option<String> {
     let mut components: Vec<&str> = directory.split('/').filter(|c| !c.is_empty()).collect();
     for component in reference.split('/') {
         match component {

@@ -124,6 +124,18 @@ pub(super) fn module_path(go_mod: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// The directories a `go.work` uses, as written.
+pub(super) fn used_directories(go_work: &str) -> Result<Vec<String>, String> {
+    parse(go_work)?
+        .into_iter()
+        .filter(|d| d.verb == "use")
+        .map(|d| match <[String; 1]>::try_from(d.args) {
+            Ok([path]) => Ok(path),
+            Err(_) => Err("a use directive does not name one directory".to_string()),
+        })
+        .collect()
+}
+
 /// Whether modfile reads `c` as part of a bare word: printable, no space,
 /// none of `()[]{},`.
 fn is_word(c: char) -> bool {
@@ -299,6 +311,20 @@ mod tests {
                 directive("use", &["./e"]),
                 directive("use", &["./fé\tA"]),
             ]
+        );
+    }
+
+    #[test]
+    fn a_go_work_uses_each_directory_however_it_is_written() {
+        let go_work = "go 1.22\nuse ./a\nuse (\n\t./b // a comment\n\t\"./c d\"\n\t`./e`\n)\nreplace x => ../y\n";
+        assert_eq!(
+            used_directories(go_work).unwrap(),
+            ["./a", "./b", "./c d", "./e"]
+        );
+        assert!(
+            used_directories("use ./a ./b\n")
+                .unwrap_err()
+                .contains("one directory")
         );
     }
 
