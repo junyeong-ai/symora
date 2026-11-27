@@ -11,7 +11,7 @@
 //!
 //! - [`app`] — runtime composition (services, output, config)
 //! - [`cli`] — command surface, output contract, analysis helpers
-//! - [`services`] — LSP, AST, project, store, pack
+//! - [`services`] — LSP, AST, project, store
 //! - [`infra`] — file filtering, LSP transport, AST parser pool
 //! - [`mcp`] — Model Context Protocol server (stdio + HTTP)
 //! - [`models`] — domain types shared across layers

@@ -31,8 +31,8 @@ use commands::{
     actions::ActionsArgs, callees::CalleesArgs, callers::CallersArgs, config::ConfigArgs,
     context::ContextArgs, def::DefArgs, diagnostics::DiagnosticsArgs, diff_impact::DiffImpactArgs,
     doctor::DoctorArgs, edit::EditArgs, hover::HoverArgs, impact::ImpactArgs,
-    implementations::ImplementationsArgs, map::MapArgs, mcp::McpArgs, pack::PackArgs,
-    refs::RefsArgs, rename::RenameArgs, search::SearchArgs, selfcmd::SelfcmdArgs, setup::SetupArgs,
+    implementations::ImplementationsArgs, map::MapArgs, mcp::McpArgs, refs::RefsArgs,
+    rename::RenameArgs, search::SearchArgs, selfcmd::SelfcmdArgs, setup::SetupArgs,
     subtypes::SubtypesArgs, supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs,
 };
 
@@ -47,7 +47,7 @@ CHOOSE A QUERY:
   Unknown name or text:   search symbols <query> | search content <query>
   Who uses it:            refs <loc> | callers <loc> | context <loc>
   What a change reaches:  impact <loc> | diff-impact [REVISION]
-  Orientation:            map summary | pack --tokens 4000
+  Orientation:            map summary
   Edit by declaration:    edit replace-body <file> --symbol <path> --dry-run
 
 <loc> is file:line[:column], 1-indexed. Run `symora <command> --help` for its options.
@@ -182,8 +182,6 @@ pub enum Commands {
     Search(SearchArgs),
     /// Project overview, or one file's declarations, tests, and neighbours
     Map(MapArgs),
-    /// Build a token-budgeted context pack ranked by an import-graph PageRank
-    Pack(PackArgs),
 
     // Edit
     /// Source mutations: replace-body, insert-before/after, delete, replace, pattern

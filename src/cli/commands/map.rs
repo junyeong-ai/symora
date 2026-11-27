@@ -240,7 +240,7 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
 
     let top_directories = limited(directories, limit);
     let entrypoints = limited(detect_entrypoints(&code_records), limit);
-    let next_commands = map_summary_next_commands(&top_directories.items, &entrypoints.items);
+    let next_commands = map_summary_next_commands(&entrypoints.items);
 
     let response = MapSummaryOutput {
         root: ctx.root().display().to_string(),
@@ -754,31 +754,15 @@ fn is_focus_symbol_candidate(symbol: &Symbol) -> bool {
     ) || has_callable_children
 }
 
-fn map_summary_next_commands(
-    top_directories: &[DirectoryMapOutput],
-    entrypoints: &[EntryPointOutput],
-) -> Vec<String> {
-    let mut commands = Vec::new();
-    if let Some(entrypoint) = entrypoints.first() {
-        commands.push(format!(
-            "symora map file --related-limit 5 -- {}",
-            shell_arg(&entrypoint.file)
-        ));
-    }
-    if let Some(dir) = top_directories.first() {
-        commands.push(format!(
-            "symora pack --tokens 4000 --focus={}",
-            shell_arg(&dir.path)
-        ));
-    }
-    if let Some(entrypoint) = entrypoints.first() {
-        commands.push(format!(
-            "symora symbols --depth 1 -- {}",
-            shell_arg(&entrypoint.file)
-        ));
-    }
-    commands.truncate(3);
-    commands
+fn map_summary_next_commands(entrypoints: &[EntryPointOutput]) -> Vec<String> {
+    let Some(entrypoint) = entrypoints.first() else {
+        return Vec::new();
+    };
+    let file = shell_arg(&entrypoint.file);
+    vec![
+        format!("symora map file --related-limit 5 -- {file}"),
+        format!("symora symbols --depth 1 -- {file}"),
+    ]
 }
 
 #[cfg(test)]

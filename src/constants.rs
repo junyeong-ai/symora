@@ -6,16 +6,8 @@
 
 /// Tuning knobs surfaced as defaults to the user.
 pub mod defaults {
-    /// Token budget for `symora pack`. ~4000 ≈ 1000 LOC of average code,
-    /// which fits comfortably alongside an agent's working context.
-    pub const PACK_TOKENS: usize = 4000;
-
-    /// Cap on top-level symbols per file in a pack response. Prevents a
-    /// single 10k-LOC file from drowning out neighbouring context.
-    pub const PACK_SYMBOLS_PER_FILE: usize = 12;
-
-    /// Token budget for `context --with-bodies` section bodies. Half of
-    /// PACK_TOKENS: a bodies-bearing context response rides alongside the
+    /// Token budget for `context --with-bodies` section bodies. A
+    /// bodies-bearing context response rides alongside the
     /// target/refs/section data the agent already pays for, and ~2000
     /// tokens ≈ 500 LOC — comfortably a dozen typical callee bodies at
     /// depth 1.

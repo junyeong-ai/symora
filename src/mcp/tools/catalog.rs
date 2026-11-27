@@ -1,6 +1,6 @@
 use crate::constants::defaults::{
     CALL_GRAPH_MAX_DEPTH, CONTEXT_BODY_TOKENS, DIFF_IMPACT_MAX_SYMBOLS, IMPACT_DEFAULT_DEPTH,
-    MAP_FILE_DEPTH, MAP_FILE_RELATED_LIMIT, PACK_SYMBOLS_PER_FILE, PACK_TOKENS,
+    MAP_FILE_DEPTH, MAP_FILE_RELATED_LIMIT,
 };
 use crate::mcp::protocol::ToolDefinition;
 
@@ -782,41 +782,6 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ),
             ],
         )),
-        ToolDefinition::read_only(
-            "build_context_pack",
-            "Build a token-budgeted context pack: files ranked from syntax-level import paths \
-                          with top-level signatures fitted to a token budget. This is an \
-                          orientation aid, not a complete dependency graph. Module strings requiring \
-                          unsupported decoding and Rust paths whose file the crate's module tree \
-                          leaves open are omitted. Set focus for a \
-                          known task area. Set shape=\"markdown\" for a \
-                          plain-text view ready to paste into an LLM context window.",
-            schema_object(
-                &[
-                    (
-                        "tokens",
-                        "integer",
-                        &format!("Approximate token budget (default {PACK_TOKENS})"),
-                    ),
-                    (
-                        "focus",
-                        "string",
-                        "Optional file path or substring to bias the ranking",
-                    ),
-                    (
-                        "per_file",
-                        "integer",
-                        &format!("Cap on top-level symbols per file (default {PACK_SYMBOLS_PER_FILE})"),
-                    ),
-                    (
-                        "shape",
-                        "string",
-                        "Output shape: \"json\" (default) or \"markdown\"",
-                    ),
-                ],
-                &[],
-            ),
-        ),
         ToolDefinition::mutating(
             "rename_symbol",
             "LSP rename for the symbol at file:line:column. Returns the affected \

@@ -247,27 +247,6 @@ impl SymbolExtractor {
         })
     }
 
-    pub fn extract_signatures(
-        &self,
-        path: &Path,
-        content: &str,
-        language: Language,
-    ) -> Vec<(Symbol, String)> {
-        let Some(tree) = self.parse(content, language) else {
-            return Vec::new();
-        };
-        let lines = LineStarts::new(content);
-        let read = self.declarations_in(&tree, path, content, language);
-        let declared = read.iter().map(|(node, _)| node.id()).collect();
-        read.into_iter()
-            .filter(|(node, _)| !is_local(*node, &declared))
-            .filter_map(|(_, symbol)| {
-                self.signature_at(&tree, &lines, language, &symbol.location)
-                    .map(|text| (symbol, text))
-            })
-            .collect()
-    }
-
     /// The declarations [`extract`](Self::extract) reads, each with its
     /// signature ([`describe`](Self::describe)), from one parse.
     pub fn extract_with_signatures(
@@ -4649,7 +4628,7 @@ fn extract_name_and_kind(
 /// `.dart_tool/package_config.json` that `pub get` writes), `factory() {}` is
 /// a method named `factory`, which this reads as a constructor. The version is
 /// not read: a file's declarations are read from its own text, which is what
-/// the index and the pack cache key them by.
+/// the index keys them by.
 fn dart_constructor_name(node: Node, content: &str) -> Option<String> {
     let factory = match node.kind() {
         "constructor_signature" | "constant_constructor_signature"

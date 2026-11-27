@@ -16,7 +16,6 @@ pub mod impact;
 pub mod implementations;
 pub mod map;
 pub mod mcp;
-pub mod pack;
 pub mod refs;
 pub mod rename;
 pub mod search;

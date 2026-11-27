@@ -18,7 +18,6 @@ use crate::cli::commands::{
     impact::ImpactArgs,
     implementations::ImplementationsArgs,
     map::{MapArgs, MapCommand},
-    pack::{PackArgs, PackShape},
     refs::RefsArgs,
     rename::RenameArgs,
     search::{SearchArgs, SearchCommand},
@@ -69,7 +68,6 @@ pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<Capture
         "get_impact" => run_get_impact(arguments, app).await,
         "get_diff_impact" => run_diff_impact(arguments, app).await,
         "get_diagnostics" => run_get_diagnostics(arguments, app).await,
-        "build_context_pack" => run_context_pack(arguments, app).await,
         "rename_symbol" => run_rename_symbol(arguments, app).await,
         "list_code_actions" => run_list_code_actions(arguments, app).await,
         "apply_code_action" => run_apply_code_action(arguments, app).await,
@@ -680,42 +678,6 @@ async fn run_get_diagnostics(args: Value, app: &App) -> Result<CapturedOutput> {
     .await
 }
 
-#[derive(Deserialize)]
-struct ContextPackInput {
-    #[serde(default = "default_pack_tokens")]
-    tokens: usize,
-    focus: Option<String>,
-    #[serde(default = "default_pack_per_file")]
-    per_file: usize,
-    #[serde(default)]
-    shape: PackShape,
-}
-
-fn default_pack_tokens() -> usize {
-    defaults::PACK_TOKENS
-}
-
-fn default_pack_per_file() -> usize {
-    defaults::PACK_SYMBOLS_PER_FILE
-}
-
-async fn run_context_pack(args: Value, app: &App) -> Result<CapturedOutput> {
-    let input: ContextPackInput = parse_args(args)?;
-    capture(app, move |a| async move {
-        crate::cli::commands::pack::execute(
-            PackArgs {
-                tokens: input.tokens,
-                focus: input.focus,
-                per_file: input.per_file,
-                shape: input.shape,
-            },
-            &a,
-        )
-        .await
-    })
-    .await
-}
-
 // --- mutation -------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -962,7 +924,6 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
             "with_context",
             "with_suggestions",
         ],
-        "build_context_pack" => &["tokens", "focus", "per_file", "shape"],
         "rename_symbol" => &[
             "file",
             "line",
@@ -1039,7 +1000,6 @@ pub(super) fn deserialize_input(tool: &str, args: Value) -> Option<Result<(), St
         "get_impact" => check::<GetImpactInput>(args),
         "get_diff_impact" => check::<DiffImpactInput>(args),
         "get_diagnostics" => check::<GetDiagnosticsInput>(args),
-        "build_context_pack" => check::<ContextPackInput>(args),
         "rename_symbol" => check::<RenameSymbolInput>(args),
         "list_code_actions" => check::<ListCodeActionsInput>(args),
         "apply_code_action" => check::<ApplyCodeActionInput>(args),

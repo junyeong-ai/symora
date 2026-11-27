@@ -96,7 +96,7 @@ Symora는 저장소의 구조에서 개별 선언과 관계로 탐색 범위를 
 
 ```mermaid
 flowchart LR
-    O["선택적 방향 잡기<br/>pack · map summary"] --> D["이름·문구 찾기<br/>search symbols / content / ast"]
+    O["선택적 방향 잡기<br/>map summary"] --> D["이름·문구 찾기<br/>search symbols / content / ast"]
     D --> I["파일·선언 확인<br/>symbols · map file"]
     K["알고 있는 파일·심볼"] --> I
     I --> X["의미 분석<br/>refs · callers · callees<br/>context · impact"]
@@ -120,7 +120,6 @@ symora map summary
   "root": "/home/dev/shopflow",
   "next_commands": [
     "symora map file --related-limit 5 -- 'src/main.ts'",
-    "symora pack --tokens 4000 --focus='src'",
     "symora symbols --depth 1 -- 'src/main.ts'"
   ],
   "total_files": 84,
@@ -149,7 +148,7 @@ symora map summary
   }
 }
 ```
-> TypeScript 코드 파일 67개 중 49개가 `src`에 있고, `entrypoints`는 파일명·경로에 따른 시작점 후보를 보여 줍니다. 실제 실행 경로는 소스와 설정에서 확인하세요. `languages`는 코드 언어만 세며, JSON 같은 데이터 파일은 `support_files`에 들어갑니다. 더 깊은 브리핑이 필요하면 `symora pack --tokens 4000`이 구문상 import 경로에 따른 PageRank 순위로 정리해 줍니다.
+> TypeScript 코드 파일 67개 중 49개가 `src`에 있고, `entrypoints`는 파일명·경로에 따른 시작점 후보를 보여 줍니다. 실제 실행 경로는 소스와 설정에서 확인하세요. `languages`는 코드 언어만 세며, JSON 같은 데이터 파일은 `support_files`에 들어갑니다.
 
 ### ② 찾기 — 체크아웃은 어디서 처리되지?
 
@@ -319,7 +318,6 @@ symora search symbols AuthUser --path src/auth      # 이 파일·디렉터리�
 symora search symbols 'CheckoutService/processOrder' --body   # 파일을 몰라도 선언의 소스 읽기
 symora search content "async function"      # 순위가 매겨진 내용 검색
 symora search ast '(class_declaration) @c' --lang typescript   # 구조적 AST 매칭
-symora pack --tokens 4000                   # 토큰 예산 기반, PageRank 순위 저장소 브리핑
 
 # 프로젝트 & 파일 개요
 symora map summary                          # 저장소 형태
@@ -380,15 +378,11 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code`와 `message`는 항상 있고, `hint`는 취할 수 있는 다음 조치가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`, `cancelled`. 잘못된 CLI 인자도 같은 형식의 `invalid_argument` 오류로 나옵니다. clap이 출력하는 일반 텍스트 대신 JSON으로 나오므로, 어떤 실패든 stdout 하나만 파싱하면 됩니다. 이 형식을 따르지 않는 경우는 하나입니다. 아무것도 찾지 못한 정상 결과(예: 정의가 없는 위치에서 실행한 `def`)는 exit 0과 함께 `{ "message": … }`로 나옵니다. 부재는 오류가 아니기 때문입니다.
-- **위치는 1부터 셉니다** — 입력과 출력 모두 그렇고, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`)은 컬럼을 생략한 `file:line`(그 줄에 선언된 심볼을 지정하며, 본문 줄이면 그 줄을 감싸는 심볼을 지정) 또는 `file:line:column`을 받습니다. 컬럼을 주면 위치가 정확해집니다. 컬럼이 심볼 이름 위에 있으면 그 심볼을, 그 밖이면 그 자리의 토큰을 가리킵니다. 호출 지점의 토큰은 정의를 따라가 호출된 심볼을 가리키며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 대상과 정확히 같습니다. `def`·`hover`·`typedef`·`rename`은 컬럼을 생략하면 1열로 읽습니다. `edit replace-body`·`insert-before`·`insert-after`·`delete`는 선언만 지정하므로 컬럼이 선언 위에 있어야 합니다. `edit replace`는 문자 범위를 그대로 받으며, 컬럼을 생략하면 1열로 읽습니다. 모든 항목은 자기 위치를 `file`·`line`·`column`으로 평평하게 담습니다(이름이 시작하는 자리로, 다음 질의에 그대로 넘기면 됩니다). 범위는 원본이 밝힌 경우에만 `end_line`(포함)과 `end_column`(제외)을 더하고, 항목과 관련된 두 번째 위치(`call_site`, `definition`)는 같은 형태의 중첩 객체입니다. `map`과 `pack`은 컬럼 없이 줄만 줍니다. `refs`·`context`·`impact`가 돌려주는 `target`도 같은 방식으로 `file`·`line`·`column`을 담습니다.
-- **결과가 불완전하면 숨기지 않고 밝힙니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다. 답이 조회한 소스에 있던 것을 전부 담지 못했다는 뜻이며, 맨 앞의 `hints`가 원인을 밝히고 고칠 방법이 있으면 `next_commands`가 그 명령을 담습니다. 원인이 읽지 못한 경로이면 `map`·`pack`·`search index status`가 `unread_paths`로 그 경로를 직접 지목합니다. 읽을 수 없는 경로는 재빌드해도 읽히지 않으므로 권한부터 확인하세요. `stale`은 인덱스의 최신 여부, `indexing`은 language server의 준비 상태, `incomplete`는 조회한 소스 안에서 열거를 마쳤는지를 나타냅니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 오류는 빠진 기능(서버의 기능이든, Symora가 적용하지 않는 편집 형태든)을 지목하고 대안을 알려 줍니다.
-- **출력 형식**은 stdout이 터미널이면 들여쓴 JSON, 파이프나 파일이면 한 줄 JSON입니다. `--format pretty|compact`로 고정할 수 있습니다. 자체 예산을 밝힌 응답(`budget_tokens`)은 해당 명령의 예산을 적용합니다. 나머지는 `output.max_response_chars`(기본 20,000자, 0은 제한 해제)를 목표로 합니다. 소스 본문은 먼저 통째로 생략하고 `body_omitted: "response_size"`로 표시하며, 선언 정보는 남깁니다. 그래도 넘치면 목록 항목을 줄이되 `count`는 그대로 두고, `truncated`와 `output.max_response_chars`를 지목하는 hint를 붙입니다. 다른 목록의 항목 안에 든 목록(`diff-impact` 행의 `callers` 등)을 그 항목보다 먼저 줄입니다. 고정 메타데이터는 목표를 초과할 수 있습니다. compact 직렬화로 측정하므로 출력 형식이 결과 항목을 바꾸지 않습니다.
-
-`pack --tokens`는 문자 수 기반 추정입니다. 모델별 실제 토큰 수도 아니고, JSON 응답 전체 크기의 상한도 아닙니다.
+- **위치는 1부터 셉니다** — 입력과 출력 모두 그렇고, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`)은 컬럼을 생략한 `file:line`(그 줄에 선언된 심볼을 지정하며, 본문 줄이면 그 줄을 감싸는 심볼을 지정) 또는 `file:line:column`을 받습니다. 컬럼을 주면 위치가 정확해집니다. 컬럼이 심볼 이름 위에 있으면 그 심볼을, 그 밖이면 그 자리의 토큰을 가리킵니다. 호출 지점의 토큰은 정의를 따라가 호출된 심볼을 가리키며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 대상과 정확히 같습니다. `def`·`hover`·`typedef`·`rename`은 컬럼을 생략하면 1열로 읽습니다. `edit replace-body`·`insert-before`·`insert-after`·`delete`는 선언만 지정하므로 컬럼이 선언 위에 있어야 합니다. `edit replace`는 문자 범위를 그대로 받으며, 컬럼을 생략하면 1열로 읽습니다. 모든 항목은 자기 위치를 `file`·`line`·`column`으로 평평하게 담습니다(이름이 시작하는 자리로, 다음 질의에 그대로 넘기면 됩니다). 범위는 원본이 밝힌 경우에만 `end_line`(포함)과 `end_column`(제외)을 더하고, 항목과 관련된 두 번째 위치(`call_site`, `definition`)는 같은 형태의 중첩 객체입니다. `map`은 컬럼 없이 줄만 줍니다. `refs`·`context`·`impact`가 돌려주는 `target`도 같은 방식으로 `file`·`line`·`column`을 담습니다.
+- **결과가 불완전하면 숨기지 않고 밝힙니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다. 답이 조회한 소스에 있던 것을 전부 담지 못했다는 뜻이며, 맨 앞의 `hints`가 원인을 밝히고 고칠 방법이 있으면 `next_commands`가 그 명령을 담습니다. 원인이 읽지 못한 경로이면 `map`·`search index status`가 `unread_paths`로 그 경로를 직접 지목합니다. 읽을 수 없는 경로는 재빌드해도 읽히지 않으므로 권한부터 확인하세요. `stale`은 인덱스의 최신 여부, `indexing`은 language server의 준비 상태, `incomplete`는 조회한 소스 안에서 열거를 마쳤는지를 나타냅니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 오류는 빠진 기능(서버의 기능이든, Symora가 적용하지 않는 편집 형태든)을 지목하고 대안을 알려 줍니다.
+- **출력 형식**은 stdout이 터미널이면 들여쓴 JSON, 파이프나 파일이면 한 줄 JSON입니다. `--format pretty|compact`로 고정할 수 있습니다. 응답은 `output.max_response_chars`(기본 20,000자, 0은 제한 해제)를 목표로 합니다. 소스 본문은 먼저 통째로 생략하고 `body_omitted: "response_size"`로 표시하며, 선언 정보는 남깁니다. 그래도 넘치면 목록 항목을 줄이되 `count`는 그대로 두고, `truncated`와 `output.max_response_chars`를 지목하는 hint를 붙입니다. 다른 목록의 항목 안에 든 목록(`diff-impact` 행의 `callers` 등)을 그 항목보다 먼저 줄입니다. 고정 메타데이터는 목표를 초과할 수 있습니다. compact 직렬화로 측정하므로 출력 형식이 결과 항목을 바꾸지 않습니다.
 
 `context`는 요청받은 본문들에 `--body-tokens`를 대상, 피호출자, 타입 순서로 나눠 씁니다. 각 본문은 통째로 넣거나 통째로 빼며, 예산 때문에 뺀 본문은 `body_omitted: "token_budget"`로 표시합니다.
-
-`pack`은 저장소의 방향을 잡는 도구이며 의존성 분석 도구가 아닙니다. 각 파일의 import 선언을 구문 트리에서 읽고, 그 선언들이 이루는 그래프에 PageRank를 적용해 파일 순위를 매깁니다. 상대 경로 참조는 그 경로에 있는 프로젝트 파일에 연결하며, JavaScript·TypeScript에서는 모듈 해석 규칙이 그 경로에 대해 고르는 파일에 연결합니다. 모듈 이름은 해당 언어와 프로젝트 설정이 해석하는 방식으로만 해석합니다. 근거가 되는 설정은 `tsconfig.json`이나 `jsconfig.json`, JavaScript 워크스페이스와 패키지 자신의 `package.json`, crate의 모듈 트리와 `Cargo.toml`, `go.mod`, `pubspec.yaml`, JVM 소스 세트, Python 프로젝트가 `sys.path`에 올리는 디렉터리이며, 파일 경로의 끝부분이 같다는 이유로 연결하지는 않습니다. 이 규칙으로 프로젝트 파일 하나가 정해지지 않는 참조와 외부 패키지를 가리키는 참조는 연결하지 않으므로, 연결이 없다는 사실이 의존성이 없다는 증거는 아닙니다. `files`의 `hints`는 pack이 import를 읽지 않는 언어와, 프로젝트 설정이나 모듈 구조 때문에 대상이 정해지지 않은 참조를 알려 주며, 읽지 못한 파일은 `unread_paths`에 나옵니다. JavaScript·TypeScript의 CommonJS `require()` 호출과 동적 `import()`는 읽지 않습니다. `--focus`는 일치하는 파일과 그 이웃 파일의 순위를 높이며, 어느 파일과도 맞지 않으면 거부합니다. 언어별 해석 규칙은 [`.claude/rules/import-resolution.md`](.claude/rules/import-resolution.md)에 있습니다.
 
 `lsp.timeout_secs`는 한 명령의 LSP 작업이 공유하는 예산입니다. 서버 시작·요청·재시도가 같은 예산을 소비하고 daemon에도 남은 시간이 전달됩니다. 예산이 다 되더라도 이미 시작한 소스 변경 적용은 중간에 끊지 않습니다.
 
@@ -398,7 +392,7 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 
 ## 검색 인덱스
 
-Symora는 프로젝트마다 디스크에 저장하는 SQLite 인덱스(`.symora/store.db`)를 둡니다. Symora가 `.symora/`에 쓰는 `.gitignore`는 인덱스와 캐시, 잠금 파일을 커밋에서 빼고, 그 안에 둔 `config.toml`과 `ignore`는 커밋할 수 있게 남깁니다.
+Symora는 프로젝트마다 디스크에 저장하는 SQLite 인덱스(`.symora/store.db`)를 둡니다. Symora가 `.symora/`에 쓰는 `.gitignore`는 인덱스와 잠금 파일을 커밋에서 빼고, 그 안에 둔 `config.toml`과 `ignore`는 커밋할 수 있게 남깁니다.
 
 인덱스는 마지막 빌드의 스냅샷입니다. 최신성 검사는 파일 크기 정책과 경로·크기·수정 시각을 비교하므로, 이 값들이 그대로인 변경은 검사에 드러나지 않습니다. 그런 변경은 재빌드해야 반영됩니다. 목록의 `stale` 플래그는 빌드 이후 바뀐 파일에서 읽은 행이 있다는 뜻이며, 빌드가 보지 못한 새 파일은 어떤 행으로도 드러나지 않습니다. 인덱스가 답한 결과에는 빈 결과를 포함해 빌드 이후 파일이 바뀐 언어를 지목하는 최신성 `hints`가 붙고, `next_commands`에 `symora search index build`가 담깁니다.
 
@@ -533,7 +527,7 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 - `symora setup skill`은 바이너리에 내장된 스킬을 네트워크 없이 `~/.claude/skills/symora`에 설치합니다. 명시적인 `--git-ref`는 지정한 소스만 사용하며 실패하면 다른 버전으로 대체하지 않습니다.
 - `symora mcp serve`는 MCP 도구의 사용 순서, 결과의 한계, 오류 대응을 설명하는 instructions를 제공합니다. 연결된 클라이언트는 자신이 지원하는 프로토콜 흐름으로 이 instructions를 받습니다.
 
-파일·선언을 알고 있다면 `symbols`, `context`, `refs`, `impact`로 바로 조사하세요. 저장소 방향 파악에는 `map summary`와 `pack`을 선택적으로 사용합니다. 목록 응답은 공통 형태를 쓰고, 위치는 1부터 세며, 잘못된 CLI 인자를 포함한 명령 실패는 구조화된 `{code, message, hint}`와 0이 아닌 종료 코드로 전달됩니다.
+파일·선언을 알고 있다면 `symbols`, `context`, `refs`, `impact`로 바로 조사하세요. 저장소 방향 파악에는 `map summary`를 선택적으로 사용합니다. 목록 응답은 공통 형태를 쓰고, 위치는 1부터 세며, 잘못된 CLI 인자를 포함한 명령 실패는 구조화된 `{code, message, hint}`와 0이 아닌 종료 코드로 전달됩니다.
 
 ---
 

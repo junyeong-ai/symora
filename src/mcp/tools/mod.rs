@@ -87,8 +87,7 @@ pub async fn dispatch(
     let captured = handlers::dispatch(name, arguments, app)
         .await
         .map_err(OutputError::from)?;
-    // Single JSON object bodies double as `structuredContent`; text shapes
-    // (e.g. pack --shape markdown) stay text-only.
+    // A body that is one JSON object doubles as `structuredContent`.
     let structured = serde_json::from_str::<Value>(&captured.body)
         .ok()
         .filter(Value::is_object);
@@ -268,7 +267,6 @@ mod tests {
             "get_impact",
             "get_diff_impact",
             "get_diagnostics",
-            "build_context_pack",
             "rename_symbol",
             "list_code_actions",
             "apply_code_action",
@@ -578,17 +576,12 @@ mod tests {
             let props = tool.input_schema["properties"].as_object().unwrap();
             let mut args = serde_json::Map::new();
             for (name, schema) in props {
-                let value = match (tool.name, name.as_str()) {
-                    // Enum-valued string: an arbitrary dummy string is not
-                    // a variant, so use one.
-                    ("build_context_pack", "shape") => json!("json"),
-                    _ => match schema["type"].as_str().unwrap() {
-                        "string" => json!("dummy"),
-                        "integer" => json!(1),
-                        "boolean" => json!(true),
-                        "array" => json!([]),
-                        other => panic!("{}.{name}: unhandled property type {other}", tool.name),
-                    },
+                let value = match schema["type"].as_str().unwrap() {
+                    "string" => json!("dummy"),
+                    "integer" => json!(1),
+                    "boolean" => json!(true),
+                    "array" => json!([]),
+                    other => panic!("{}.{name}: unhandled property type {other}", tool.name),
                 };
                 args.insert(name.clone(), value);
             }

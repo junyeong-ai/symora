@@ -2,7 +2,7 @@
 //!
 //! These tests run the released binary against the Symora repo itself —
 //! every subcommand must parse, every `--help` must print, and the
-//! LSP-less commands (`map`, `pack`) must emit valid JSON / markdown.
+//! LSP-less `map` must emit valid JSON.
 //! They give us a fast regression net for clap dispatch, the MCP stdio
 //! loop, and the JSON contract without requiring a real LSP server.
 
@@ -33,7 +33,6 @@ const ALL_SUBCOMMANDS: &[&str] = &[
     "diagnostics",
     "search",
     "map",
-    "pack",
     "edit",
     "rename",
     "actions",
@@ -125,49 +124,6 @@ fn map_summary_emits_valid_json_with_compact_format() {
         json["total_files"].as_u64().unwrap_or(0) > 0,
         "map summary should discover files in this repo"
     );
-}
-
-/// A TypeScript project of two files, one importing the other, for `pack`
-/// to rank.
-#[cfg(unix)]
-fn pack_project() -> tempfile::TempDir {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("src")).unwrap();
-    std::fs::write(
-        root.path().join("src/a.ts"),
-        "import { b } from \"./b\";\nexport const a = b;\n",
-    )
-    .unwrap();
-    std::fs::write(root.path().join("src/b.ts"), "export const b = 1;\n").unwrap();
-    root
-}
-
-#[cfg(unix)]
-#[test]
-fn pack_emits_valid_json_with_focus_bias() {
-    let root = pack_project();
-    let json = json_ok(
-        root.path(),
-        &[
-            "--format", "compact", "pack", "--tokens", "500", "--focus", "src",
-        ],
-    );
-    assert_eq!(json["focus"], "src");
-    assert!(json["files"]["count"].as_u64().unwrap_or(0) > 0);
-    assert_eq!(json["budget_tokens"], 500);
-}
-
-#[cfg(unix)]
-#[test]
-fn pack_markdown_shape_emits_plain_text_header() {
-    let root = pack_project();
-    let out = run_in(
-        root.path(),
-        &["pack", "--tokens", "500", "--shape", "markdown"],
-    );
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.starts_with("# Symora context pack"));
 }
 
 #[test]
@@ -326,7 +282,6 @@ fn mcp_tools_list_advertises_pack_and_search() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     for required in [
-        "build_context_pack",
         "search_symbols",
         "get_impact",
         "rename_symbol",
@@ -905,7 +860,6 @@ fn a_file_that_is_not_text_is_outside_the_domain_rather_than_a_hole() {
             "-l",
             "rust",
         ][..],
-        &["--format", "compact", "pack", "--tokens", "500"][..],
     ] {
         let json = json_ok(root, args);
         assert!(
@@ -1224,40 +1178,6 @@ fn an_unlimited_file_size_still_allows_grammar_based_symbol_reads() {
         ],
     );
     assert_eq!(syntax["count"], 1);
-}
-
-#[test]
-fn context_packs_honor_the_configured_file_size_limit() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join(".symora")).unwrap();
-    std::fs::write(dir.path().join("small.rs"), "pub fn small() {}\n").unwrap();
-    for (name, size) in [("large", 300_000), ("over_limit", 1_100_000)] {
-        std::fs::write(
-            dir.path().join(format!("{name}.rs")),
-            format!("// {}\npub fn {name}() {{}}\n", "x".repeat(size)),
-        )
-        .unwrap();
-    }
-    for (limit_mb, expected_files) in [(1, 2), (0, 3)] {
-        std::fs::write(
-            dir.path().join(".symora/config.toml"),
-            format!("[search]\nmax_file_size_mb = {limit_mb}\n"),
-        )
-        .unwrap();
-        let answer = json_ok(
-            dir.path(),
-            &["pack", "--tokens", "1000", "--focus", "large.rs"],
-        );
-        assert_eq!(answer["graph_size"], expected_files, "{answer}");
-        assert!(
-            answer["files"]["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|file| file["path"] == "large.rs"),
-            "{answer}"
-        );
-    }
 }
 
 /// A mutation addresses a declaration through the same reader every other

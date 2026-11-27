@@ -199,7 +199,7 @@ impl OutputContext {
         // Source bodies and Section items may be omitted; configuration
         // failures remain visible in the fixed response envelope.
         self.inject_config_errors(&mut response);
-        if self.max_response_chars > 0 && !crate::cli::response::declares_budget(&response) {
+        if self.max_response_chars > 0 {
             // Measure compact JSON so display format does not change the items.
             let measure = |value: &serde_json::Value| -> usize {
                 serde_json::to_string(value)
@@ -278,18 +278,6 @@ impl OutputContext {
     /// `App` into the command future, then reports `isError` from this).
     pub(crate) fn errored_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
         Arc::clone(&self.errored)
-    }
-
-    /// Emit raw text output (used by markdown / plain-text shapes that bypass
-    /// the JSON contract — pack's `--shape markdown` is the canonical case).
-    /// `quiet` still suppresses output.
-    pub fn print_text(&self, text: &str) {
-        if self.options.quiet {
-            return;
-        }
-        for line in text.split_inclusive('\n') {
-            self.sink.write_line(line.trim_end_matches('\n'));
-        }
     }
 
     fn emit(&self, value: &serde_json::Value) {

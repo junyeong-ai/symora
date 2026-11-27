@@ -4,11 +4,11 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-/// Everything symora writes into `.symora` rebuilds from source — the index,
-/// its caches and their locks — while the configuration and ignore rules a
-/// project keeps there are its own to commit.
+/// Everything symora writes into `.symora` rebuilds from source — the index
+/// and its locks — while the configuration and ignore rules a project keeps
+/// there are its own to commit.
 const GITIGNORE: &str = "\
-# Written by symora: the index, caches and locks here rebuild from source.
+# Written by symora: the index and locks here rebuild from source.
 *
 !config.toml
 !ignore

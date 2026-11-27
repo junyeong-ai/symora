@@ -235,19 +235,6 @@ impl<T> Section<T> {
     }
 }
 
-/// Whether the response states a content budget of its own (`budget_tokens`),
-/// which the command already fitted its answer to.
-///
-/// Responses without a command budget use list fitting. Applying that
-/// on top of a named budget contradicts the caller twice over: it returns less
-/// than was asked for, and it leaves the response's own accounting of what it
-/// spent describing items that were then dropped.
-pub fn declares_budget(value: &serde_json::Value) -> bool {
-    value
-        .get("budget_tokens")
-        .is_some_and(serde_json::Value::is_number)
-}
-
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BodyOmission {
@@ -373,7 +360,7 @@ fn recount_bodies(value: &mut serde_json::Value) {
 /// detection is structural (count + showing + items with
 /// `items.len() == showing`, non-empty) and recursive, because commands
 /// flatten their Section to the top level (`refs`, `usage`) or nest it
-/// under a key (`map file`, `context`, `pack`) — by the time the response
+/// under a key (`map file`, `context`) — by the time the response
 /// reaches the output layer, only the shape identifies it.
 pub fn fit_to_char_budget(
     value: &mut serde_json::Value,
@@ -894,30 +881,6 @@ mod tests {
                 .iter()
                 .any(|h| h.as_str().unwrap().contains("output.max_response_chars"))
         );
-    }
-
-    /// A command that fitted its answer to a budget the caller named has
-    /// already answered the question the ceiling asks. Re-fitting it returns
-    /// less than was asked for and leaves the response's own accounting
-    /// describing items it no longer carries.
-    #[test]
-    fn a_declared_budget_is_not_re_fitted() {
-        let budgeted = serde_json::json!({
-            "budget_tokens": 16000,
-            "estimated_tokens": 15690,
-            "files": { "count": 3, "showing": 3, "items": ["a", "b", "c"] }
-        });
-        assert!(declares_budget(&budgeted));
-
-        let unbudgeted = serde_json::json!({
-            "count": 3, "showing": 3, "items": ["a", "b", "c"]
-        });
-        assert!(!declares_budget(&unbudgeted));
-
-        let mut value = unbudgeted.clone();
-        assert!(fit_to_char_budget(&mut value, 20, &|v| {
-            serde_json::to_string(v).unwrap().chars().count()
-        }));
     }
 
     /// Fields that speak for the items go with them. `stale` describes the

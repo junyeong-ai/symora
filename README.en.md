@@ -96,7 +96,7 @@ Symora is designed to narrow exploration from repository orientation to specific
 
 ```mermaid
 flowchart LR
-    O["Optional orientation<br/>pack · map summary"] --> D["Discover names or text<br/>search symbols / content / ast"]
+    O["Optional orientation<br/>map summary"] --> D["Discover names or text<br/>search symbols / content / ast"]
     D --> I["Inspect declarations<br/>symbols · map file"]
     K["Known file or symbol"] --> I
     I --> X["Semantic follow-up<br/>refs · callers · callees<br/>context · impact"]
@@ -120,7 +120,6 @@ symora map summary
   "root": "/home/dev/shopflow",
   "next_commands": [
     "symora map file --related-limit 5 -- 'src/main.ts'",
-    "symora pack --tokens 4000 --focus='src'",
     "symora symbols --depth 1 -- 'src/main.ts'"
   ],
   "total_files": 84,
@@ -149,7 +148,7 @@ symora map summary
   }
 }
 ```
-> 49 of the 67 TypeScript code files live under `src`. `entrypoints` suggests starting points from file names and paths; confirm execution paths in source and configuration. `languages` counts code languages only; data files such as JSON are `support_files`. `symora pack --tokens 4000` gives a deeper brief ranked by PageRank over syntax-derived import paths when you want one.
+> 49 of the 67 TypeScript code files live under `src`. `entrypoints` suggests starting points from file names and paths; confirm execution paths in source and configuration. `languages` counts code languages only; data files such as JSON are `support_files`.
 
 ### ② Discover — where is checkout handled?
 
@@ -319,7 +318,6 @@ symora search symbols AuthUser --path src/auth      # only symbols declared in t
 symora search symbols 'CheckoutService/processOrder' --body   # a declaration's source without knowing its file
 symora search content "async function"      # ranked full-text search
 symora search ast '(class_declaration) @c' --lang typescript   # structural AST match
-symora pack --tokens 4000                   # token-budgeted, PageRank-ranked repo brief
 
 # Project & file overview
 symora map summary                          # repo shape
@@ -380,15 +378,11 @@ Every command is built for machine parsing, and the rules are stable:
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code` and `message` are always present; `hint` only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`, `cancelled`. A bad CLI argument arrives in the same envelope — `invalid_argument`, as JSON rather than clap's prose — so parsing one stream, stdout, covers every failure. One thing sits outside: a clean "nothing found" (e.g. `def` on a position with no definition) is `{ "message": … }` at exit 0 — absence is not an error.
-- **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, `typedef`, and `rename` read an omitted column as column 1. `edit replace-body`, `insert-before`, `insert-after` and `delete` address declarations only, so a column must sit on one; `edit replace` takes a raw range and reads an omitted column as column 1. Every item states its own position flat as `file`, `line`, and `column` (the name's start, ready for the next query); a span adds `end_line` (inclusive) and `end_column` (exclusive) only where the source states them, and a second, related position (`call_site`, `definition`) is a nested object of that same shape. `map` and `pack` give lines without columns. The `target` that `refs`, `context`, and `impact` echo carries `file`, `line`, and `column` the same way.
-- **Degradation is disclosed, never hidden.** `incomplete: true` means the count itself is a lower bound — the answer does not hold everything its own sources held; the leading `hints` name the cause, and `next_commands` carries the fix where one exists. When the cause is a path that could not be read, `map`, `pack`, and `search index status` name those paths directly in `unread_paths` — check their permissions, since no rebuild reaches a path nothing can read. `stale` describes index currency, `indexing` qualifies language-server readiness, and `incomplete` describes enumeration within the consulted sources. `coverage_gaps` lists languages that couldn't be searched, and an `unsupported` error names the missing capability — the server's, or an edit shape Symora does not apply — and points to an alternative.
-- **Output format** is indented JSON when stdout is a terminal and single-line JSON when it is a pipe or file; `--format pretty|compact` fixes it. Responses declaring `budget_tokens` use their command budget. Other responses target `output.max_response_chars` (default 20,000; 0 disables). Source bodies are omitted whole before list items, with `body_omitted: "response_size"`, preserving declaration identity. A list cut to fit keeps its `count`, sets `truncated`, and adds a hint naming `output.max_response_chars`; a list inside another list's items, such as a `diff-impact` row's `callers`, is cut before those items. Fixed metadata may exceed the target. Compact serialization determines fitting regardless of display format.
-
-`pack --tokens` uses a character-based approximation. It does not bound model-specific token counts or the entire JSON envelope.
+- **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, `typedef`, and `rename` read an omitted column as column 1. `edit replace-body`, `insert-before`, `insert-after` and `delete` address declarations only, so a column must sit on one; `edit replace` takes a raw range and reads an omitted column as column 1. Every item states its own position flat as `file`, `line`, and `column` (the name's start, ready for the next query); a span adds `end_line` (inclusive) and `end_column` (exclusive) only where the source states them, and a second, related position (`call_site`, `definition`) is a nested object of that same shape. `map` gives lines without columns. The `target` that `refs`, `context`, and `impact` echo carries `file`, `line`, and `column` the same way.
+- **Degradation is disclosed, never hidden.** `incomplete: true` means the count itself is a lower bound — the answer does not hold everything its own sources held; the leading `hints` name the cause, and `next_commands` carries the fix where one exists. When the cause is a path that could not be read, `map` and `search index status` name those paths directly in `unread_paths` — check their permissions, since no rebuild reaches a path nothing can read. `stale` describes index currency, `indexing` qualifies language-server readiness, and `incomplete` describes enumeration within the consulted sources. `coverage_gaps` lists languages that couldn't be searched, and an `unsupported` error names the missing capability — the server's, or an edit shape Symora does not apply — and points to an alternative.
+- **Output format** is indented JSON when stdout is a terminal and single-line JSON when it is a pipe or file; `--format pretty|compact` fixes it. Responses target `output.max_response_chars` (default 20,000; 0 disables). Source bodies are omitted whole before list items, with `body_omitted: "response_size"`, preserving declaration identity. A list cut to fit keeps its `count`, sets `truncated`, and adds a hint naming `output.max_response_chars`; a list inside another list's items, such as a `diff-impact` row's `callers`, is cut before those items. Fixed metadata may exceed the target. Compact serialization determines fitting regardless of display format.
 
 `context` shares `--body-tokens` among the bodies it was asked for, target first, then callees, then types. Each body is included whole or left out, and `body_omitted: "token_budget"` marks one left out.
-
-`pack` is orientation, not dependency analysis. It reads each file's import declarations from its syntax tree and ranks files by PageRank over the graph they form. A relative reference resolves to the project file at that path, or in JavaScript and TypeScript to the file their module resolution takes there. A module name resolves only as its language and the project's own configuration resolve it: `tsconfig.json` or `jsconfig.json`, the JavaScript workspace and a package's own `package.json`, the crate's module tree and `Cargo.toml`, `go.mod`, `pubspec.yaml`, JVM source sets, the directories a Python project puts on `sys.path`. It never resolves by matching the end of a file path. A reference those rules do not settle on one project file, and one into an external package, forms no edge, so a missing edge does not show that no dependency exists. The `hints` in `files` name the languages whose imports pack does not read and the references a project's configuration or module layout leaves undetermined; `unread_paths` names files it could not read. In JavaScript and TypeScript, CommonJS `require()` calls and dynamic `import()` are not read. `--focus` raises the rank of matching files and their neighbours; a focus that matches no file is refused. The resolution rules for each language are in [`.claude/rules/import-resolution.md`](.claude/rules/import-resolution.md).
 
 `lsp.timeout_secs` is the shared LSP work budget for one command. Startup, requests, and retries consume it together, and daemon RPCs carry the remaining allowance. It does not interrupt source application midway.
 
@@ -398,7 +392,7 @@ Every command is built for machine parsing, and the rules are stable:
 
 ## Search index
 
-Symora keeps a persistent SQLite index at `.symora/store.db` in each project. The `.gitignore` it writes in `.symora/` keeps the index, its caches and locks out of commits, while a `config.toml` or `ignore` kept there stays committable.
+Symora keeps a persistent SQLite index at `.symora/store.db` in each project. The `.gitignore` it writes in `.symora/` keeps the index and its locks out of commits, while a `config.toml` or `ignore` kept there stays committable.
 
 The index is a snapshot of the last build. Currency checks compare the file-size policy, paths, sizes, and modification times; rebuild after changes preserving that metadata. A list's `stale` flag marks rows read from files changed since the build; no row can reveal a file the build never saw. Results the index answered, empty ones included, also carry currency hints naming the languages whose files changed since the build, with `symora search index build` in `next_commands`.
 
@@ -533,7 +527,7 @@ The agent-facing playbook ships *with the tool*, not in this README, so it stays
 - `symora setup skill` installs the skill bundled into the binary into `~/.claude/skills/symora`, without network access. An explicit `--git-ref` uses only that source and never falls back to another version on failure.
 - `symora mcp serve` exposes instructions for tool sequencing, result limits and error recovery through the metadata flow supported by the connected client.
 
-For a known file or declaration, go directly to `symbols`, `context`, `refs`, or `impact`. Use `map summary` and `pack` when repository orientation helps. List responses share one shape; positions are 1-indexed; command failures, including bad CLI arguments, are structured `{code, message, hint}` at non-zero exit.
+For a known file or declaration, go directly to `symbols`, `context`, `refs`, or `impact`. Use `map summary` when repository orientation helps. List responses share one shape; positions are 1-indexed; command failures, including bad CLI arguments, are structured `{code, message, hint}` at non-zero exit.
 
 ---
 

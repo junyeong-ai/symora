@@ -9,8 +9,6 @@ pub mod daemon_store;
 pub mod dist;
 pub mod imports;
 pub mod lsp;
-pub mod pack;
-mod pack_cache;
 pub(crate) mod state_dir;
 pub mod store;
 pub mod symbols;
