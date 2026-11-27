@@ -112,12 +112,18 @@ pub(super) async fn goto_type_definition(
     file: &Path,
     line: u32,
     column: u32,
-) -> Result<Indexed<Option<Location>>, LspError> {
+) -> Result<Indexed<Vec<Location>>, LspError> {
     let named = goto_locations(service, file, line, column, "textDocument/typeDefinition").await?;
-    Ok(Indexed::new(
-        named.data.into_iter().next().map(|(_, location)| location),
-        named.indexing,
-    ))
+    // A composite type names one definition per type it is built from
+    // (rust-analyzer answers `Vec<Foo>` with `Vec`, `Foo` and `Global`), so
+    // the first alone would drop the project's own type behind a library's.
+    let mut types: Vec<Location> = Vec::with_capacity(named.data.len());
+    for (_, location) in named.data {
+        if !types.contains(&location) {
+            types.push(location);
+        }
+    }
+    Ok(Indexed::new(types, named.indexing))
 }
 
 /// Every location a navigation request names at a position, in the server's

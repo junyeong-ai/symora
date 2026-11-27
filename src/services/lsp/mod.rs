@@ -67,12 +67,15 @@ pub trait LspService: Send + Sync {
         column: u32,
     ) -> Result<Indexed<Option<Definition>>, LspError>;
 
+    /// Every type definition the server names at a position, in its order
+    /// and without repeats: `Vec<Foo>` names both `Vec` and `Foo`, and a
+    /// union one type per arm.
     async fn goto_type_definition(
         &self,
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Indexed<Option<Location>>, LspError>;
+    ) -> Result<Indexed<Vec<Location>>, LspError>;
 
     async fn find_implementations(
         &self,

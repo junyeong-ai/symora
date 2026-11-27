@@ -339,7 +339,8 @@ symora callers src/services/checkout.ts:48          # 들어오는 호출
 symora callees src/services/checkout.ts:48          # 나가는 호출
 symora callees src/services/checkout.ts:48 --depth 3            # 도달 가능 집합
 symora callees src/services/checkout.ts:48 --to src/db/orders.ts:12   # 최단 호출 체인
-symora typedef … / implementations … / supertypes … / subtypes …
+symora typedef src/services/checkout.ts:48:9       # 그 자리의 타입이 가리키는 모든 타입 (Vec<Order> → Vec, Order)
+symora implementations … / supertypes … / subtypes …
 
 # 컨텍스트 & 영향 (LSP)
 symora context src/services/checkout.ts:48 --all    # 본문 + 참조 + 호출자/피호출자 + 타입 + 테스트

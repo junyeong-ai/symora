@@ -741,7 +741,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Indexed<Option<Location>>, LspError> {
+        ) -> Result<Indexed<Vec<Location>>, LspError> {
             unreachable!()
         }
         async fn find_implementations(

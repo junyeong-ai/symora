@@ -75,6 +75,7 @@ fn config_to_json(config: &SymoraConfig) -> serde_json::Value {
             "auto_restart": config.lsp.auto_restart,
             "refs_limit": config.lsp.refs_limit,
             "impl_limit": config.lsp.impl_limit,
+            "typedef_limit": config.lsp.typedef_limit,
             "symbol_limit": config.lsp.symbol_limit,
             "calls_limit": config.lsp.calls_limit,
             "type_hierarchy_limit": config.lsp.type_hierarchy_limit,

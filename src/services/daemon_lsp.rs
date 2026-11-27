@@ -8,7 +8,8 @@ use crate::daemon::DaemonClient;
 use crate::daemon::wire::{
     ApplyActionResponse, CallsResponse, CodeActionsResponse, DefinitionResponse,
     DiagnosticsResponse, HoverResponse, ImplementationsResponse, PrepareRenameResponse,
-    ReferencesResponse, RenameResponse, SymbolsResponse, TypeHierarchyResponse,
+    ReferencesResponse, RenameResponse, SymbolsResponse, TypeDefinitionsResponse,
+    TypeHierarchyResponse,
 };
 use crate::error::LspError;
 use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity, DiagnosticTag, DiagnosticsReport};
@@ -102,10 +103,19 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Indexed<Option<Location>>, LspError> {
+    ) -> Result<Indexed<Vec<Location>>, LspError> {
         let result = self.client.goto_type_definition(file, line, column).await?;
 
-        Ok(parse::<DefinitionResponse>(result)?.into_type_definition())
+        let response: TypeDefinitionsResponse = parse(result)?;
+
+        Ok(Indexed::new(
+            response
+                .type_definitions
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            response.indexing,
+        ))
     }
 
     async fn find_implementations(

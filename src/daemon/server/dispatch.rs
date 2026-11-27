@@ -119,7 +119,7 @@ async fn dispatch_project(
 
         methods::GOTO_TYPE_DEFINITION => {
             handle_position(params, Arc::clone(&ctx), |ctx, f, l, c| async move {
-                to_json(wire::DefinitionResponse::from_type_definition(
+                to_json(wire::TypeDefinitionsResponse::from(
                     ctx.lsp.goto_type_definition(&f, l, c).await?,
                 ))
             })

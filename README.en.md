@@ -339,7 +339,8 @@ symora callers src/services/checkout.ts:48          # incoming calls
 symora callees src/services/checkout.ts:48          # outgoing calls
 symora callees src/services/checkout.ts:48 --depth 3            # reachable set
 symora callees src/services/checkout.ts:48 --to src/db/orders.ts:12   # shortest call chain
-symora typedef … / implementations … / supertypes … / subtypes …
+symora typedef src/services/checkout.ts:48:9       # every type the server names there (Vec<Order> → Vec, Order)
+symora implementations … / supertypes … / subtypes …
 
 # Context & impact (LSP)
 symora context src/services/checkout.ts:48 --all    # body + refs + callers + callees + types + tests

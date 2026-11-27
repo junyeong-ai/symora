@@ -1,0 +1,20 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "count": 2,
+  "showing": 2,
+  "items": [
+    {
+      "file": "src/main.rs",
+      "line": 2,
+      "column": 6
+    },
+    {
+      "file": "src/main.rs",
+      "line": 3,
+      "column": 11
+    }
+  ]
+}

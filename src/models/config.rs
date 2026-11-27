@@ -66,6 +66,9 @@ pub struct LspConfig {
     #[serde(default = "defaults::impl_limit")]
     pub impl_limit: usize,
 
+    #[serde(default = "defaults::typedef_limit")]
+    pub typedef_limit: usize,
+
     #[serde(default = "defaults::symbol_limit")]
     pub symbol_limit: usize,
 
@@ -107,6 +110,7 @@ impl Default for LspConfig {
             auto_restart: defaults::auto_restart(),
             refs_limit: defaults::refs_limit(),
             impl_limit: defaults::impl_limit(),
+            typedef_limit: defaults::typedef_limit(),
             symbol_limit: defaults::symbol_limit(),
             calls_limit: defaults::calls_limit(),
             type_hierarchy_limit: defaults::type_hierarchy_limit(),
@@ -164,6 +168,9 @@ pub(crate) mod defaults {
         500
     }
     pub fn impl_limit() -> usize {
+        100
+    }
+    pub fn typedef_limit() -> usize {
         100
     }
     pub fn symbol_limit() -> usize {

@@ -279,7 +279,7 @@ pub(crate) async fn anchor_of(
 }
 
 /// Execute a command that returns `Option<T>` from an LSP call.
-/// Used by def, typedef, hover, signature.
+/// Used by def and hover.
 pub async fn execute_optional<T, O, F, Fut, M, N>(
     app: &App,
     loc: LocationArg,

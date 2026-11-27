@@ -159,7 +159,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Indexed<Option<Location>>, LspError> {
+    ) -> Result<Indexed<Vec<Location>>, LspError> {
         navigation::goto_type_definition(self, file, line, column).await
     }
 

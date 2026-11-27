@@ -240,6 +240,7 @@ struct RawLspConfig {
     auto_restart: Option<bool>,
     refs_limit: Option<usize>,
     impl_limit: Option<usize>,
+    typedef_limit: Option<usize>,
     symbol_limit: Option<usize>,
     calls_limit: Option<usize>,
     type_hierarchy_limit: Option<usize>,
@@ -308,6 +309,7 @@ fn merge_raw_lsp(base: RawLspConfig, overlay: RawLspConfig) -> RawLspConfig {
         auto_restart: overlay.auto_restart.or(base.auto_restart),
         refs_limit: overlay.refs_limit.or(base.refs_limit),
         impl_limit: overlay.impl_limit.or(base.impl_limit),
+        typedef_limit: overlay.typedef_limit.or(base.typedef_limit),
         symbol_limit: overlay.symbol_limit.or(base.symbol_limit),
         calls_limit: overlay.calls_limit.or(base.calls_limit),
         type_hierarchy_limit: overlay.type_hierarchy_limit.or(base.type_hierarchy_limit),
@@ -369,6 +371,10 @@ fn resolve_config(raw: RawSymoraConfig, ignored_keys: Vec<String>) -> SymoraConf
             auto_restart: raw.lsp.auto_restart.unwrap_or_else(defaults::auto_restart),
             refs_limit: raw.lsp.refs_limit.unwrap_or_else(defaults::refs_limit),
             impl_limit: raw.lsp.impl_limit.unwrap_or_else(defaults::impl_limit),
+            typedef_limit: raw
+                .lsp
+                .typedef_limit
+                .unwrap_or_else(defaults::typedef_limit),
             symbol_limit: raw.lsp.symbol_limit.unwrap_or_else(defaults::symbol_limit),
             calls_limit: raw.lsp.calls_limit.unwrap_or_else(defaults::calls_limit),
             type_hierarchy_limit: raw

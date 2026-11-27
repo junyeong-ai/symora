@@ -150,7 +150,7 @@ pub enum Commands {
     Def(DefArgs),
     /// Find all references
     Refs(RefsArgs),
-    /// Go to type definition
+    /// List every type definition the type at a position names
     Typedef(TypedefArgs),
     /// Find implementations
     Implementations(ImplementationsArgs),

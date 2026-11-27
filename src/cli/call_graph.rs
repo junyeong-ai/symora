@@ -384,7 +384,7 @@ pub(crate) mod test_support {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Indexed<Option<Location>>, LspError> {
+        ) -> Result<Indexed<Vec<Location>>, LspError> {
             unreachable!()
         }
         async fn hover(

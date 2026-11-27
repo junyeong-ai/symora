@@ -488,8 +488,9 @@ async fn fetch_types(
     root: &Path,
 ) -> Section<TypeInfoOutput> {
     match lsp.goto_type_definition(file, line, column).await {
-        Ok(answer) => match answer.data {
-            Some(type_loc) => {
+        Ok(answer) => {
+            let mut items = Vec::with_capacity(answer.data.len());
+            for type_loc in &answer.data {
                 let type_symbols = lsp
                     .find_symbols(&type_loc.file, FindSymbolsOptions::default())
                     .await
@@ -505,22 +506,21 @@ async fn fetch_types(
                 .or_else(|| {
                     find_symbol_at_position(&type_symbols, type_loc.line, Some(type_loc.column))
                 });
-                let items = vec![TypeInfoOutput {
+                items.push(TypeInfoOutput {
                     name: type_sym
                         .map(|s| s.name.clone())
                         .unwrap_or_else(|| "unknown".to_string()),
                     kind: type_sym
                         .map(|s| s.kind.to_string())
                         .unwrap_or_else(|| "type".to_string()),
-                    location: LocationOutput::from_location(&type_loc, root),
+                    location: LocationOutput::from_location(type_loc, root),
                     detail: None,
                     body: None,
                     body_omitted: None,
-                }];
-                Section::new(items).with_indexing(answer.indexing)
+                });
             }
-            None => Section::new(vec![]).with_indexing(answer.indexing),
-        },
+            Section::new(items).with_indexing(answer.indexing)
+        }
         Err(e) => Section::error(format_type_error(&e.to_string(), file, line, column)),
     }
 }
@@ -721,7 +721,7 @@ mod tests {
     /// `apply_section_bodies` and panics loudly if that ever changes.
     struct BodyLookupStub {
         symbols_by_file: HashMap<PathBuf, Vec<Symbol>>,
-        type_definition: Option<Location>,
+        type_definitions: Vec<Location>,
         symbol_requests: std::sync::Mutex<Vec<PathBuf>>,
     }
 
@@ -779,8 +779,8 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Indexed<Option<Location>>, LspError> {
-            Ok(Indexed::complete(self.type_definition.clone()))
+        ) -> Result<Indexed<Vec<Location>>, LspError> {
+            Ok(Indexed::complete(self.type_definitions.clone()))
         }
         async fn find_implementations(
             &self,
@@ -914,7 +914,7 @@ mod tests {
                 .into_iter()
                 .map(|(file, syms)| (PathBuf::from(file), syms))
                 .collect(),
-            type_definition: None,
+            type_definitions: Vec::new(),
             symbol_requests: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -934,7 +934,7 @@ mod tests {
             Location::full(models.to_path_buf(), 4, 26, 4, 26, 4, 36).with_name_end(4, 28),
         )]);
         let mut stub = stub_with(vec![("/repo/src/models.ts", vec![order])]);
-        stub.type_definition = Some(Location::point(models.to_path_buf(), 4, 18));
+        stub.type_definitions = vec![Location::point(models.to_path_buf(), 4, 18)];
 
         let section = fetch_types(
             &stub,

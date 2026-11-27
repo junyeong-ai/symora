@@ -398,6 +398,24 @@ fn definition_output_absence_under_degraded_indexing() {
     assert_json_snapshot!(out);
 }
 
+/// `typedef` emits the shared list shape `implementations` emits: a
+/// composite type names one location per type it is built from.
+#[test]
+fn type_definitions_section_lists_every_location() {
+    let out = Section::new(vec![sample_location(2, 6), sample_location(3, 11)]);
+    assert_json_snapshot!(out);
+}
+
+/// An empty type-definition list while the readiness wait ran out carries
+/// the marker and no "not found" message, as an empty `implementations` list
+/// does in that state: it is a lower bound, not an absence.
+#[test]
+fn type_definitions_section_empty_under_timed_out_indexing() {
+    let out =
+        Section::<LocationOutput>::new(vec![]).with_indexing(Some(IndexingDegradation::TimedOut));
+    assert_json_snapshot!(out);
+}
+
 #[test]
 fn hover_output_full() {
     let out = HoverOutput {

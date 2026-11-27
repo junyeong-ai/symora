@@ -5412,6 +5412,105 @@ fn unrelated_hover_text_cannot_suppress_a_rename() {
     );
 }
 
+/// A composite type names a definition per type it is built from, and the
+/// project's own type is often not the first: `typedef` lists every one the
+/// server names, in its order, once each, with every column decoded.
+#[test]
+#[cfg(unix)]
+fn typedef_lists_every_type_the_server_names() {
+    let python = std::path::Path::new("/usr/bin/python3");
+    if !Command::new(python)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("typedef protocol fixture requires /usr/bin/python3");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("main.go");
+    std::fs::write(
+        &source,
+        "package main\ntype Wrapper[T any] struct{ v T }\ntype /*😀*/ Item struct{}\nvar xs Wrapper[Item]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("go.mod"),
+        "module example.com/fixture\n\ngo 1.25\n",
+    )
+    .unwrap();
+    std::fs::create_dir(root.path().join(".symora")).unwrap();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/code_action_server.py");
+    let quoted = |text: &str| toml::Value::String(text.to_string()).to_string();
+    let configure = |limits: &str| {
+        std::fs::write(
+            root.path().join(".symora/config.toml"),
+            format!(
+                "[lsp]\n{limits}\n[lsp.servers.go]\ncommand = {}\nargs = [{}, {}, \"type-definitions\"]\n",
+                quoted(python.to_str().unwrap()),
+                quoted(server.to_str().unwrap()),
+                // Canonical, as the project root is, so the answer reads relative.
+                quoted(source.canonicalize().unwrap().to_str().unwrap()),
+            ),
+        )
+        .unwrap();
+    };
+    // Another feature's limit does not reach typedef.
+    configure("type_hierarchy_limit = 1");
+
+    let listed = json_ok(
+        root.path(),
+        &["typedef", "main.go:4:8", "--format", "compact"],
+    );
+    assert!(listed.get("config_errors").is_none(), "{listed}");
+    assert_eq!(listed["count"], 2, "{listed}");
+    assert_eq!(listed["showing"], 2, "{listed}");
+    assert!(listed.get("truncated").is_none(), "{listed}");
+    let at: Vec<(u64, u64)> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            assert_eq!(item["file"], "main.go", "{listed}");
+            (
+                item["line"].as_u64().unwrap(),
+                item["column"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    // `Item` sits past a non-BMP character: wire UTF-16 offset 11 is
+    // scalar column 11, where a raw offset would read 12.
+    assert_eq!(at, [(2, 6), (3, 11)], "{listed}");
+
+    let limited = json_ok(
+        root.path(),
+        &[
+            "typedef",
+            "main.go:4:8",
+            "--limit",
+            "1",
+            "--format",
+            "compact",
+        ],
+    );
+    assert_eq!(limited["count"], 2, "{limited}");
+    assert_eq!(limited["showing"], 1, "{limited}");
+    assert_eq!(limited["truncated"], true, "{limited}");
+    assert_eq!(limited["items"][0]["line"], 2, "{limited}");
+
+    // Its own key sets the default `--limit` overrides.
+    configure("typedef_limit = 1");
+    let configured = json_ok(
+        root.path(),
+        &["typedef", "main.go:4:8", "--format", "compact"],
+    );
+    assert!(configured.get("config_errors").is_none(), "{configured}");
+    assert_eq!(configured["count"], 2, "{configured}");
+    assert_eq!(configured["showing"], 1, "{configured}");
+    assert_eq!(configured["truncated"], true, "{configured}");
+}
+
 #[test]
 fn stdin_edit_payload_is_interpreted_once() {
     let directory = tempfile::tempdir().unwrap();

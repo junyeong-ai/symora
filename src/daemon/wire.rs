@@ -383,11 +383,11 @@ pub struct SearchResponse<T> {
 pub struct DefinitionResponse {
     pub definition: Option<Location>,
     /// Whether the server reported the queried token as its own definition
-    /// (see [`lsp::Definition`]); always false for type definitions.
+    /// (see [`lsp::Definition`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_self: bool,
     /// Every definition the server named, `definition` among them (see
-    /// [`lsp::Definition`]); empty for type definitions.
+    /// [`lsp::Definition`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<Location>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -412,6 +412,14 @@ pub struct HoverResponse {
 pub struct ImplementationsResponse {
     pub count: usize,
     pub implementations: Vec<Location>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<lsp::IndexingDegradation>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TypeDefinitionsResponse {
+    pub count: usize,
+    pub type_definitions: Vec<Location>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexing: Option<lsp::IndexingDegradation>,
 }
@@ -561,6 +569,12 @@ impl_vec_response!(
     symbol::Location,
     Location
 );
+impl_vec_response!(
+    TypeDefinitionsResponse,
+    type_definitions,
+    symbol::Location,
+    Location
+);
 impl_vec_response!(CallsResponse, calls, lsp::CallHierarchyItem, CallItem);
 impl_vec_response!(
     TypeHierarchyResponse,
@@ -588,19 +602,6 @@ impl DefinitionResponse {
         }
     }
 
-    pub fn from_type_definition(def: lsp::Indexed<Option<symbol::Location>>) -> Self {
-        Self {
-            definition: def.data.as_ref().map(Location::from),
-            is_self: false,
-            candidates: Vec::new(),
-            message: def
-                .data
-                .is_none()
-                .then(|| "No type definition found".to_string()),
-            indexing: def.indexing,
-        }
-    }
-
     /// The definition [`from_definition`](Self::from_definition) carried.
     pub fn into_definition(self) -> lsp::Indexed<Option<lsp::Definition>> {
         let Self {
@@ -618,11 +619,6 @@ impl DefinitionResponse {
             }),
             indexing,
         )
-    }
-
-    /// The type definition [`from_type_definition`](Self::from_type_definition) carried.
-    pub fn into_type_definition(self) -> lsp::Indexed<Option<symbol::Location>> {
-        lsp::Indexed::new(self.definition.map(Into::into), self.indexing)
     }
 }
 
@@ -761,14 +757,6 @@ mod tests {
             .map(|named| named.line)
             .collect();
         assert_eq!(lines, [6, 8]);
-
-        let typed = DefinitionResponse::from_type_definition(lsp::Indexed::complete(None));
-        assert!(
-            serde_json::to_value(typed)
-                .unwrap()
-                .get("candidates")
-                .is_none()
-        );
     }
 
     #[test]

@@ -229,14 +229,15 @@ async fn fetch_diagnostic_context(
         });
     }
 
-    if let Ok(Some(type_def)) = type_def_result.map(|d| d.data)
-        && let Ok(content) = tokio::fs::read_to_string(&type_def.file).await
-    {
+    for type_def in type_def_result.map(|d| d.data).unwrap_or_default() {
         let is_duplicate = seen_locations
             .iter()
             .any(|(f, l)| f == &type_def.file && *l == type_def.line);
-
-        if !is_duplicate {
+        if is_duplicate {
+            continue;
+        }
+        if let Ok(content) = tokio::fs::read_to_string(&type_def.file).await {
+            seen_locations.push((type_def.file.clone(), type_def.line));
             let snippet = extract_snippet(&content, type_def.line);
             context.push(DiagnosticContextItem {
                 file: type_def
