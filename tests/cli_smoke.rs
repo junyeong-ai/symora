@@ -5529,25 +5529,35 @@ fn generated_followups_preserve_shell_arguments_and_option_boundaries() {
 fn lifecycle_subprocess_output_preserves_json_and_interactive_input() {
     use std::os::unix::fs::PermissionsExt;
 
+    // rust-analyzer is looked for in these system directories whatever PATH
+    // says; where the host installed it there, its installer never runs.
+    if ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+        .iter()
+        .any(|dir| std::path::Path::new(dir).join("rust-analyzer").exists())
+    {
+        eprintln!("skipped: rust-analyzer is installed in a system directory");
+        return;
+    }
+
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     let bin = root.join("bin");
     std::fs::create_dir(&bin).unwrap();
-    for name in ["brew", "apt-get", "sudo"] {
-        let command = bin.join(name);
-        std::fs::write(
-            &command,
-            "#!/bin/sh\nprintf 'installer stdout\\n'\nprintf 'installer stderr\\n' >&2\nIFS= read -r answer || exit 9\nprintf 'installer input: %s\\n' \"$answer\"\nexit 7\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let rustup = bin.join("rustup");
+    std::fs::write(
+        &rustup,
+        "#!/bin/sh\nprintf 'installer stdout\\n'\nprintf 'installer stderr\\n' >&2\nIFS= read -r answer || exit 9\nprintf 'installer input: %s\\n' \"$answer\"\nexit 7\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&rustup, std::fs::Permissions::from_mode(0o755)).unwrap();
     let installed = bin.join("installed-lsp");
     std::fs::write(&installed, "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::create_dir(root.join(".symora")).unwrap();
     let command = serde_json::to_string(installed.to_str().unwrap()).unwrap();
-    let config: String = ["rust", "typescript", "python", "go"]
+    // rust-analyzer stays unresolvable so its installer (the fake `rustup`)
+    // runs; the other core servers resolve and are skipped.
+    let config: String = ["typescript", "python", "go"]
         .into_iter()
         .map(|language| format!("[lsp.servers.{language}]\ncommand = {command}\n"))
         .collect();
@@ -5557,6 +5567,8 @@ fn lifecycle_subprocess_output_preserves_json_and_interactive_input() {
         .args(["setup", "--yes", "deps", "--group", "core"])
         .current_dir(root)
         .env("PATH", &bin)
+        // Keeps the user's `~/.cargo/bin` and `~/.local/bin` out of the lookup.
+        .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join("xdg"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -5575,8 +5587,8 @@ fn lifecycle_subprocess_output_preserves_json_and_interactive_input() {
         common::parse_response(&output.stdout).expect("lifecycle stdout must contain only JSON");
     assert_eq!(response["status"], "ok");
     let items = response["deps"]["items"].as_array().unwrap();
-    assert_eq!(items.len(), 5, "{response}");
-    assert_eq!(items[0]["name"], "ripgrep");
+    assert_eq!(items.len(), 4, "{response}");
+    assert_eq!(items[0]["name"], "rust-analyzer");
     assert_eq!(items[0]["status"], "failed");
     assert!(items[0]["note"].as_str().unwrap().contains("status 7"));
     assert!(

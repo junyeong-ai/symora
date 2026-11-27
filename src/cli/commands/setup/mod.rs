@@ -46,7 +46,7 @@ pub struct SetupArgs {
 pub enum SetupCommand {
     /// Install or update the Claude Code skill (~/.claude/skills/symora).
     Skill(SkillArgs),
-    /// Install language servers and ripgrep.
+    /// Install language servers.
     Deps(DepsArgs),
     /// Wire `symora mcp serve` into installed agent hosts (Claude Code,
     /// Codex). Reversible with `--uninstall`.

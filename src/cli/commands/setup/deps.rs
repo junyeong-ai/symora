@@ -1,4 +1,4 @@
-//! `symora setup deps` — install ripgrep + LSP servers via the host's package
+//! `symora setup deps` — install LSP servers via the host's package
 //! managers. The matrix here mirrors the install instructions surfaced by
 //! `symora doctor` (`infra/lsp/servers.rs`); both should stay aligned.
 
@@ -37,24 +37,17 @@ impl DepsGroup {
     fn includes(self) -> &'static [Slot] {
         match self {
             DepsGroup::None => &[],
-            DepsGroup::Core => &[Slot::Ripgrep, Slot::Core],
-            DepsGroup::CoreJvm => &[Slot::Ripgrep, Slot::Core, Slot::Jvm],
-            DepsGroup::CoreWeb => &[Slot::Ripgrep, Slot::Core, Slot::Web],
-            DepsGroup::CoreSystems => &[Slot::Ripgrep, Slot::Core, Slot::Systems],
-            DepsGroup::All => &[
-                Slot::Ripgrep,
-                Slot::Core,
-                Slot::Jvm,
-                Slot::Web,
-                Slot::Systems,
-            ],
+            DepsGroup::Core => &[Slot::Core],
+            DepsGroup::CoreJvm => &[Slot::Core, Slot::Jvm],
+            DepsGroup::CoreWeb => &[Slot::Core, Slot::Web],
+            DepsGroup::CoreSystems => &[Slot::Core, Slot::Systems],
+            DepsGroup::All => &[Slot::Core, Slot::Jvm, Slot::Web, Slot::Systems],
         }
     }
 }
 
 #[derive(Copy, Clone)]
 enum Slot {
-    Ripgrep,
     Core,
     Jvm,
     Web,
@@ -122,7 +115,6 @@ pub fn run_deps(
     let mut items: Vec<DepResult> = Vec::new();
     for slot in group.includes() {
         match slot {
-            Slot::Ripgrep => items.push(install_ripgrep()),
             Slot::Core => {
                 items.push(install_rust_analyzer(
                     &server_configs[&Language::Rust],
@@ -167,7 +159,7 @@ fn choose_group_interactive(assume_yes: bool) -> DepsGroup {
     if assume_yes || !crate::cli::utils::ui::stdin_is_tty() {
         return DepsGroup::None;
     }
-    eprintln!("  [1] core            — ripgrep + Rust/TS/Python/Go LSPs");
+    eprintln!("  [1] core            — Rust/TS/Python/Go LSPs");
     eprintln!("  [2] core+jvm        — adds Java, Kotlin");
     eprintln!("  [3] core+web        — adds Vue, PHP, YAML, Ruby");
     eprintln!("  [4] core+systems    — adds C/C++, Zig, C#");
@@ -284,66 +276,6 @@ fn manual(name: &str, hint: &str) -> DepResult {
 }
 
 // ─── individual installers ──────────────────────────────────────────────
-
-fn install_ripgrep() -> DepResult {
-    if have("rg") {
-        step(Step::Skip, "ripgrep: already installed");
-        return DepResult {
-            name: "ripgrep".to_string(),
-            status: DepStatus::AlreadyInstalled,
-            note: None,
-        };
-    }
-    let result = match Platform::current() {
-        Platform::MacOS if have("brew") => run_install("ripgrep", "brew", &["install", "ripgrep"]),
-        Platform::MacOS => manual("ripgrep", "install Homebrew or run 'cargo install ripgrep'"),
-        Platform::Linux if have("apt-get") => {
-            run_install("ripgrep", "sudo", &["apt-get", "install", "-y", "ripgrep"])
-        }
-        Platform::Linux if have("dnf") => {
-            run_install("ripgrep", "sudo", &["dnf", "install", "-y", "ripgrep"])
-        }
-        Platform::Linux if have("pacman") => run_install(
-            "ripgrep",
-            "sudo",
-            &["pacman", "-S", "--noconfirm", "ripgrep"],
-        ),
-        Platform::Linux if have("cargo") => {
-            run_install("ripgrep", "cargo", &["install", "ripgrep"])
-        }
-        Platform::Linux => manual("ripgrep", "install via your distro's package manager"),
-        Platform::Windows => manual(
-            "ripgrep",
-            "see https://github.com/BurntSushi/ripgrep/releases",
-        ),
-    };
-    verify_on_path(result, "rg")
-}
-
-/// Post-install verification for a tool resolved by bare command name (ripgrep)
-/// rather than a ServerConfig: an installer exiting 0 is not proof `rg` is on
-/// this process's PATH, so re-probe and report an honest Failed otherwise —
-/// the same discipline `run_install_server` applies to language servers.
-fn verify_on_path(result: DepResult, program: &str) -> DepResult {
-    if result.status != DepStatus::Installed || have(program) {
-        return result;
-    }
-    step(
-        Step::Warn,
-        format!(
-            "{}: install reported success but `{program}` is not resolvable",
-            result.name
-        ),
-    );
-    DepResult {
-        name: result.name,
-        status: DepStatus::Failed,
-        note: Some(format!(
-            "install command succeeded but `{program}` is still not on PATH — open a new shell, \
-             then re-check"
-        )),
-    }
-}
 
 fn install_rust_analyzer(config: &ServerConfig, root: &Path) -> DepResult {
     if let Some(r) = check_server(config, root) {
