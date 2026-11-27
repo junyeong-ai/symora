@@ -10,17 +10,18 @@ use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 use super::position::PositionConverter;
 use crate::infra::lsp::protocol::PositionEncoding;
 
-/// The kind of what a server reports for `file`. Swift declares no
-/// namespaces: sourcekit-lsp sends an extension with the namespace kind, and
-/// an extension is to its type what a Rust impl block is, which
-/// rust-analyzer sends as an object. Read as one, it keys its members by the
+/// The kind of what a server reports for `file`. LSP has no kind for an
+/// [`SymbolKind::Impl`], so each server sends one as a kind of its own
+/// language declares nothing else with: rust-analyzer an impl block as an
+/// object, and sourcekit-lsp an extension as a namespace, which Swift does
+/// not declare. Read as an impl, a Swift extension keys its members by the
 /// type it extends rather than passing them through as a namespace does.
 pub(super) fn convert_symbol_kind(kind: LspSymbolKind, file: &Path) -> SymbolKind {
     use LspSymbolKind as LspKind;
     match kind {
         LspKind::File => SymbolKind::File,
         LspKind::Module => SymbolKind::Module,
-        LspKind::Namespace if Language::from_path(file) == Language::Swift => SymbolKind::Object,
+        LspKind::Namespace if Language::from_path(file) == Language::Swift => SymbolKind::Impl,
         LspKind::Namespace => SymbolKind::Namespace,
         LspKind::Package => SymbolKind::Package,
         LspKind::Class => SymbolKind::Class,
@@ -37,6 +38,7 @@ pub(super) fn convert_symbol_kind(kind: LspSymbolKind, file: &Path) -> SymbolKin
         LspKind::Number => SymbolKind::Number,
         LspKind::Boolean => SymbolKind::Boolean,
         LspKind::Array => SymbolKind::Array,
+        LspKind::Object if Language::from_path(file) == Language::Rust => SymbolKind::Impl,
         LspKind::Object => SymbolKind::Object,
         LspKind::Key => SymbolKind::Key,
         LspKind::Null => SymbolKind::Null,
@@ -548,14 +550,24 @@ mod tests {
         assert_eq!(listed("a.json", json), ["c", "c/0"]);
     }
 
+    /// A Rust object and a Swift namespace are the impl blocks their servers
+    /// send, and the same kinds keep their own meaning in another language.
     #[test]
-    fn a_swift_namespace_is_the_extension_of_a_type() {
+    fn an_impl_is_read_from_the_kind_its_server_sends_it_as() {
         use crate::infra::lsp::protocol::LspSymbolKind;
         use crate::models::symbol::SymbolKind;
         let kind =
-            |file: &str| convert_symbol_kind(LspSymbolKind::Namespace, std::path::Path::new(file));
-        assert_eq!(kind("Point.swift"), SymbolKind::Object);
-        assert_eq!(kind("point.cpp"), SymbolKind::Namespace);
+            |sent: LspSymbolKind, file: &str| convert_symbol_kind(sent, std::path::Path::new(file));
+        assert_eq!(
+            kind(LspSymbolKind::Namespace, "Point.swift"),
+            SymbolKind::Impl
+        );
+        assert_eq!(
+            kind(LspSymbolKind::Namespace, "point.cpp"),
+            SymbolKind::Namespace
+        );
+        assert_eq!(kind(LspSymbolKind::Object, "lib.rs"), SymbolKind::Impl);
+        assert_eq!(kind(LspSymbolKind::Object, "data.json"), SymbolKind::Object);
     }
 
     /// An edit range's wire column is decoded to a native scalar offset against

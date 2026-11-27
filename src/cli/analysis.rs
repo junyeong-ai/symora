@@ -517,9 +517,9 @@ pub async fn member_reach_hint_of(
 
 /// The type a member is declared in, found by what holds it rather than by
 /// its name — an outer function declares a nested one, and a call there has to
-/// name it, so only a type weakens the member's zero. An `impl` block is
-/// where a Rust type's members are declared, and servers report it as an
-/// object.
+/// name it, so only a type weakens the member's zero. An impl is where a
+/// Rust type's members are declared, and a Swift extension's; kotlin-lsp
+/// sends a Kotlin `object` as an object.
 fn declaring_type_of(symbols: &[Symbol], line: u32, column: u32) -> Option<Symbol> {
     holder_of(symbols, line, column)
         .filter(|holder| {
@@ -529,6 +529,7 @@ fn declaring_type_of(symbols: &[Symbol], line: u32, column: u32) -> Option<Symbo
                     | SymbolKind::Struct
                     | SymbolKind::Interface
                     | SymbolKind::Enum
+                    | SymbolKind::Impl
                     | SymbolKind::Object
             )
         })
@@ -569,15 +570,15 @@ async fn declaring_type_reach(
 
 /// Where what a reference query at a declaration's name answers for is
 /// declared, so its references can leave the declaration out: at that name,
-/// except for an `impl` block, whose name is the type it implements, declared
-/// elsewhere. Servers report an `impl` block as an object.
+/// except for an impl, whose name is the type it implements, declared
+/// elsewhere.
 async fn declared_at(
     lsp: &dyn LspService,
     name: ParsedLocation,
     kind: Option<SymbolKind>,
 ) -> Vec<ParsedLocation> {
     let mut declared = Vec::new();
-    if kind == Some(SymbolKind::Object)
+    if kind == Some(SymbolKind::Impl)
         && let Ok(found) = lsp
             .goto_definition(&name.file, name.line, name.column)
             .await
@@ -1427,8 +1428,8 @@ mod tests {
     }
 
     /// A member's zero is weakened by the type that declares it, which a Rust
-    /// method finds in its `impl` block — reported as an object — and a
-    /// function nested in another never does: a call there names it.
+    /// method finds in its `impl` block, and a function nested in another
+    /// never does: a call there names it.
     #[test]
     fn a_member_is_declared_by_its_type_or_impl_block_and_never_by_a_function() {
         let holder = |kind: SymbolKind| {
@@ -1439,7 +1440,12 @@ mod tests {
             )
             .with_children(vec![func("lib.rs", "render", 2, 8, 4)])
         };
-        for kind in [SymbolKind::Object, SymbolKind::Struct, SymbolKind::Class] {
+        for kind in [
+            SymbolKind::Impl,
+            SymbolKind::Object,
+            SymbolKind::Struct,
+            SymbolKind::Class,
+        ] {
             assert_eq!(
                 declaring_type_of(&[holder(kind)], 2, 8).map(|symbol| symbol.kind),
                 Some(kind)
@@ -1459,7 +1465,7 @@ mod tests {
         let render = func("lib.rs", "render", 4, 12, 6);
         let block = Symbol::new(
             "Widget".to_string(),
-            SymbolKind::Object,
+            SymbolKind::Impl,
             Location::full(lib.clone(), 3, 6, 3, 1, 7, 2),
         )
         .with_children(vec![render.clone()]);

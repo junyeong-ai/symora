@@ -144,7 +144,7 @@ impl Symbol {
         // namespace/module/package qualifies nothing: it passes its parent path
         // straight through (a free item under it stays bare). The name carries
         // no qualifier, so same-named sibling parents (`Foo[struct]`,
-        // `Foo[object]`) still share a child path (`Foo/bar`).
+        // `Foo[impl]`) still share a child path (`Foo/bar`).
         let child_parent = if self.kind.is_namespace_like() {
             parent_path
         } else {
@@ -575,7 +575,7 @@ impl Symbol {
 ///
 /// A qualifier selects the declarations of the kind it names. A listing prints
 /// one where it tells same-named siblings apart (`Cart[struct]` beside
-/// `Cart[object]`), and it keeps naming that declaration whatever is added or
+/// `Cart[impl]`), and it keeps naming that declaration whatever is added or
 /// removed beside it; a declaration printed without one, such as an index row,
 /// answers it by its kind.
 ///
@@ -1281,17 +1281,17 @@ mod tests {
     fn a_type_and_its_implementation_block_stay_separately_addressable() {
         let mut symbols = vec![
             build_symbol("Cart", SymbolKind::Struct),
-            build_symbol("Cart", SymbolKind::Object),
+            build_symbol("Cart", SymbolKind::Impl),
         ];
         Symbol::compute_paths_for_all(&mut symbols);
 
         assert_eq!(symbols[0].path(), "Cart[struct]");
-        assert_eq!(symbols[1].path(), "Cart[object]");
+        assert_eq!(symbols[1].path(), "Cart[impl]");
         assert_eq!(Symbol::filter_by_path(&symbols, "Cart[struct]").len(), 1);
         assert_eq!(Symbol::filter_by_path(&symbols, "Cart").len(), 2);
 
         let mut reordered = vec![
-            build_symbol("Cart", SymbolKind::Object),
+            build_symbol("Cart", SymbolKind::Impl),
             build_symbol("Cart", SymbolKind::Struct),
         ];
         Symbol::compute_paths_for_all(&mut reordered);

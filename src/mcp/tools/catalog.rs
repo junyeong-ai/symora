@@ -61,7 +61,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         (
                             "kind",
                             "string",
-                            "Optional kind filter (function, class, struct, ...); the index and \
+                            "Optional kind filter (function, class, struct, impl, ...); impl is a \
+                             block that adds members to a type declared elsewhere (a Rust impl, a \
+                             Swift or Dart extension), named for that type; the index and \
                              a server can name one declaration's kind differently, so a zero \
                              under it is unverified",
                         ),

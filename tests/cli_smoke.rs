@@ -4052,6 +4052,105 @@ fn a_heading_line_changed_modifies_the_declaration_it_headed() {
     }
 }
 
+/// A Rust impl block is an `impl` wherever the grammar answers for it: a
+/// file's listing, a `[kind]` qualifier and its `extension` alias, a `--kind`
+/// filter, the index a search answers from, and the diff-impact row of a
+/// change to its header. It is named for the type it implements, beside
+/// which it stays addressable by its kind.
+#[test]
+fn an_impl_block_is_an_impl_wherever_the_grammar_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let config_dir = repo.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.rust]\ncommand = \"/nonexistent/rust-analyzer\"\n",
+    )
+    .unwrap();
+    let source = "pub struct Circle(pub f64);\n\nimpl Circle {\n    pub fn area(&self) -> f64 {\n        \
+                  self.0 * self.0\n    }\n}\n";
+    std::fs::write(repo.join("lib.rs"), source).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    let rows = |page: &serde_json::Value| -> Vec<(String, String, u64)> {
+        page["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| {
+                (
+                    item["name_path"].as_str().unwrap_or_default().to_string(),
+                    item["kind"].as_str().unwrap_or_default().to_string(),
+                    item["line"].as_u64().unwrap_or_default(),
+                )
+            })
+            .collect()
+    };
+    let row = |path: &str, kind: &str, line: u64| (path.to_string(), kind.to_string(), line);
+
+    let listed = json_ok(repo, &["--deterministic", "symbols", "lib.rs"]);
+    assert_eq!(listed["backend"], "ast", "{listed}");
+    assert_eq!(
+        rows(&listed),
+        [
+            row("Circle", "struct", 1),
+            row("Circle", "impl", 3),
+            row("Circle/area", "method", 4),
+        ],
+        "{listed}"
+    );
+    for args in [
+        &["--symbol", "Circle[impl]"][..],
+        &["--symbol", "Circle[extension]"],
+        &["--kind", "impl"],
+    ] {
+        let page = json_ok(
+            repo,
+            &[&["--deterministic", "symbols", "lib.rs"][..], args].concat(),
+        );
+        assert_eq!(rows(&page), [row("Circle", "impl", 3)], "{args:?}: {page}");
+    }
+
+    json_ok(repo, &["search", "index", "build"]);
+    let found = json_ok(
+        repo,
+        &[
+            "--deterministic",
+            "search",
+            "symbols",
+            "--kind=impl",
+            "--",
+            "Circle",
+        ],
+    );
+    assert_eq!(rows(&found), [row("Circle", "impl", 3)], "{found}");
+    assert_eq!(found["items"][0]["backend"], "index", "{found}");
+
+    std::fs::write(
+        repo.join("lib.rs"),
+        source.replacen("impl Circle {", "impl Circle where Self: Sized {", 1),
+    )
+    .unwrap();
+    let page = json_ok(repo, &["diff-impact"]);
+    let changed: Vec<(&str, &str, &str)> = page["changes"]["items"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|change| {
+            (
+                change["name"].as_str().unwrap_or_default(),
+                change["kind"].as_str().unwrap_or_default(),
+                change["change_type"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(changed, [("Circle", "impl", "modified")], "{page}");
+}
+
 /// Dart's grammar reads a function by its signature, and the declaration
 /// around the signature holds the annotations and the body, so a change to
 /// either is the function's and deleting it takes both.

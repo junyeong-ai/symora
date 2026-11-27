@@ -327,7 +327,8 @@ fn daemon_and_direct_emit_identical_payloads() {
     .unwrap();
     std::fs::write(
         root.join("src/lib.rs"),
-        "pub fn add(a: u32, b: u32) -> u32 { a + b }\npub fn answer() -> u32 { add(20, 22) }\n",
+        "pub fn add(a: u32, b: u32) -> u32 { a + b }\npub fn answer() -> u32 { add(20, 22) }\n\
+         pub struct Counter(u32);\nimpl Counter {\n    pub fn get(&self) -> u32 { self.0 }\n}\n",
     )
     .unwrap();
     let daemon = IsolatedDaemon::for_test("daemon_and_direct_emit_identical_payloads");

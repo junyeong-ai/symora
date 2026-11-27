@@ -5191,18 +5191,15 @@ fn node_kind(node: Node) -> SymbolKind {
 
         // Swift states a struct, an enum, an actor, a class and an extension
         // with one node, and its keyword says which.
-        "class_declaration" if node.child_by_field_name("declaration_kind").is_some() => {
-            match node
-                .child_by_field_name("declaration_kind")
-                .map(|keyword| keyword.kind())
-            {
-                Some("struct") => SymbolKind::Struct,
-                Some("enum") => SymbolKind::Enum,
-                // As sourcekit-lsp's answer reads (see `convert_symbol_kind`).
-                Some("extension") => SymbolKind::Object,
-                _ => SymbolKind::Class,
-            }
-        }
+        "class_declaration" if node.child_by_field_name("declaration_kind").is_some() => match node
+            .child_by_field_name("declaration_kind")
+            .map(|keyword| keyword.kind())
+        {
+            Some("struct") => SymbolKind::Struct,
+            Some("enum") => SymbolKind::Enum,
+            Some("extension") => SymbolKind::Impl,
+            _ => SymbolKind::Class,
+        },
 
         // C#'s `record struct` is a value type, as `record` and `record class`
         // are reference types.
@@ -5222,9 +5219,7 @@ fn node_kind(node: Node) -> SymbolKind {
         | "extension_type_declaration"
         | "class" => SymbolKind::Class,
 
-        // An impl block adds members to a type declared elsewhere, as
-        // rust-analyzer reads it.
-        "impl_item" => SymbolKind::Object,
+        "impl_item" => SymbolKind::Impl,
 
         "struct_item" | "struct_specifier" | "struct_type" | "struct_declaration"
         | "union_item" | "union_specifier" => SymbolKind::Struct,
@@ -6409,14 +6404,14 @@ fn factory() { struct Made; impl Made { fn made(&self) {} } }
                 "function:nested",
                 "struct:S",
                 "field:S/inner_field",
-                "object:S",
+                "impl:S",
                 "method:S/m",
                 "function:S/new",
-                "object:S",
+                "impl:S",
                 "method:S/boxed",
                 "function:factory",
                 "struct:factory/Made",
-                "object:factory/Made",
+                "impl:factory/Made",
                 "method:Made/made",
             ],
         },
@@ -7327,7 +7322,7 @@ prefix operator /* spelled */ +++
                 "struct:Point",
                 "property:Point/x",
                 "property:Point/subscript",
-                "object:Point",
+                "impl:Point",
                 "method:Point/moved",
                 "enum:Dir",
                 "enum_member:Dir/up",

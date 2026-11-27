@@ -12,8 +12,9 @@ macro_rules! symbol_kinds {
         kinds { $( $variant:ident => $name:literal ),+ $(,)? }
         aliases { $( $alias:literal => $target:ident ),* $(,)? }
     ) => {
-        /// Closely mirrors LSP `SymbolKind` so the model layer can pass
-        /// through LSP responses with no lossy translation.
+        /// LSP's `SymbolKind`, so the model layer passes a server's answer
+        /// through without loss, and `impl`, the declaration LSP has no kind
+        /// for (see [`SymbolKind::Impl`]).
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
         pub enum SymbolKind {
             $( #[serde(rename = $name)] $variant ),+
@@ -79,10 +80,18 @@ symbol_kinds! {
         Event => "event",
         Operator => "operator",
         TypeParameter => "type_parameter",
+        // A block that adds members or conformances to a type declared
+        // elsewhere: a Rust `impl`, a Swift `extension`. LSP has no kind for
+        // it, so rust-analyzer sends one as an object and sourcekit-lsp as a
+        // namespace (`convert_symbol_kind`), though it declares neither a
+        // value nor a namespace.
+        Impl => "impl",
     }
     aliases {
         // rust-analyzer reports traits as Interface.
         "trait" => Interface,
+        // What Swift calls the block.
+        "extension" => Impl,
         "enummember" => EnumMember,
         "typeparameter" => TypeParameter,
     }
@@ -93,9 +102,10 @@ impl SymbolKind {
         matches!(self, Self::Function | Self::Method | Self::Constructor)
     }
 
-    /// A value rather than a structure. An object holds members (a Rust
-    /// impl, a Swift extension), so it is no value whatever a JSON document's
-    /// server means by it.
+    /// A value rather than a structure. An object holds members (kotlin-lsp
+    /// sends a Kotlin `object` as one, lua-language-server a table of
+    /// fields), so it is no value whatever a JSON document's server means by
+    /// it.
     pub fn is_low_level(&self) -> bool {
         matches!(
             self,
@@ -125,6 +135,7 @@ impl SymbolKind {
                 | Self::Struct
                 | Self::Enum
                 | Self::Object
+                | Self::Impl
         )
     }
 
@@ -193,6 +204,17 @@ mod tests {
         assert!(!SymbolKind::Class.is_low_level());
         assert!(!SymbolKind::Method.is_low_level());
         assert!(!SymbolKind::Object.is_low_level());
+        assert!(!SymbolKind::Impl.is_low_level());
+    }
+
+    /// An impl's children are the members it adds to its type, as a class's
+    /// are, and it qualifies them by that type rather than passing them
+    /// through as a namespace does.
+    #[test]
+    fn an_impl_holds_the_members_it_adds() {
+        assert!(SymbolKind::Impl.holds_members());
+        assert!(!SymbolKind::Impl.is_namespace_like());
+        assert!(!SymbolKind::Impl.is_callable());
     }
 
     #[test]
@@ -202,6 +224,13 @@ mod tests {
         assert!(SymbolKind::Constructor.is_callable());
         assert!(!SymbolKind::Class.is_callable());
         assert!(!SymbolKind::Variable.is_callable());
+    }
+
+    #[test]
+    fn from_str_aliases_extension_to_impl() {
+        assert_eq!("extension".parse::<SymbolKind>().unwrap(), SymbolKind::Impl);
+        assert_eq!("impl".parse::<SymbolKind>().unwrap(), SymbolKind::Impl);
+        assert!(!SymbolKind::all_kind_names().contains(&"extension"));
     }
 
     #[test]

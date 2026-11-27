@@ -905,25 +905,9 @@ mod tests {
 
     #[test]
     fn symbol_roundtrip_kind_survives_string_conversion() {
-        // Verify all commonly used SymbolKind values survive the to_string -> parse_or_default roundtrip
-        let kinds = [
-            SymbolKind::Function,
-            SymbolKind::Class,
-            SymbolKind::Method,
-            SymbolKind::Field,
-            SymbolKind::Struct,
-            SymbolKind::Enum,
-            SymbolKind::Interface,
-            SymbolKind::Module,
-            SymbolKind::Property,
-            SymbolKind::Constructor,
-            SymbolKind::Variable,
-            SymbolKind::Constant,
-            SymbolKind::EnumMember,
-            SymbolKind::TypeParameter,
-        ];
-
-        for kind in kinds {
+        // Every kind survives the to_string -> parse_or_default roundtrip, so
+        // the daemon answers a kind as a direct run does.
+        for &kind in SymbolKind::ALL {
             let loc = SymLocation::point(PathBuf::from("test.rs"), 1, 1);
             let original = SymSymbol::new("sym".to_string(), kind, loc);
             let wire = Symbol::from(&original);

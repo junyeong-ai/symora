@@ -370,6 +370,7 @@ fn pyright_resolves_across_package_boundaries() {
                         | "struct"
                         | "enum"
                         | "object"
+                        | "impl"
                 )
             );
             flatten(&item["children"], internal || !holds_members, out);
@@ -1193,4 +1194,108 @@ fn rust_analyzer_diagnostics_answer_for_each_edit() {
         .call("get_diagnostics", json!({"file": outside}))
         .remove(0);
     assert_eq!(page["status"], "unconfirmed", "{page}");
+}
+
+/// rust-analyzer sends an impl block as an object, the kind LSP gives a
+/// value; it reads as an `impl`, as the grammar reads it, named for the type
+/// it implements, so its members are `Circle/area` and `Circle[impl]` selects
+/// the blocks rather than the struct.
+#[test]
+#[ignore = "requires rust-analyzer; run: cargo test --test lang_fixtures -- --ignored"]
+fn an_impl_block_reads_as_an_impl_from_rust_analyzer_and_the_grammar() {
+    if !rust_analyzer_on_path() {
+        return;
+    }
+    let repo = repository(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"impl_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        ),
+        (
+            "src/lib.rs",
+            "pub trait Shape {\n    fn area(&self) -> f64;\n}\n\npub struct Circle(pub f64);\n\n\
+             impl Circle {\n    pub fn new(r: f64) -> Self {\n        Circle(r)\n    }\n}\n\n\
+             impl Shape for Circle {\n    fn area(&self) -> f64 {\n        self.0 * self.0\n    }\n}\n",
+        ),
+    ]);
+    fn rows(items: &Value, out: &mut Vec<(String, String, u64)>) {
+        for item in items.as_array().into_iter().flatten() {
+            out.push((
+                item["name_path"].as_str().unwrap_or_default().to_string(),
+                item["kind"].as_str().unwrap_or_default().to_string(),
+                item["line"].as_u64().unwrap_or_default(),
+            ));
+            rows(&item["children"], out);
+        }
+    }
+    fn impls(rows: &[(String, String, u64)]) -> Vec<u64> {
+        rows.iter()
+            .filter(|(_, kind, _)| kind == "impl")
+            .map(|(_, _, line)| *line)
+            .collect()
+    }
+    let read = |args: &[&str]| -> Value {
+        let output = symora()
+            .args(args)
+            .args(["--format", "compact"])
+            .current_dir(repo.path())
+            .env("SYMORA_NO_DAEMON", "1")
+            .stderr(Stdio::null())
+            .output()
+            .expect("run symora");
+        let page = common::parse_response(&output.stdout).expect("JSON on stdout");
+        assert!(page.get("error").is_none(), "{args:?}: {page}");
+        page
+    };
+
+    let mut session = McpSession::new(Some(repo.path()));
+    let served = settled(
+        &mut session,
+        "list_file_symbols",
+        json!({"file": "src/lib.rs", "depth": 1}),
+        |page| page["backend"] == "document",
+        "rust-analyzer lists the file's symbols",
+    );
+    let mut listed = Vec::new();
+    rows(&served["items"], &mut listed);
+    let row = |path: &str, kind: &str, line: u64| (path.to_string(), kind.to_string(), line);
+    for expected in [
+        row("Circle[struct]", "struct", 5),
+        row("Circle", "impl", 7),
+        row("Circle/new", "function", 8),
+        row("Circle", "impl", 13),
+        row("Circle/area", "method", 14),
+    ] {
+        assert!(listed.contains(&expected), "{expected:?}: {served}");
+    }
+    assert!(
+        !listed.iter().any(|(_, kind, _)| kind == "object"),
+        "{served}"
+    );
+
+    let grammar = read(&["--deterministic", "symbols", "src/lib.rs"]);
+    assert_eq!(grammar["backend"], "ast", "{grammar}");
+    let mut declared = Vec::new();
+    rows(&grammar["items"], &mut declared);
+    assert_eq!(impls(&listed), [7, 13], "{served}");
+    assert_eq!(impls(&declared), impls(&listed), "{grammar}");
+
+    let selected = settled(
+        &mut session,
+        "search_symbols",
+        json!({"query": "Circle[impl]", "path": ["src/lib.rs"]}),
+        |page| page["count"] == 2,
+        "a kind qualifier selects the impl blocks",
+    );
+    let mut chosen = Vec::new();
+    rows(&selected["items"], &mut chosen);
+    assert_eq!(impls(&chosen), [7, 13], "{selected}");
+    assert!(
+        selected["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["backend"] == "document"),
+        "{selected}"
+    );
 }

@@ -1828,7 +1828,7 @@ mod tests {
         module.children = vec![declared("config", SymbolKind::Function, 35, 37)];
         let file = [
             declared("Widget[struct]", SymbolKind::Struct, 2, 2),
-            declared("Widget[object]", SymbolKind::Object, 3, 13),
+            declared("Widget[impl]", SymbolKind::Impl, 3, 13),
             declared("Widget/render", SymbolKind::Method, 4, 6),
             declared("Paint/render", SymbolKind::Method, 16, 16),
             declared("Widget/render", SymbolKind::Method, 20, 22),
@@ -1864,7 +1864,7 @@ mod tests {
         assert_eq!(named("Paint/render", 15), None);
         assert_eq!(named("Canvas/render", 4), None);
         assert_eq!(named("Widget", 2).as_deref(), Some("Widget[struct]@2"));
-        assert_eq!(named("Widget", 9).as_deref(), Some("Widget[object]@3"));
+        assert_eq!(named("Widget", 9).as_deref(), Some("Widget[impl]@3"));
         assert_eq!(named("config", 36).as_deref(), Some("config@35"));
         assert_eq!(named("util", 56).as_deref(), Some("util@55"));
         assert_eq!(named("util", 51).as_deref(), Some("util@50"));

@@ -1173,7 +1173,7 @@ mod tests {
         let symbols = vec![
             at("Alias", SymbolKind::TypeParameter, 1, 10, 1),
             nest(
-                at("Store", SymbolKind::Object, 5, 16, 7),
+                at("Store", SymbolKind::Impl, 5, 16, 7),
                 vec![at("Out", SymbolKind::TypeParameter, 6, 10, 6)],
             ),
         ];

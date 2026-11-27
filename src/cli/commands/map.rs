@@ -693,7 +693,8 @@ fn focus_symbol_score(symbol: &Symbol) -> i32 {
         | crate::models::symbol::SymbolKind::Package => 10,
         crate::models::symbol::SymbolKind::Constant
         | crate::models::symbol::SymbolKind::Variable
-        | crate::models::symbol::SymbolKind::Object => 8,
+        | crate::models::symbol::SymbolKind::Object
+        | crate::models::symbol::SymbolKind::Impl => 8,
         crate::models::symbol::SymbolKind::Property
         | crate::models::symbol::SymbolKind::Field
         | crate::models::symbol::SymbolKind::EnumMember => 4,
@@ -751,6 +752,7 @@ fn is_focus_symbol_candidate(symbol: &Symbol) -> bool {
             | crate::models::symbol::SymbolKind::Constant
             | crate::models::symbol::SymbolKind::Variable
             | crate::models::symbol::SymbolKind::Object
+            | crate::models::symbol::SymbolKind::Impl
     ) || has_callable_children
 }
 

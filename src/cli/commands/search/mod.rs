@@ -49,7 +49,7 @@ pub enum SearchCommand {
         #[arg(short, long = "lang")]
         language: Option<String>,
 
-        /// Symbol kind filter (function, class, struct, etc.)
+        /// Symbol kind filter (function, class, struct, impl, etc.)
         #[arg(short, long)]
         kind: Option<String>,
 
