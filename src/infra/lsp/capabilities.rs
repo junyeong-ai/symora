@@ -66,7 +66,9 @@ pub fn get_support_level(language: Language, feature: LspFeature) -> SupportLeve
     use SupportLevel::*;
 
     match (language, feature) {
-        // Rust (rust-analyzer) - excellent support
+        // Rust (rust-analyzer) - excellent support, but no type hierarchy: it
+        // does not advertise typeHierarchyProvider and answers -32601.
+        (Language::Rust, TypeHierarchy) => None,
         (Language::Rust, _) => Full,
 
         // C/C++ (clangd) - excellent support
@@ -157,6 +159,18 @@ pub fn get_alternative_suggestion(language: Language, feature: LspFeature) -> St
         // C/C++ alternatives
         (Language::Cpp, OutgoingCalls) => {
             "Outgoing calls not supported by clangd. Try: symora refs <location>".into()
+        }
+
+        // Type hierarchy: a trait's implementations are its subtypes, and a
+        // type's impl blocks name the traits it implements.
+        (Language::Rust, TypeHierarchy) => {
+            "Try: symora implementations <location> or symora search ast \"(impl_item)\" -l rust"
+                .into()
+        }
+        (_, TypeHierarchy)
+            if get_support_level(language, FindImplementations) != SupportLevel::None =>
+        {
+            "Try: symora implementations <location>".into()
         }
 
         // Default
