@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 use super::{CoverageGap, Section, SymbolSource};
 use crate::cli::OutputContext;
 use crate::cli::utils::shell_arg;
-use crate::constants::defaults::INDEX_BUILD_WAIT;
 use crate::error::{LspError, StoreError};
 use crate::models::symbol::{Language, PathPattern, SymbolKind};
 use crate::services::store::{TreeCurrency, UnreadPath};
@@ -87,6 +86,11 @@ pub struct Uncovered {
     /// The failure in its own words, kept for `unavailable` — the one reason
     /// that does not say what went wrong.
     pub message: Option<String>,
+    /// Why a `not_consulted` language's server was not asked: the search's
+    /// budget went on an index build that did not complete within it, rather
+    /// than `--deterministic` confining the run. Nothing failed, so the
+    /// build is the remedy, not the server.
+    pub budget_spent: bool,
 }
 
 impl Uncovered {
@@ -102,6 +106,7 @@ impl Uncovered {
                     .unwrap_or_default()
                     .to_string()
             }),
+            budget_spent: false,
         }
     }
 
@@ -110,6 +115,7 @@ impl Uncovered {
             language,
             reason,
             message: None,
+            budget_spent: false,
         }
     }
 
@@ -162,6 +168,11 @@ pub enum LiveLookup<'a> {
     /// one: a route that ran a fan-out names what it could not cover, while
     /// this one has to subtract from what was asked for.
     NotRun { requested: &'a [Language] },
+    /// The search's budget went on an index build that did not complete
+    /// within it, so nothing was left to ask a server with, and none was
+    /// asked: a language the index would answer for and one it would not
+    /// are alike unasked, and neither failed.
+    BudgetSpent { requested: &'a [Language] },
 }
 
 /// The languages an answer cannot vouch for: requested, outside what the
@@ -189,6 +200,14 @@ pub fn coverage_shortfall(answered_for: &[Language], live: LiveLookup<'_>) -> Ve
             .iter()
             .filter(|language| !answered_for.contains(language))
             .map(|language| Uncovered::not_reached(*language, CoverageReason::NotIndexed))
+            .collect(),
+        LiveLookup::BudgetSpent { requested } => requested
+            .iter()
+            .filter(|language| !answered_for.contains(language))
+            .map(|language| Uncovered {
+                budget_spent: true,
+                ..Uncovered::not_reached(*language, CoverageReason::NotConsulted)
+            })
             .collect(),
     };
     gaps.sort_by_key(|gap| gap.language.lsp_id());
@@ -415,10 +434,10 @@ pub enum WorkspaceSearchRoute {
     /// only for a repository's work tree. The live lookup is the fallback,
     /// the zero is workspace-only, and building the index is the remedy.
     IndexNotBuilt,
-    /// A build still owned the index when the search stopped waiting for
-    /// it, so it had no completed state to answer from. The live lookup is
-    /// the fallback, and the remedy is to wait for that build rather than to
-    /// start one.
+    /// No build completed within the search's budget, so the index had no
+    /// completed state to answer from. The live lookup is the fallback, and
+    /// the remedy is the build's own, stated by [`IndexAbsence::disclosure`]
+    /// rather than prescribed again for each language.
     IndexRebuilding,
     /// The store could not be read, or no build had completed and the one
     /// the search ran failed. The live lookup is the whole answer, and the
@@ -466,6 +485,9 @@ pub fn symbol_coverage_hints(shortfall: &[Uncovered], route: DisclosureRoute) ->
                 ),
                 CoverageReason::NotSearched => format!(
                     "This result is not authoritative for {lang}: enough matches came from other languages, so it was never searched — narrow the query with --lang {lang}"
+                ),
+                CoverageReason::NotConsulted if gap.budget_spent => format!(
+                    "This result is not authoritative for {lang}: no language server was asked, since this search's budget went on an index build that did not complete within it"
                 ),
                 CoverageReason::NotConsulted => {
                     let index = match UnconsultedIndex::of(gap.language, route) {
@@ -593,6 +615,11 @@ pub fn symbol_coverage_next_commands(
             "symora search symbols --lang {lang}{kind}{paths}{source} -- {}",
             shell_arg(query)
         )];
+    }
+    // Nothing failed: the build that finishes the index is the remedy, and
+    // the route's own fact names it.
+    if gap.budget_spent {
+        return Vec::new();
     }
     if gap.reason == CoverageReason::NotConsulted {
         return match UnconsultedIndex::of(gap.language, route) {
@@ -843,12 +870,13 @@ pub fn with_coverage_disclosure<T>(
 ///
 /// A symbol search reads an index only once one has had its build: in a
 /// repository's work tree it builds one where no build has completed, and
-/// anywhere it waits for the build that owns one. What is left to answer
-/// around is a tree the search would not build for, a build still running
-/// when it stopped waiting, a build of its own that failed, or a store it
-/// could not read — each routes the live lookup that answers in the index's
-/// place and says what the absence cost. A daemon that was never reached is none of
-/// them: the store said nothing, so it is reported as itself.
+/// anywhere it waits for the build that owns one, within its own budget.
+/// What is left to answer around is a tree the search would not build for, a
+/// budget that ran out before a build completed, a build of its own that
+/// failed, or a store it could not read — each routes the live lookup that
+/// answers in the index's place and says what the absence cost. A daemon that
+/// was never reached is none of them: the store said nothing, so it is
+/// reported as itself.
 ///
 /// Every route that falls back to live symbols derives both from here, so two
 /// surfaces meeting the same store state cannot prescribe opposite remedies —
@@ -862,10 +890,13 @@ pub enum IndexAbsence {
         /// Why the root is not in a work tree, in git's own words.
         outside_work_tree: String,
     },
-    /// A build still owned the index when the search's wait for it,
-    /// [`INDEX_BUILD_WAIT`], ran out: one already running when the search
-    /// came to it, or the search's own, sent to a daemon.
-    StillBuilding,
+    /// No build completed within the search's budget, `lsp.timeout_secs`: its
+    /// own build, or one it found running, was unfinished when the budget ran
+    /// out. The build goes on — a daemon's runs on past its caller's budget,
+    /// and one cut off in process resumes with the next build — so the next
+    /// search continues it and `search index build` finishes it, in either
+    /// mode.
+    Unfinished { budget_secs: u64 },
     /// No build had completed, and the one the search ran failed.
     BuildFailed(StoreError),
     /// The store refused the read itself.
@@ -880,7 +911,7 @@ impl IndexAbsence {
     pub fn route(&self) -> Option<WorkspaceSearchRoute> {
         match self {
             Self::NotBuilt { .. } => Some(WorkspaceSearchRoute::IndexNotBuilt),
-            Self::StillBuilding => Some(WorkspaceSearchRoute::IndexRebuilding),
+            Self::Unfinished { .. } => Some(WorkspaceSearchRoute::IndexRebuilding),
             Self::BuildFailed(_) | Self::Unreadable(_) => {
                 Some(WorkspaceSearchRoute::IndexUnreadable)
             }
@@ -906,13 +937,13 @@ impl IndexAbsence {
                 ),
                 "symora search index build".to_string(),
             )),
-            Self::StillBuilding => Some((
+            Self::Unfinished { budget_secs } => Some((
                 format!(
-                    "A build of the search index was still running after this search waited {}s \
-                     for it, so the index took no part in this answer",
-                    INDEX_BUILD_WAIT.as_secs()
+                    "No build of the search index completed within this search's {budget_secs}s \
+                     budget (lsp.timeout_secs), so the index took no part in this answer; the \
+                     next search continues the build, and 'symora search index build' finishes it"
                 ),
-                "symora search index status".to_string(),
+                "symora search index build".to_string(),
             )),
             Self::BuildFailed(error) => Some((
                 format!(
@@ -942,7 +973,7 @@ impl IndexAbsence {
     pub fn into_error(self) -> StoreError {
         match self {
             Self::NotBuilt { .. } => StoreError::NotInitialized,
-            Self::StillBuilding => StoreError::Rebuilding,
+            Self::Unfinished { .. } => StoreError::Rebuilding,
             Self::BuildFailed(error) | Self::Unreadable(error) | Self::Unreachable(error) => error,
         }
     }
@@ -1445,10 +1476,9 @@ mod tests {
     }
 
     /// Every way the index stays out of a symbol answer that the search
-    /// can answer around, each made fresh.
+    /// can answer around and a build would not cure, each made fresh.
     fn absences() -> Vec<IndexAbsence> {
         vec![
-            IndexAbsence::StillBuilding,
             IndexAbsence::BuildFailed(StoreError::Io(std::io::Error::other("boom"))),
             IndexAbsence::BuildFailed(StoreError::Busy),
             IndexAbsence::Unreadable(StoreError::Corrupt("boom".to_string())),
@@ -1499,9 +1529,9 @@ mod tests {
     }
 
     /// Each absence says which it was, because each has a different remedy: a
-    /// build still running is waited for, and a build that failed leaves the
-    /// name's text, which a content search reads without an index or a
-    /// server.
+    /// build the budget left unfinished is finished by an explicit build, and
+    /// a build that failed leaves the name's text, which a content search
+    /// reads without an index or a server.
     #[test]
     fn an_absent_index_names_what_kept_it_out() {
         let (declined, build) = IndexAbsence::NotBuilt {
@@ -1520,11 +1550,44 @@ mod tests {
             "an index the search would not build is the caller's to build"
         );
 
-        let (running, wait) = IndexAbsence::StillBuilding
-            .disclosure(rerun("alpha"))
-            .unwrap();
-        assert!(running.contains("still running"), "{running}");
-        assert_eq!(wait, "symora search index status");
+        let unfinished = IndexAbsence::Unfinished { budget_secs: 5 };
+        let (fact, finish) = unfinished.disclosure(rerun("alpha")).unwrap();
+        assert!(
+            fact.contains("within this search's 5s budget (lsp.timeout_secs)")
+                && fact.contains("took no part in this answer"),
+            "{fact}"
+        );
+        assert_eq!(
+            finish, "symora search index build",
+            "the build a budget left unfinished is finished by an explicit one"
+        );
+        // No server was asked, so no language failed: each is unconsulted,
+        // with an extractor or without one, and the build beside the fact is
+        // the only remedy.
+        let shortfall = coverage_shortfall(
+            &[],
+            LiveLookup::BudgetSpent {
+                requested: &[Language::Html, Language::Rust],
+            },
+        );
+        assert!(
+            shortfall
+                .iter()
+                .all(|gap| gap.reason == CoverageReason::NotConsulted),
+            "{shortfall:?}"
+        );
+        let route = DisclosureRoute::WorkspaceOnly(unfinished.route().unwrap());
+        assert!(
+            symbol_coverage_next_commands(rerun("alpha"), &shortfall, route).is_empty(),
+            "the build is prescribed once, beside the fact, and nothing else is"
+        );
+        let hints = symbol_coverage_hints(&shortfall, route);
+        assert!(
+            hints
+                .iter()
+                .all(|hint| hint.contains("no language server was asked")),
+            "{hints:?}"
+        );
 
         let failed =
             IndexAbsence::BuildFailed(StoreError::Io(std::io::Error::other("Permission denied")));

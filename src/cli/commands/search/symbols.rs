@@ -20,7 +20,6 @@ use crate::cli::symbol_discovery::{
 };
 use crate::cli::utils::shell_arg;
 use crate::cli::{FileSymbols, SymbolBackend};
-use crate::constants::defaults::INDEX_BUILD_WAIT;
 use crate::error::{LspError, StoreError};
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
@@ -275,6 +274,7 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
                 route,
                 detected: &detected,
                 index_unavailable: None,
+                budget_spent: false,
             },
         )
         .await;
@@ -389,6 +389,7 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
                     route,
                     detected: &detected,
                     index_unavailable: absence.disclosure(search.rerun()),
+                    budget_spent: matches!(absence, IndexAbsence::Unfinished { .. }),
                 },
             )
             .await;
@@ -451,12 +452,17 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
             );
             return Ok(());
         }
-        // Telling the caller to build would be prescribing what is already
-        // running.
-        Err(IndexAbsence::StillBuilding) => {
+        Err(IndexAbsence::Unfinished { budget_secs }) => {
             ctx.print_error(
-                OutputError::from(StoreError::Rebuilding)
-                    .with_hint("Wait for 'symora search index status' to report is_indexing: false, then retry the wildcard query"),
+                OutputError::new(
+                    OutputError::from(StoreError::Rebuilding).code,
+                    format!(
+                        "No build of the search index completed within this search's \
+                         {budget_secs}s budget (lsp.timeout_secs), and a wildcard query is \
+                         answered from the index alone"
+                    ),
+                )
+                .with_hint("The next search continues the build; run 'symora search index build' to finish it, then retry the wildcard query"),
             );
             return Ok(());
         }
@@ -561,6 +567,11 @@ struct WorkspaceRoute<'a> {
     route: WorkspaceSearchRoute,
     detected: &'a DetectedLanguages,
     index_unavailable: Option<(String, String)>,
+    /// The search's budget went on an index build that did not complete
+    /// within it, so no server is asked: there is nothing left to ask one
+    /// with, and the lookup would only report as failed a lookup that never
+    /// had the time to run.
+    budget_spent: bool,
 }
 
 async fn execute_workspace_symbol_search(
@@ -572,6 +583,7 @@ async fn execute_workspace_symbol_search(
         route,
         detected,
         index_unavailable,
+        budget_spent,
     } = routed;
     let &SymbolSearch {
         query,
@@ -588,7 +600,10 @@ async fn execute_workspace_symbol_search(
         return Ok(());
     }
 
-    let lookup = collect_workspace_symbol_results(app, query, kind, limit, languages, within).await;
+    let lookup = match budget_spent {
+        true => WorkspaceSymbolLookup::none(),
+        false => collect_workspace_symbol_results(app, query, kind, limit, languages, within).await,
+    };
     let indexing = lookup.indexing();
     let degraded = lookup.degraded_languages();
     let mut narrowed = lookup.narrowed;
@@ -609,7 +624,7 @@ async fn execute_workspace_symbol_search(
     let mut index_bounds: Vec<LowerBound> = Vec::new();
     let mut lower_bounds: Vec<LowerBound> = Vec::new();
 
-    if looks_like_symbol_path(query) {
+    if looks_like_symbol_path(query) && !budget_spent {
         if candidates.len() < limit {
             // Document expansion is part of the same live answer: what it finds
             // is live, and what it had to leave behind leaves the live side cut
@@ -777,9 +792,14 @@ async fn execute_workspace_symbol_search(
     count = count.max(candidates.len());
     let shortfall = coverage_shortfall(
         &index_covered,
-        LiveLookup::Ran {
-            failures: &failures,
-            skipped: &skipped,
+        match budget_spent {
+            true => LiveLookup::BudgetSpent {
+                requested: languages,
+            },
+            false => LiveLookup::Ran {
+                failures: &failures,
+                skipped: &skipped,
+            },
         },
     );
     let disclosure_route = match index_consulted {
@@ -1055,15 +1075,20 @@ const BUILD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_milli
 /// `search index build` runs, written to `.symora/` — rather than leave the
 /// answer to language servers, whose zero after a long wait reads as absence.
 /// Anywhere else the build is left to the caller ([`outside_work_tree`]). A
-/// build already running is waited for rather than raced:
-/// the read finds it rebuilding and looks again, until [`INDEX_BUILD_WAIT`]
-/// has passed since the search began; past it the search answers without
-/// the index and says a build is still running. The search waits for its own
-/// build as `search index build` does: run in process, to completion; sent
-/// to a daemon, for [`INDEX_BUILD_WAIT`], after which a build the daemon is
-/// still running reads as one still running. The steps go through the store
-/// service, so a daemon and an in-process run take the same ones and answer
-/// from the same index.
+/// build already running is waited for rather than raced: the read finds it
+/// rebuilding and looks again.
+///
+/// Building and waiting spend the search's own budget (`lsp.timeout_secs`),
+/// the one its language servers are asked within, so the whole search
+/// answers within it; the live lookup gets what a completed build left. A
+/// budget that runs out before a build completes is spent on the build: the
+/// index takes no part, no server is asked, and the build goes on — one sent
+/// to a daemon runs on there, and one cut off in process resumes with the
+/// next build. A cold server's answer is no stand-in for the index: pyright
+/// answers a few seconds after it starts, before it has read the tree, with
+/// none of the names the index holds, and rust-analyzer not within its
+/// readiness wait. The steps go through the store service, so a daemon and
+/// an in-process run take the same ones and answer from the same index.
 async fn read_index(
     app: &App,
     query: &str,
@@ -1072,44 +1097,79 @@ async fn read_index(
     language: Option<Language>,
     within: &[PathBuf],
 ) -> Result<SearchPage<SymbolSearchResult>, IndexAbsence> {
-    let deadline = tokio::time::Instant::now() + INDEX_BUILD_WAIT;
+    let budget = std::time::Duration::from_secs(app.config().lsp.timeout_secs);
+    let end = crate::infra::deadline::expires_at(budget);
+    let spent = || end.is_some_and(|end| tokio::time::Instant::now() >= end);
+    let unfinished = || IndexAbsence::Unfinished {
+        budget_secs: budget.as_secs(),
+    };
     let mut failed = None;
+    // Whether the search has met a build that owns the index. A store's
+    // connection answers one request at a time; a read through the handle
+    // whose build runs is answered without it, but one can still wait there
+    // behind other work — the upkeep after a build publishes — so a read made
+    // while waiting on a build spends the budget as the wait does. The first
+    // read is not bounded: a completed index answers it at once, and refusing
+    // it for want of budget, which a path query's live lookup may have spent,
+    // would leave the index out of an answer it could join.
+    let mut waiting = false;
     loop {
-        let error = match app
+        let read = app
             .store
-            .search_symbols(query, rows, kind, language, within)
-            .await
-        {
+            .search_symbols(query, rows, kind, language, within);
+        let read = match waiting {
+            true => match crate::infra::deadline::run(budget, async { Ok(read.await) }).await {
+                Ok(read) => read,
+                Err(_) => return Err(unfinished()),
+            },
+            false => read.await,
+        };
+        let error = match read {
             Ok(page) => return Ok(page),
             Err(error) => error,
         };
-        let waited_out = tokio::time::Instant::now() >= deadline;
         match error {
             StoreError::NotInitialized => {
                 if let Some(error) = failed {
                     return Err(IndexAbsence::BuildFailed(error));
                 }
-                // Every build this search started or waited on stopped
-                // without completing one.
-                if waited_out {
-                    return Err(IndexAbsence::BuildFailed(StoreError::NotInitialized));
+                // The budget went on a build that stopped without completing.
+                if spent() {
+                    return Err(unfinished());
                 }
                 if let Some(why) = outside_work_tree(app.root()).await {
                     return Err(IndexAbsence::NotBuilt {
                         outside_work_tree: why,
                     });
                 }
-                match app.store.index(IndexOptions::default()).await {
+                let built = crate::infra::deadline::run(budget, async {
+                    Ok(app.store.index(IndexOptions::default()).await)
+                })
+                .await;
+                match built {
+                    Ok(Ok(_)) => {}
                     // Another build took the index first; the next read finds
                     // it rebuilding and waits for it.
-                    Ok(_) | Err(StoreError::AlreadyIndexing) => {}
-                    Err(error) => failed = Some(error),
+                    Ok(Err(StoreError::AlreadyIndexing)) => waiting = true,
+                    // The budget ran out first: in process it cut the build
+                    // off, and a daemon answers, before the budget's end, that
+                    // its build runs on.
+                    Err(_) | Ok(Err(StoreError::Rebuilding)) => return Err(unfinished()),
+                    // The daemon's answer did not come back within the budget.
+                    Ok(Err(StoreError::Unreachable(error)))
+                        if spent() && matches!(*error, LspError::Timeout(_)) =>
+                    {
+                        return Err(unfinished());
+                    }
+                    Ok(Err(error)) => failed = Some(error),
                 }
             }
-            StoreError::Rebuilding if !waited_out => {
-                tokio::time::sleep(BUILD_POLL_INTERVAL).await;
+            StoreError::Rebuilding if spent() => return Err(unfinished()),
+            StoreError::Rebuilding => {
+                waiting = true;
+                let next = tokio::time::Instant::now() + BUILD_POLL_INTERVAL;
+                tokio::time::sleep_until(end.map_or(next, |end| next.min(end))).await;
             }
-            StoreError::Rebuilding => return Err(IndexAbsence::StillBuilding),
             error if !error.describes_the_store() => return Err(IndexAbsence::Unreachable(error)),
             error => return Err(IndexAbsence::Unreadable(error)),
         }
@@ -1189,6 +1249,18 @@ struct WorkspaceSymbolLookup {
 }
 
 impl WorkspaceSymbolLookup {
+    /// A lookup that asked no language.
+    fn none() -> Self {
+        Self {
+            results: Vec::new(),
+            total: 0,
+            failures: Vec::new(),
+            skipped: Vec::new(),
+            degraded: Vec::new(),
+            narrowed: Vec::new(),
+        }
+    }
+
     /// The marker the combined rows carry: any degraded language makes them a
     /// lower bound.
     fn indexing(&self) -> Option<IndexingDegradation> {
@@ -1214,14 +1286,7 @@ async fn collect_workspace_symbol_results(
     let ctx = &app.output;
     let mut failures = Vec::new();
     if languages.is_empty() {
-        return WorkspaceSymbolLookup {
-            results: Vec::new(),
-            total: 0,
-            failures,
-            skipped: Vec::new(),
-            degraded: Vec::new(),
-            narrowed: Vec::new(),
-        };
+        return WorkspaceSymbolLookup::none();
     }
     let mut degraded = Vec::new();
 
@@ -2055,6 +2120,7 @@ mod tests {
             language: Language::Go,
             reason: CoverageReason::ServerNotInstalled,
             message: None,
+            budget_spent: false,
         }];
         let published = vec![CoverageGap {
             language: "go".to_string(),

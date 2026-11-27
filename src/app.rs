@@ -193,6 +193,12 @@ impl App {
         self.lsp.shutdown().await;
     }
 
+    /// For a one-shot command about to exit: roll back the work of a build
+    /// its search's budget cut off, rather than wait past that budget for it.
+    pub fn abandon_unfinished_build(&self) {
+        self.store.abandon_unfinished_build();
+    }
+
     /// Return a clone of `self` with the output sink replaced.
     ///
     /// Used by the MCP adapter to capture command output into a buffer

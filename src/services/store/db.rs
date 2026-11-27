@@ -10,11 +10,13 @@
 //!   back, surfaced as `StoreError`);
 //! - dropping `SqliteDb` drains already-submitted work, closes the
 //!   connection, and joins the thread, so the on-disk file is finalized
-//!   before shutdown completes.
+//!   before shutdown completes — unless the store was abandoned first, which
+//!   rolls that work back instead (`SqliteDb::abandon`).
 
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 use tokio::sync::oneshot;
@@ -31,13 +33,19 @@ type Job = Box<dyn FnOnce(&mut rusqlite::Connection) + Send>;
 pub struct SqliteDb {
     sender: Option<mpsc::Sender<Job>>,
     worker: Option<thread::JoinHandle<()>>,
+    interrupt: rusqlite::InterruptHandle,
+    /// Set by [`SqliteDb::abandon`]; the worker runs no job once it is.
+    abandoned: Arc<AtomicBool>,
 }
 
 impl SqliteDb {
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
         let path = path.to_path_buf();
-        let (ready_tx, ready_rx) = oneshot::channel::<Result<(), StoreError>>();
+        let (ready_tx, ready_rx) =
+            oneshot::channel::<Result<rusqlite::InterruptHandle, StoreError>>();
         let (sender, receiver) = mpsc::channel::<Job>();
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let skip = Arc::clone(&abandoned);
 
         let worker = thread::Builder::new()
             .name("symora-sqlite".to_string())
@@ -50,7 +58,7 @@ impl SqliteDb {
                     Ok(conn)
                 }) {
                     Ok(conn) => {
-                        let _ = ready_tx.send(Ok(()));
+                        let _ = ready_tx.send(Ok(conn.get_interrupt_handle()));
                         conn
                     }
                     Err(e) => {
@@ -60,7 +68,10 @@ impl SqliteDb {
                 };
 
                 while let Ok(job) = receiver.recv() {
-                    job(&mut conn);
+                    // Work an abandoned store was left with is dropped unrun.
+                    if !skip.load(Ordering::Acquire) {
+                        job(&mut conn);
+                    }
                 }
 
                 // Channel closed: all submitted work is done. Close the
@@ -69,14 +80,33 @@ impl SqliteDb {
             })
             .map_err(|e| StoreError::Database(format!("Failed to spawn SQLite thread: {e}")))?;
 
-        ready_rx
+        let interrupt = ready_rx
             .await
             .map_err(|_| StoreError::Database("SQLite thread exited during open".to_string()))??;
 
         Ok(Self {
             sender: Some(sender),
             worker: Some(worker),
+            interrupt,
+            abandoned,
         })
+    }
+
+    /// Give up the work this connection holds rather than finish it: the job
+    /// queued is dropped unrun, and the statement running is interrupted
+    /// until its job stops, so its transaction rolls back. For a store closing
+    /// with work nobody awaits any more; every call after it fails.
+    pub fn abandon(&self) {
+        self.abandoned.store(true, Ordering::Release);
+        self.interrupt.interrupt();
+    }
+
+    /// Run `f` once the connection has run every job given to it so far,
+    /// without waiting for it. Nothing runs it on a store abandoned first.
+    pub fn after_queued(&self, f: impl FnOnce() + Send + 'static) {
+        if let Some(sender) = &self.sender {
+            let _ = sender.send(Box::new(move |_conn: &mut rusqlite::Connection| f()));
+        }
     }
 
     pub async fn call<F, R>(&self, f: F) -> Result<R, StoreError>
@@ -149,6 +179,13 @@ impl Drop for SqliteDb {
         // bounded by work submitted before drop — nothing new can enqueue.
         drop(self.sender.take());
         if let Some(worker) = self.worker.take() {
+            // An interrupt lands only on a statement already running, and a
+            // job runs its statements one after another, so an abandoned
+            // store's job is interrupted until it stops.
+            while self.abandoned.load(Ordering::Acquire) && !worker.is_finished() {
+                self.interrupt.interrupt();
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
             let _ = worker.join();
         }
     }
@@ -167,6 +204,7 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn drop_finalizes_the_database_file() {
@@ -192,6 +230,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    /// An abandoned store closes without finishing its work: the statement
+    /// running is interrupted and its transaction rolls back, and the job
+    /// queued behind it never runs. Closed without being abandoned, the store
+    /// would run the statement to its end, which here takes far longer than
+    /// the close is given.
+    #[tokio::test]
+    async fn an_abandoned_store_closes_without_finishing_its_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        let db = SqliteDb::open(&path).await.unwrap();
+        db.execute("PRAGMA journal_mode = WAL; CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .await
+            .unwrap();
+
+        // Each call is handed to the connection when first polled, and left
+        // there when the caller stops waiting for it.
+        let running = db.call(|conn| {
+            let tx = conn.transaction()?;
+            tx.execute("INSERT INTO t (id) VALUES (1)", [])?;
+            tx.query_row(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) \
+                 SELECT count(*) FROM n",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?;
+            tx.commit()
+        });
+        let queued = db.call(|conn| conn.execute("INSERT INTO t (id) VALUES (2)", []).map(drop));
+        let _ = tokio::time::timeout(Duration::from_millis(100), running).await;
+        let _ = tokio::time::timeout(Duration::from_millis(1), queued).await;
+
+        db.abandon();
+        let (closed, close) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(db);
+            let _ = closed.send(());
+        });
+        close
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the abandoned store closed without finishing its work");
+
+        let db = SqliteDb::open(&path).await.unwrap();
+        let count = db
+            .call(|conn| conn.query_row("SELECT COUNT(*) FROM t", [], |r| r.get::<_, i64>(0)))
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "neither write may survive the abandonment");
     }
 
     #[tokio::test]

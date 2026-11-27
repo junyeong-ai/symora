@@ -12,7 +12,7 @@ use crate::error::LspError;
 use crate::services::lsp::LspService;
 
 use super::config::DaemonRuntimeConfig;
-use super::context::{ProjectContext, ProjectsMap, get_context, restart_project};
+use super::context::{ProjectContext, ProjectLease, ProjectsMap, get_context, restart_project};
 use super::handlers;
 use super::store_handlers;
 
@@ -58,24 +58,26 @@ pub(super) async fn dispatch(
             let params = request.params.unwrap_or(serde_json::json!({}));
             let p: ProjectParams = parse_params(&params)?;
             let ctx = get_context(projects, &p.project).await?;
-            let configured = estimate_request_timeout(&request.method, &ctx);
-            let timeout = caller_budget
-                .map_or(configured, |budget| budget.min(configured))
-                .saturating_sub(received.elapsed());
-            if timeout.is_zero() {
-                return Err(RpcError::from(&LspError::timeout(
-                    "Caller time budget expired".to_string(),
-                )));
+            let timeout = match (
+                caller_budget,
+                estimate_request_timeout(&request.method, &ctx),
+            ) {
+                (Some(budget), Some(configured)) => Some(budget.min(configured)),
+                (budget, configured) => budget.or(configured),
             }
-            crate::infra::deadline::scope(
-                timeout,
-                tokio::time::timeout(
+            .map(|timeout| timeout.saturating_sub(received.elapsed()));
+            match timeout {
+                Some(timeout) if timeout.is_zero() => Err(RpcError::from(&LspError::timeout(
+                    "Caller time budget expired".to_string(),
+                ))),
+                Some(timeout) => crate::infra::deadline::scope(
                     timeout,
-                    dispatch_project(&request.method, &params, Arc::clone(&ctx)),
-                ),
-            )
-            .await
-            .map_err(timeout_error)?
+                    tokio::time::timeout(timeout, dispatch_project(&request.method, &params, &ctx)),
+                )
+                .await
+                .map_err(timeout_error)?,
+                None => dispatch_project(&request.method, &params, &ctx).await,
+            }
         }
     }
 }
@@ -84,15 +86,23 @@ fn timeout_error(_: tokio::time::error::Elapsed) -> RpcError {
     RpcError::from(&LspError::timeout("Request timed out".to_string()))
 }
 
-fn estimate_request_timeout(method: &str, ctx: &ProjectContext) -> Duration {
-    crate::daemon::lsp_request_timeout(&ctx.config, method).unwrap_or(NON_LSP_REQUEST_TIMEOUT)
+/// The bound the project's configuration puts on a method, `None` where it
+/// puts none: an index build runs to completion unless its caller's own
+/// budget bounds the wait for it.
+fn estimate_request_timeout(method: &str, ctx: &ProjectContext) -> Option<Duration> {
+    match crate::daemon::lsp_request_timeout(&ctx.config, method) {
+        Some(timeout) => Some(timeout),
+        None if method == methods::INDEX_BUILD => None,
+        None => Some(NON_LSP_REQUEST_TIMEOUT),
+    }
 }
 
 async fn dispatch_project(
     method: &str,
     params: &serde_json::Value,
-    ctx: Arc<ProjectContext>,
+    lease: &ProjectLease,
 ) -> Result<serde_json::Value, RpcError> {
+    let ctx: Arc<ProjectContext> = Arc::clone(lease);
     match method {
         // Symbol operations
         methods::FIND_SYMBOLS => handlers::handle_find_symbols(params, &ctx).await,
@@ -204,7 +214,7 @@ async fn dispatch_project(
         methods::REFRESH_FILES => store_handlers::handle_refresh_files(params, &ctx).await,
         methods::SEARCH_SYMBOLS => store_handlers::handle_search_symbols(params, &ctx).await,
         methods::SEARCH_CONTENT => store_handlers::handle_search_content(params, &ctx).await,
-        methods::INDEX_BUILD => store_handlers::handle_index_build(params, &ctx).await,
+        methods::INDEX_BUILD => store_handlers::handle_index_build(params, lease.share()).await,
         methods::INDEX_STATUS => store_handlers::handle_index_status(&ctx).await,
         methods::TREE_CURRENCY => store_handlers::handle_tree_currency(&ctx).await,
         methods::INDEXED_LANGUAGES => store_handlers::handle_indexed_languages(&ctx).await,
@@ -280,7 +290,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 estimate_request_timeout(methods::HOVER, &ctx),
-                Duration::from_secs(seconds)
+                Some(Duration::from_secs(seconds))
             );
             std::fs::write(
                 root.path().join(".symora/config.toml"),
@@ -293,7 +303,7 @@ mod tests {
             assert!(Arc::ptr_eq(&ctx, &retained));
             assert_eq!(
                 estimate_request_timeout(methods::HOVER, &retained),
-                Duration::from_secs(seconds)
+                Some(Duration::from_secs(seconds))
             );
         }
         assert_eq!(projects.read().await.len(), 2);
@@ -305,11 +315,11 @@ mod tests {
         let ctx = ProjectContext::new(root.path());
         assert_eq!(
             estimate_request_timeout(methods::WORKSPACE_SYMBOLS, &ctx),
-            Duration::from_secs(60)
+            Some(Duration::from_secs(60))
         );
         assert_eq!(
             crate::daemon::client::calculate_timeout(&ctx.config, methods::WORKSPACE_SYMBOLS),
-            Duration::from_secs(60)
+            Some(Duration::from_secs(60))
         );
     }
 
@@ -319,11 +329,11 @@ mod tests {
         let ctx = ProjectContext::new(root.path());
         assert_eq!(
             estimate_request_timeout(methods::WORKSPACE_SYMBOLS, &ctx),
-            Duration::from_secs(10)
+            Some(Duration::from_secs(10))
         );
         assert_eq!(
             crate::daemon::client::calculate_timeout(&ctx.config, methods::WORKSPACE_SYMBOLS),
-            Duration::from_secs(10)
+            Some(Duration::from_secs(10))
         );
         for method in [
             methods::PING,
@@ -333,7 +343,6 @@ mod tests {
             methods::NOTE_FILES_EDITED,
             methods::SEARCH_SYMBOLS,
             methods::SEARCH_CONTENT,
-            methods::INDEX_BUILD,
             methods::INDEX_STATUS,
             methods::TREE_CURRENCY,
             methods::INDEXED_LANGUAGES,
@@ -341,9 +350,64 @@ mod tests {
         ] {
             assert_eq!(
                 estimate_request_timeout(method, &ctx),
-                Duration::from_secs(600),
+                Some(Duration::from_secs(600)),
                 "{method}"
             );
+        }
+        // A build runs to completion unless its caller's budget bounds it.
+        assert_eq!(estimate_request_timeout(methods::INDEX_BUILD, &ctx), None);
+        assert_eq!(
+            crate::daemon::client::calculate_timeout(&ctx.config, methods::INDEX_BUILD),
+            None
+        );
+        crate::infra::deadline::scope(Duration::from_secs(3), async {
+            assert_eq!(
+                crate::daemon::client::calculate_timeout(&ctx.config, methods::INDEX_BUILD),
+                Some(Duration::from_secs(10))
+            );
+        })
+        .await;
+    }
+
+    /// A build is the project's rather than the request's: a caller whose
+    /// budget runs out first is answered that a build owns the index, and the
+    /// build runs on to completion. Another owner holds the index while the
+    /// caller waits, so the build is still waiting for it when the budget
+    /// runs out.
+    #[tokio::test]
+    async fn a_build_runs_on_past_its_callers_budget() {
+        let root = project(60);
+        std::fs::write(root.path().join("lib.rs"), "pub fn alpha() {}\n").unwrap();
+        let held =
+            crate::infra::file_lock::FileLock::exclusive(&root.path().join(".symora/index.lock"))
+                .unwrap()
+                .expect("nothing else holds a fresh project's index");
+        let config = DaemonRuntimeConfig::load().unwrap();
+        let projects: ProjectsMap = Arc::new(RwLock::new(HashMap::new()));
+        let mut request = Request::new(
+            1,
+            methods::INDEX_BUILD,
+            Some(serde_json::json!({"project": root.path(), "force": false})),
+        );
+        request.timeout_ms = Some(100);
+        let answered = dispatch(request, &projects, &config, Instant::now()).await;
+        drop(held);
+        assert_eq!(
+            answered.unwrap_err().code,
+            crate::error::StoreError::REBUILDING_CODE
+        );
+
+        use crate::services::store::StoreService;
+        let ctx = get_context(&projects, root.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ctx.store.index_status().await.unwrap().languages.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "the build stopped with its caller's budget"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 

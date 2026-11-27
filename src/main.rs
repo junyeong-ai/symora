@@ -163,17 +163,28 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<bool> {
         *edit_payload(&mut cli.command).unwrap() = input;
     }
 
-    // A process that serves until stopped holds every project it serves;
-    // see `fd_limit` for why only those raise their open-file limit.
+    // A process that serves until stopped, rather than one command.
     #[cfg(unix)]
-    if matches!(
+    let serves = matches!(
         &cli.command,
         Commands::Daemon(DaemonArgs {
             command: DaemonCommand::Serve
         }) | Commands::Mcp(McpArgs {
             command: McpCommand::Serve { .. },
         })
-    ) {
+    );
+    #[cfg(not(unix))]
+    let serves = matches!(
+        &cli.command,
+        Commands::Mcp(McpArgs {
+            command: McpCommand::Serve { .. },
+        })
+    );
+
+    // It holds every project it serves; see `fd_limit` for why only such a
+    // process raises its open-file limit.
+    #[cfg(unix)]
+    if serves {
         symora::infra::fd_limit::raise();
     }
 
@@ -234,6 +245,13 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<bool> {
     // as one it prints, so both carry what that layer adds to a response.
     if let Err(e) = result {
         app.report_error(e);
+    }
+    // One command exits once it has answered, so a build its search's budget
+    // cut off is rolled back rather than finished: finishing it would hold
+    // the exit past the budget the answer kept to. A process that serves
+    // lets the build's work complete for the searches after it.
+    if !serves {
+        app.abandon_unfinished_build();
     }
     app.shutdown().await;
 

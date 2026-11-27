@@ -3,10 +3,11 @@ use crate::daemon::params::{
 };
 use crate::daemon::protocol::RpcError;
 use crate::daemon::wire;
+use crate::error::StoreError;
 use crate::models::symbol::{Language, SymbolKind};
 use crate::services::store::{IndexOptions, SearchPage, StoreService};
 
-use super::context::ProjectContext;
+use super::context::{ProjectContext, ProjectLease};
 use super::dispatch::parse_params;
 
 /// Re-index just-edited files in the store. A failure travels back to the
@@ -129,9 +130,17 @@ fn search_response<T>(
     }
 }
 
+/// Run a build to completion, answering by the caller's budget where it
+/// carries one.
+///
+/// The build is the project's rather than the request's: it runs on its own
+/// task, holding the project — and so the daemon — in use until it ends, so a
+/// caller that stops waiting, or goes away, cuts nothing off. A caller whose
+/// budget runs out first is answered that a build still owns the index, which
+/// the next read finds and waits for.
 pub(super) async fn handle_index_build(
     params: &serde_json::Value,
-    ctx: &ProjectContext,
+    lease: ProjectLease,
 ) -> Result<serde_json::Value, RpcError> {
     let p: IndexBuildParams = parse_params(params)?;
 
@@ -147,7 +156,17 @@ pub(super) async fn handle_index_build(
         languages,
     };
 
-    let stats = ctx.store.index(options).await.map_err(RpcError::from)?;
+    let build = tokio::spawn(async move { lease.store.index(options).await });
+    let built = match crate::infra::deadline::current() {
+        Some(end) => match tokio::time::timeout_at(end, build).await {
+            Ok(built) => built,
+            Err(_) => return Err(RpcError::from(StoreError::Rebuilding)),
+        },
+        None => build.await,
+    };
+    let stats = built
+        .map_err(|e| RpcError::internal_error(&format!("Index build stopped: {e}")))?
+        .map_err(RpcError::from)?;
     serde_json::to_value(stats).map_err(RpcError::from)
 }
 

@@ -9,9 +9,14 @@ tokio::task_local! {
     static DEADLINE: Option<Instant>;
 }
 
+/// The end of the budget the running work spends, where one is in force.
+pub fn current() -> Option<Instant> {
+    DEADLINE.try_with(|current| *current).ok().flatten()
+}
+
 pub fn expires_at(limit: Duration) -> Option<Instant> {
     let local = Instant::now().checked_add(limit);
-    let parent = DEADLINE.try_with(|current| *current).ok().flatten();
+    let parent = current();
     match (local, parent) {
         (Some(local), Some(parent)) => Some(local.min(parent)),
         (local, parent) => local.or(parent),
@@ -24,6 +29,12 @@ pub fn remaining(limit: Duration) -> Duration {
 
 pub async fn scope<F: Future>(limit: Duration, future: F) -> F::Output {
     DEADLINE.scope(expires_at(limit), future).await
+}
+
+/// Run work that has no budget, whatever its caller's: it runs to completion,
+/// and a transport that forwards a caller's allowance forwards none for it.
+pub async fn unbounded<F: Future>(future: F) -> F::Output {
+    DEADLINE.scope(None, future).await
 }
 
 pub async fn run<T>(

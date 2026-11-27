@@ -524,6 +524,117 @@ fn a_first_search_builds_and_answers_alike_in_process_through_a_daemon_and_over_
     assert_eq!(direct, over_mcp, "MCP and the CLI diverged");
 }
 
+/// A symbol search spends its own budget on the index, whichever way it runs.
+/// One that finds a build owning the index waits for it within
+/// `lsp.timeout_secs`, and when the budget runs out first, the answer in
+/// process and through a daemon alike leaves the index out, asks no language
+/// server — one asked would say its server is not installed, one asked with
+/// no budget left that it timed out — and names the build that finishes it
+/// as its one remedy. That build has no budget in either mode: it waits
+/// out the build owning the index, past the budget the searches spent, then
+/// completes. One project serves both modes, so they meet the same index.
+#[test]
+#[cfg(unix)]
+fn a_budget_spent_on_a_build_answers_alike_and_the_explicit_build_finishes_it() {
+    let installing =
+        std::thread::spawn(|| IsolatedDaemon::for_test("a_budget_spent_on_a_build_answers_alike"));
+    let repository = tempfile::tempdir().unwrap();
+    let root = repository.path();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(root)
+        .status()
+        .unwrap();
+    assert!(init.success());
+    std::fs::create_dir(root.join(".symora")).unwrap();
+    std::fs::write(root.join("lib.rs"), "pub fn helper_alpha() {}\n").unwrap();
+    std::fs::write(
+        root.join(".symora/config.toml"),
+        "[lsp]\ntimeout_secs = 1\n\n[lsp.servers.rust]\ncommand = \
+         \"/nonexistent/rust-analyzer-missing\"\n",
+    )
+    .unwrap();
+    let daemon = installing.join().unwrap();
+    daemon.start();
+    let held = symora::infra::file_lock::FileLock::exclusive(&root.join(".symora/index.lock"))
+        .unwrap()
+        .expect("nothing else holds a fresh project's index");
+    let direct_command = |args: &[&str]| {
+        let mut command = symora();
+        command
+            .args(args)
+            .args(["--format", "compact"])
+            .current_dir(root)
+            .env("SYMORA_NO_DAEMON", "1")
+            .stderr(Stdio::null());
+        command
+    };
+
+    let search = ["search", "symbols", "helper_alpha"];
+    let started = Instant::now();
+    let (direct, through_daemon) = std::thread::scope(|scope| {
+        let direct = scope.spawn(|| {
+            let output = direct_command(&search).output().unwrap();
+            assert!(output.status.success());
+            vec![common::parse_response(&output.stdout).unwrap()]
+        });
+        let through_daemon = run_daemon_cli(&daemon, root, &search);
+        (direct.join().unwrap(), through_daemon)
+    });
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the searches waited past their budget"
+    );
+    assert_eq!(direct, through_daemon, "daemon and direct diverged");
+    let answer = &direct[0];
+    assert_eq!(answer["count"], 0, "{answer}");
+    assert!(
+        answer["hints"][0]
+            .as_str()
+            .is_some_and(|hint| hint.contains("within this search's 1s budget")),
+        "{answer}"
+    );
+    assert_eq!(
+        answer["next_commands"],
+        json!(["symora search index build"]),
+        "nothing failed, so the build is the one remedy: {answer}"
+    );
+    assert_eq!(
+        answer["coverage_gaps"],
+        json!([{"language": "rust", "reason": "not_consulted"}]),
+        "{answer}"
+    );
+
+    let build = ["search", "index", "build"];
+    let mut daemon_build = daemon.command(root);
+    daemon_build
+        .args(build)
+        .args(["--format", "compact"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let builds = [
+        direct_command(&build)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+        daemon_build.spawn().unwrap(),
+    ];
+    std::thread::sleep(Duration::from_millis(1500));
+    let builds = builds.map(|mut build| {
+        let waited = build.try_wait().unwrap().is_none();
+        (waited, build)
+    });
+    drop(held);
+    for (waited, build) in builds {
+        let output = build.wait_with_output().unwrap();
+        let answer = common::parse_response(&output.stdout).unwrap();
+        assert!(waited, "a build answered within the budget: {answer}");
+        assert!(output.status.success(), "{answer}");
+        assert_eq!(answer["status"], "completed", "{answer}");
+    }
+    daemon.assert_serving();
+}
+
 /// A query reads, and writes nothing into the tree it reads. Outside a work
 /// tree no search starts a build either, so every read command — searches of
 /// each kind, navigation, analysis, previews, status — leaves a plain

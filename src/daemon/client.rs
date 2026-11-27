@@ -21,7 +21,10 @@ use crate::infra::file_lock::FileLock;
 /// timeout — what it saw of the server meanwhile — never arrives.
 const ANSWER_MARGIN: Duration = Duration::from_millis(250);
 
-pub(super) fn calculate_timeout(config: &LspRuntimeConfig, method: &str) -> Duration {
+/// How long the client waits for a method's answer; `None` waits for as long
+/// as the daemon takes, which a daemon that exits still ends, as a lost
+/// connection.
+pub(super) fn calculate_timeout(config: &LspRuntimeConfig, method: &str) -> Option<Duration> {
     // Daemon-only operations with fixed timeouts
     match method {
         methods::PING
@@ -30,19 +33,34 @@ pub(super) fn calculate_timeout(config: &LspRuntimeConfig, method: &str) -> Dura
         | methods::RESTART_PROJECT
         | methods::REFRESH_FILES
         | methods::NOTE_FILES_EDITED => {
-            return Duration::from_secs(30);
+            return Some(Duration::from_secs(30));
         }
-        methods::INDEX_BUILD => return crate::constants::defaults::INDEX_BUILD_WAIT,
-        methods::INDEX_CLEAR | methods::INDEX_STATUS => return Duration::from_secs(120),
-        methods::SEARCH_SYMBOLS | methods::SEARCH_CONTENT => return Duration::from_secs(60),
+        // A build spends its caller's budget where one is in force — a
+        // symbol search's — and has none otherwise: `search index build`
+        // runs to completion, as it does in process.
+        methods::INDEX_BUILD => {
+            return crate::infra::deadline::current().map(|_| config.request_timeout());
+        }
+        methods::INDEX_CLEAR | methods::INDEX_STATUS => return Some(Duration::from_secs(120)),
+        methods::SEARCH_SYMBOLS | methods::SEARCH_CONTENT => return Some(Duration::from_secs(60)),
         methods::TREE_CURRENCY | methods::INDEXED_LANGUAGES => {
-            return config.request_timeout();
+            return Some(config.request_timeout());
         }
         _ => {}
     }
 
-    crate::daemon::lsp_request_timeout(config, method)
-        .expect("LSP request method must have a mapping")
+    Some(
+        crate::daemon::lsp_request_timeout(config, method)
+            .expect("LSP request method must have a mapping"),
+    )
+}
+
+/// Whether a method spends the caller's shared budget: its wait and the
+/// daemon's start consume the caller's remaining allowance, which the request
+/// carries to the daemon. Every LSP request does; an index build does where
+/// its caller has a budget to spend.
+fn spends_caller_budget(method: &str) -> bool {
+    methods::to_lsp_method(method).is_some() || method == methods::INDEX_BUILD
 }
 
 /// A peer closing with the request unread appears as EOF on macOS and as a
@@ -393,7 +411,7 @@ impl DaemonClient {
     /// from a different binary.
     async fn ping(&self) -> Result<bool, LspError> {
         let response = self
-            .send_request(methods::PING, None, Duration::from_secs(30))
+            .send_request(methods::PING, None, Some(Duration::from_secs(30)))
             .await?;
         if response.error.is_some() {
             return Err(LspError::Protocol("Ping failed".to_string()));
@@ -420,17 +438,20 @@ impl DaemonClient {
         &self,
         method: &str,
         params: Option<serde_json::Value>,
-        timeout_duration: Duration,
+        timeout_duration: Option<Duration>,
     ) -> Result<Response, LspError> {
-        if methods::to_lsp_method(method).is_some() {
-            crate::infra::deadline::run(
-                timeout_duration,
-                self.send_request_inner(method, params, timeout_duration),
-            )
-            .await
-        } else {
-            self.send_request_inner(method, params, timeout_duration)
+        match timeout_duration.filter(|_| spends_caller_budget(method)) {
+            Some(limit) => {
+                crate::infra::deadline::run(
+                    limit,
+                    self.send_request_inner(method, params, timeout_duration),
+                )
                 .await
+            }
+            None => {
+                self.send_request_inner(method, params, timeout_duration)
+                    .await
+            }
         }
     }
 
@@ -438,7 +459,7 @@ impl DaemonClient {
         &self,
         method: &str,
         params: Option<serde_json::Value>,
-        timeout_duration: Duration,
+        timeout_duration: Option<Duration>,
     ) -> Result<Response, LspError> {
         let stream = UnixStream::connect(&self.config.socket_path)
             .await
@@ -455,9 +476,9 @@ impl DaemonClient {
 
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let mut request = Request::new(id, method, params);
-        if methods::to_lsp_method(method).is_some() {
+        if let Some(limit) = timeout_duration.filter(|_| spends_caller_budget(method)) {
             request.timeout_ms = Some(
-                crate::infra::deadline::remaining(timeout_duration)
+                crate::infra::deadline::remaining(limit)
                     .saturating_sub(ANSWER_MARGIN)
                     .as_millis()
                     .try_into()
@@ -480,16 +501,19 @@ impl DaemonClient {
             .map_err(|e| request_io_error(method, e))?;
 
         let mut line = String::new();
-        let read = timeout(timeout_duration, reader.read_line(&mut line))
-            .await
-            .map_err(|_| {
-                LspError::timeout(format!(
-                    "Operation '{}' timed out after {}s",
-                    method,
-                    timeout_duration.as_secs()
-                ))
-            })?
-            .map_err(|e| request_io_error(method, e))?;
+        let read = match timeout_duration {
+            Some(limit) => timeout(limit, reader.read_line(&mut line))
+                .await
+                .map_err(|_| {
+                    LspError::timeout(format!(
+                        "Operation '{}' timed out after {}s",
+                        method,
+                        limit.as_secs()
+                    ))
+                })?,
+            None => reader.read_line(&mut line).await,
+        }
+        .map_err(|e| request_io_error(method, e))?;
 
         // End of stream: the daemon closed without answering — it exited or
         // was replaced while this request was in flight. Parsing the empty
@@ -529,14 +553,13 @@ impl DaemonClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<Response, LspError> {
-        if methods::to_lsp_method(method).is_some() {
-            crate::infra::deadline::run(
-                self.lsp_config.request_timeout(),
-                self.request_project_inner(method, params),
-            )
-            .await
-        } else {
-            self.request_project_inner(method, params).await
+        let budget =
+            calculate_timeout(&self.lsp_config, method).filter(|_| spends_caller_budget(method));
+        match budget {
+            Some(limit) => {
+                crate::infra::deadline::run(limit, self.request_project_inner(method, params)).await
+            }
+            None => self.request_project_inner(method, params).await,
         }
     }
 
@@ -820,7 +843,7 @@ impl DaemonClient {
     }
 
     pub async fn status(&self) -> Result<serde_json::Value, LspError> {
-        self.send_request(methods::STATUS, None, Duration::from_secs(30))
+        self.send_request(methods::STATUS, None, Some(Duration::from_secs(30)))
             .await
             .and_then(Self::extract_result)
     }
@@ -830,7 +853,7 @@ impl DaemonClient {
     /// than dress up as a stop that happened.
     pub async fn shutdown(&self) -> Result<bool, LspError> {
         let reached = match self
-            .send_request(methods::SHUTDOWN, None, Duration::from_secs(30))
+            .send_request(methods::SHUTDOWN, None, Some(Duration::from_secs(30)))
             .await
         {
             Ok(_) => true,

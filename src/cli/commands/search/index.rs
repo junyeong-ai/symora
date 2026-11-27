@@ -4,9 +4,9 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::response::disclosure::relative_unread_paths;
+use crate::error::StoreError;
 use crate::models::symbol::Language;
-use crate::services::store::IndexOptions;
-use crate::services::store::UnreadPath;
+use crate::services::store::{IndexOptions, IndexStats, UnreadPath};
 
 use super::IndexCommand;
 
@@ -114,6 +114,24 @@ fn status_next_commands(languages: &[Language], is_indexing: bool) -> Vec<String
     }
 }
 
+/// An explicit build, run to completion in process and through a daemon
+/// alike: no budget bounds it, and a build that owns the index when it starts
+/// is waited out rather than reported, then this one runs — finishing what a
+/// search's budget left unfinished, whoever was running it. Each attempt
+/// waits for the index lock before it reports a build in progress, so asking
+/// again is the wait.
+async fn build_to_completion(app: &App, options: IndexOptions) -> Result<IndexStats, StoreError> {
+    crate::infra::deadline::unbounded(async {
+        loop {
+            match app.store.index(options.clone()).await {
+                Err(StoreError::AlreadyIndexing) => {}
+                built => return built,
+            }
+        }
+    })
+    .await
+}
+
 pub async fn execute_index_command(app: &App, command: IndexCommand) -> Result<()> {
     let ctx = &app.output;
 
@@ -126,7 +144,7 @@ pub async fn execute_index_command(app: &App, command: IndexCommand) -> Result<(
                     return Ok(());
                 }
             };
-            match app.store.index(IndexOptions { force, languages }).await {
+            match build_to_completion(app, IndexOptions { force, languages }).await {
                 Ok(stats) => ctx.print_success(IndexBuildOutput {
                     status: "completed".to_string(),
                     file_count: stats.file_count,

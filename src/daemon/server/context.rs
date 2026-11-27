@@ -81,6 +81,16 @@ impl ProjectLease {
             context: Arc::clone(context),
         }
     }
+
+    /// Another lease on the same project, for work that outlives the request
+    /// holding this one. This lease already keeps the project from idle
+    /// eviction, so the new one needs no projects-map lock to be taken safely.
+    pub(super) fn share(&self) -> Self {
+        self.context.in_flight.fetch_add(1, Ordering::Relaxed);
+        Self {
+            context: Arc::clone(&self.context),
+        }
+    }
 }
 
 impl std::ops::Deref for ProjectLease {

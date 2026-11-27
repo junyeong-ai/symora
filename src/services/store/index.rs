@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::OptionalExtension;
@@ -397,6 +399,51 @@ pub struct Store {
     db: SqliteDb,
     project_root: PathBuf,
     config: StoreConfig,
+    /// The build windows this handle has open ([`BuildWindow`]).
+    building: Arc<AtomicUsize>,
+    /// Whether a build of this handle stopped before it published — an
+    /// error, or a caller that stopped awaiting it — perhaps leaving work on
+    /// the connection.
+    unfinished: AtomicBool,
+}
+
+/// A build window this handle opened: `begin_build` took the completion
+/// marker away, and the build has not put it back. While one is open, a read
+/// through this handle can only find no completed build, and says so without
+/// queueing on the connection behind the build's own work — the last of
+/// which, the publication, can take longer than a search's whole budget. A
+/// build that stops with its window open — an error, or a caller that
+/// stopped awaiting it — may leave work on the connection: the window stays
+/// open until that work has run, and the build counts as unfinished
+/// ([`Store::abandon_unfinished_build`]).
+struct BuildWindow<'a> {
+    store: &'a Store,
+    open: bool,
+}
+
+impl<'a> BuildWindow<'a> {
+    fn open(store: &'a Store) -> Self {
+        store.building.fetch_add(1, Ordering::AcqRel);
+        Self { store, open: true }
+    }
+
+    fn close(mut self) {
+        self.open = false;
+        self.store.building.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Drop for BuildWindow<'_> {
+    fn drop(&mut self) {
+        if !self.open {
+            return;
+        }
+        self.store.unfinished.store(true, Ordering::Release);
+        let building = Arc::clone(&self.store.building);
+        self.store.db.after_queued(move || {
+            building.fetch_sub(1, Ordering::AcqRel);
+        });
+    }
 }
 
 impl Store {
@@ -449,7 +496,22 @@ impl Store {
             db,
             project_root: project_root.to_path_buf(),
             config,
+            building: Arc::new(AtomicUsize::new(0)),
+            unfinished: AtomicBool::new(false),
         })
+    }
+
+    /// Roll back the work a build of this handle left when it stopped short
+    /// of publishing, rather than finish it, as the store closes. For a
+    /// process about to exit after its search's budget cut the build off:
+    /// the build's last transaction would otherwise hold the exit past that
+    /// budget, and a one-shot run has no later search to serve with it. A
+    /// long-lived process never calls it, so the work completes there and
+    /// its later searches find it.
+    pub fn abandon_unfinished_build(&self) {
+        if self.unfinished.load(Ordering::Acquire) {
+            self.db.abandon();
+        }
     }
 
     async fn try_open_db(db_path: &Path) -> Result<SqliteDb, StoreError> {
@@ -551,6 +613,7 @@ impl Store {
         language: Option<Language>,
         within: &[PathBuf],
     ) -> Result<SearchPage<SymbolSearchResult>, StoreError> {
+        self.outside_build_window()?;
         let query = query.to_string();
         let limit = limit as i64;
         let kind_str = kind_filter.map(|k| k.to_string());
@@ -667,6 +730,17 @@ impl Store {
         Ok(page)
     }
 
+    /// A read through a handle whose own build window is open finds no
+    /// completed build, since that build took the marker away: it is told so
+    /// at once ([`BuildWindow`]) rather than after the build's work queued
+    /// ahead of it on the connection.
+    fn outside_build_window(&self) -> Result<(), StoreError> {
+        match self.building.load(Ordering::Acquire) {
+            0 => Ok(()),
+            _ => Err(StoreError::Rebuilding),
+        }
+    }
+
     /// Why the index has no completed build to answer from. A build owns the
     /// index for its whole duration — `begin_build` clears the completion
     /// marker and `publish_build` restores it — so an absent marker is two
@@ -693,6 +767,7 @@ impl Store {
         limit: usize,
         languages: &[Language],
     ) -> Result<SearchPage<ContentSearchResult>, StoreError> {
+        self.outside_build_window()?;
         let requested = languages.to_vec();
         let query = query.to_string();
         let limit = limit as i64;
@@ -1233,6 +1308,7 @@ impl Store {
             false => Reindex::InPlace,
         };
         let epoch = self.begin_build(reindex, defer_text_index).await?;
+        let window = BuildWindow::open(self);
         // Pruning reads "absent from the walk" as "gone from the tree", which
         // holds only where the walk went. It is scoped to that rather than
         // refused outright: a single directory the walk could not enter would
@@ -1296,8 +1372,11 @@ impl Store {
         unread_paths.sort_by(|a, b| a.path.cmp(&b.path));
         unread_paths.dedup_by(|a, b| a.path == b.path);
 
-        self.publish_build(epoch, &scope, fingerprints, unread_paths, defer_text_index)
-            .await
+        let published = self
+            .publish_build(epoch, &scope, fingerprints, unread_paths, defer_text_index)
+            .await;
+        window.close();
+        published
     }
 
     /// Whether the rows in the store were produced by this binary's queries.
