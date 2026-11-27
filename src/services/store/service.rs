@@ -109,16 +109,21 @@ impl DefaultStoreService {
             .await
     }
 
-    /// The store for a read query. A *missing* index — no DB file, e.g. a
-    /// read-only or never-built project — maps to `NotInitialized` so the
-    /// caller falls back to a filesystem scan. A DB that exists but won't
-    /// open is a real failure and is surfaced, never silently scanned over.
+    /// The store for a read query, never created by one. A *missing* index —
+    /// no DB file, e.g. a read-only or never-built project — maps to
+    /// `NotInitialized` without opening anything, so the caller falls back to
+    /// its live source and the tree gains no `.symora/` for having been read:
+    /// only a command whose purpose is to write (a build, an edit) creates
+    /// it. A DB that exists but won't open is a real failure and is surfaced,
+    /// never silently scanned over.
     async fn store_for_read(&self) -> Result<&Arc<Store>, StoreError> {
-        match self.store().await {
-            Ok(store) => Ok(store),
-            Err(_) if Self::db_is_definitely_absent(&self.root) => Err(StoreError::NotInitialized),
-            Err(e) => Err(e),
+        if let Some(store) = self.store.get() {
+            return Ok(store);
         }
+        if Self::db_is_definitely_absent(&self.root) {
+            return Err(StoreError::NotInitialized);
+        }
+        self.store().await
     }
 
     /// Whether there is definitely no index file. Only a probe that ANSWERS
@@ -174,11 +179,22 @@ impl StoreService for DefaultStoreService {
     }
 
     async fn indexed_languages(&self) -> Result<Vec<Language>, StoreError> {
-        self.store().await?.indexed_languages().await
+        // No DB covers no language, as a store no build completed in does.
+        match self.store_for_read().await {
+            Ok(store) => store.indexed_languages().await,
+            Err(StoreError::NotInitialized) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     async fn tree_currency(&self) -> Result<TreeCurrency, StoreError> {
-        self.store().await?.tree_currency().await
+        // No DB records no fingerprint to compare, as a store no build
+        // completed in does.
+        match self.store_for_read().await {
+            Ok(store) => store.tree_currency().await,
+            Err(StoreError::NotInitialized) => Ok(TreeCurrency::Unknown),
+            Err(e) => Err(e),
+        }
     }
 
     async fn index_status(&self) -> Result<IndexStats, StoreError> {
@@ -229,12 +245,43 @@ mod tests {
         assert!(!root.join(".symora").exists());
     }
 
-    /// The porous-guard regression: ANY read materializes the DB file
-    /// (`store_for_read` → `Store::open`), so a DB that merely exists is
-    /// not a built index. An edit after such a read must leave the store
-    /// empty and the search path bare (`NotInitialized` → live fallback),
-    /// never a 1-file index answering authoritatively for a never-indexed
-    /// project.
+    /// A read is no reason to write: every read a project with no index
+    /// answers says `NotInitialized` and leaves the tree without a
+    /// `.symora`, so a query run in a directory nobody asked symora to write
+    /// to writes nothing there.
+    #[tokio::test]
+    async fn a_read_creates_no_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn alpha() {}\n")
+            .await
+            .unwrap();
+
+        let service = DefaultStoreService::new(root, StoreConfig::default());
+        assert!(matches!(
+            service.search_symbols("alpha", 10, None, None, &[]).await,
+            Err(StoreError::NotInitialized)
+        ));
+        assert!(matches!(
+            service.search_content("alpha", 10, &[Language::Rust]).await,
+            Err(StoreError::NotInitialized)
+        ));
+        assert!(service.indexed_languages().await.unwrap().is_empty());
+        assert!(matches!(
+            service.tree_currency().await.unwrap(),
+            TreeCurrency::Unknown
+        ));
+        assert!(service.index_status().await.unwrap().languages.is_empty());
+
+        assert!(!root.join(".symora").exists());
+    }
+
+    /// The porous-guard regression: a DB that merely exists is not a built
+    /// index — a build cut off before publishing, a cleared store, or one a
+    /// process opened leaves one behind. An edit after that must leave the
+    /// store empty and the search path bare (`NotInitialized` → live
+    /// fallback), never a 1-file index answering authoritatively for a
+    /// never-indexed project.
     #[tokio::test]
     async fn refresh_after_a_read_materialized_store_stays_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -242,13 +289,13 @@ mod tests {
         let file = root.join("lib.rs");
         tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
 
+        // A store opened without a build: the DB file exists, and a read
+        // through the service finds nothing completed in it.
+        drop(Store::open(root, StoreConfig::default()).await.unwrap());
+        assert!(Store::db_path(root).exists());
         let service = DefaultStoreService::new(root, StoreConfig::default());
-
-        // A read on a never-built project: NotInitialized, but the DB file
-        // now exists on disk.
         let read = service.search_symbols("alpha", 10, None, None, &[]).await;
         assert!(matches!(read, Err(StoreError::NotInitialized)));
-        assert!(Store::db_path(root).exists());
 
         // The edit flow refreshes the file — the never-built store must
         // not gain rows from it.

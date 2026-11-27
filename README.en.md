@@ -392,7 +392,7 @@ Every command is built for machine parsing, and the rules are stable:
 
 ## Search index
 
-Symora keeps a persistent SQLite index at `.symora/store.db` in each project. The `.gitignore` it writes in `.symora/` keeps the index and its locks out of commits, while a `config.toml` or `ignore` kept there stays committable.
+Symora keeps a persistent SQLite index at `.symora/store.db` in each project. Only a build (explicit, or a first symbol search in a git work tree) and an edit create `.symora/`; a read in a tree that has none writes nothing there. The `.gitignore` it writes in `.symora/` keeps the index and its locks out of commits, while a `config.toml` or `ignore` kept there stays committable.
 
 The index is a snapshot of the last build. Currency checks compare the file-size policy, paths, sizes, and modification times; rebuild after changes preserving that metadata. A list's `stale` flag marks rows read from files changed since the build; no row can reveal a file the build never saw. Results the index answered, empty ones included, also carry currency hints naming the languages whose files changed since the build, with `symora search index build` in `next_commands`.
 

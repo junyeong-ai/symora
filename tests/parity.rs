@@ -524,6 +524,134 @@ fn a_first_search_builds_and_answers_alike_in_process_through_a_daemon_and_over_
     assert_eq!(direct, over_mcp, "MCP and the CLI diverged");
 }
 
+/// A query reads, and writes nothing into the tree it reads. Outside a work
+/// tree no search starts a build either, so every read command — searches of
+/// each kind, navigation, analysis, previews, status — leaves a plain
+/// directory as it found it, in process and through a daemon alike: no
+/// `.symora/` and no empty store. The language server cannot start, so each
+/// command answers as far as it can without one. Each read has a directory
+/// of its own, so they run at once.
+#[test]
+#[cfg(unix)]
+fn a_read_leaves_a_tree_outside_a_work_tree_as_it_found_it() {
+    const READS: &[&[&str]] = &[
+        &["search", "symbols", "helper_alpha"],
+        &["search", "symbols", "helper*"],
+        &["search", "symbols", "Shape/area"],
+        &["search", "symbols", "helper_alpha", "--workspace-symbols"],
+        &["--deterministic", "search", "symbols", "helper_alpha"],
+        &["search", "content", "helper_alpha"],
+        &["search", "ast", "--lang", "rust", "(function_item)"],
+        &["search", "index", "status"],
+        &["symbols", "main.rs"],
+        &["map", "summary"],
+        &["map", "file", "main.rs"],
+        &["def", "main.rs:8:4"],
+        &["refs", "main.rs:8"],
+        &["typedef", "main.rs:8:4"],
+        &["implementations", "main.rs:2"],
+        &["callers", "main.rs:8"],
+        &["callees", "main.rs:1"],
+        &["hover", "main.rs:8:4"],
+        &["context", "main.rs:8"],
+        &["impact", "main.rs:8"],
+        &["diff-impact"],
+        &["diagnostics", "main.rs"],
+        &["actions", "list", "main.rs:8:4"],
+        &["rename", "main.rs:8:4", "helper_omega", "--dry-run"],
+        &[
+            "edit",
+            "delete",
+            "main.rs",
+            "--symbol",
+            "helper_alpha",
+            "--dry-run",
+        ],
+        &["doctor", "rust"],
+        &["config", "show"],
+    ];
+    let config = tempfile::tempdir().unwrap();
+    std::fs::create_dir(config.path().join("symora")).unwrap();
+    std::fs::write(
+        config.path().join("symora/config.toml"),
+        "[lsp.servers.rust]\ncommand = \"/nonexistent/rust-analyzer-missing\"\n",
+    )
+    .unwrap();
+    let daemon = IsolatedDaemon::for_test("a_read_leaves_a_tree_outside_a_work_tree");
+    // One read in a plain directory of its own: what it answered, and whether
+    // it left `.symora/` there.
+    let read = |through_daemon: bool, args: &[&str]| {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("main.rs"),
+            "fn main() {}\nstruct Shape;\nimpl Shape {\n    fn area(&self) -> u32 {\n        \
+             0\n    }\n}\nfn helper_alpha() {}\n",
+        )
+        .unwrap();
+        let mut command = match through_daemon {
+            true => daemon.command(project.path()),
+            false => {
+                let mut command = symora();
+                command
+                    .current_dir(project.path())
+                    .env("SYMORA_NO_DAEMON", "1");
+                command
+            }
+        };
+        let output = command
+            .args(args)
+            .args(["--format", "compact"])
+            .env("XDG_CONFIG_HOME", config.path())
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
+            .stderr(Stdio::null())
+            .output()
+            .unwrap();
+        let answer = common::parse_response(&output.stdout)
+            .unwrap_or_else(|error| panic!("{args:?} answered no JSON: {error}"));
+        (answer, project.path().join(".symora").exists())
+    };
+
+    // The first read through the daemon starts it, before any other read
+    // runs beside it (see `IsolatedDaemon::start`), and the others find it
+    // serving rather than race to start one.
+    let mut outcomes = vec![(true, READS[0], read(true, READS[0]))];
+    let read = &read;
+    std::thread::scope(|scope| {
+        let in_process: Vec<_> = READS
+            .iter()
+            .map(|args| (false, *args, scope.spawn(move || read(false, args))))
+            .collect();
+        let through_daemon: Vec<_> = READS[1..]
+            .iter()
+            .map(|args| (true, *args, scope.spawn(move || read(true, args))))
+            .collect();
+        outcomes.extend(
+            in_process
+                .into_iter()
+                .chain(through_daemon)
+                .map(|(through_daemon, args, run)| (through_daemon, args, run.join().unwrap())),
+        );
+    });
+    for (through_daemon, args, (answer, wrote)) in outcomes {
+        if args.starts_with(&["search", "symbols"]) && args.len() == 3 {
+            assert!(
+                answer.to_string().contains("only for a git work tree"),
+                "{args:?} must have read the store and found no index: {answer}"
+            );
+        }
+        assert!(
+            !wrote,
+            "{args:?} wrote .symora/ {}: {answer}",
+            if through_daemon {
+                "through the daemon"
+            } else {
+                "in process"
+            }
+        );
+    }
+    daemon.assert_serving();
+}
+
 /// The quiescence gate is only meaningful if it actually recognises the
 /// marker — a detector that always answered "clean" would turn the wait
 /// into a no-op and put the flaky comparison right back.

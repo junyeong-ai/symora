@@ -39,8 +39,9 @@ impl ProjectContext {
     /// path being served, never from wherever the daemon happened to start.
     /// Reading it here is what makes a daemon answer agree with a direct one.
     ///
-    /// The store opens lazily on its first use, so an LSP-only request never
-    /// creates a `.symora` dir and a read-only project is served without error.
+    /// The store opens lazily on its first use, and a read never creates one,
+    /// so no query writes a `.symora` dir and a read-only project is served
+    /// without error.
     pub(super) fn new(path: &std::path::Path) -> Self {
         let lsp_config = DaemonRuntimeConfig::load_lsp_config(path);
         let store = DefaultStoreService::new(path, crate::app::store_config(&lsp_config));

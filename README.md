@@ -392,7 +392,7 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 
 ## 검색 인덱스
 
-Symora는 프로젝트마다 디스크에 저장하는 SQLite 인덱스(`.symora/store.db`)를 둡니다. Symora가 `.symora/`에 쓰는 `.gitignore`는 인덱스와 잠금 파일을 커밋에서 빼고, 그 안에 둔 `config.toml`과 `ignore`는 커밋할 수 있게 남깁니다.
+Symora는 프로젝트마다 디스크에 저장하는 SQLite 인덱스(`.symora/store.db`)를 둡니다. `.symora/`는 빌드(명시적 빌드, 또는 git 작업 트리에서의 첫 심볼 검색)와 편집만 만들며, 그것이 없는 트리에서 읽기만 하는 명령은 아무것도 쓰지 않습니다. Symora가 `.symora/`에 쓰는 `.gitignore`는 인덱스와 잠금 파일을 커밋에서 빼고, 그 안에 둔 `config.toml`과 `ignore`는 커밋할 수 있게 남깁니다.
 
 인덱스는 마지막 빌드의 스냅샷입니다. 최신성 검사는 파일 크기 정책과 경로·크기·수정 시각을 비교하므로, 이 값들이 그대로인 변경은 검사에 드러나지 않습니다. 그런 변경은 재빌드해야 반영됩니다. 목록의 `stale` 플래그는 빌드 이후 바뀐 파일에서 읽은 행이 있다는 뜻이며, 빌드가 보지 못한 새 파일은 어떤 행으로도 드러나지 않습니다. 인덱스가 답한 결과에는 빈 결과를 포함해 빌드 이후 파일이 바뀐 언어를 지목하는 최신성 `hints`가 붙고, `next_commands`에 `symora search index build`가 담깁니다.
 
