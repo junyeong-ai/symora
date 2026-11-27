@@ -125,7 +125,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           tree-sitter grammar cover it with no server installed. Branch on this \
                           instead of discovering a language's limits by a failed call. serves \
                           confirms the server's handshake, not its import resolution or \
-                          complete references.",
+                          complete references. For Python, python_interpreter says which \
+                          interpreter a fresh server receives (its source: settings, \
+                          project_environment or server_default); where references across \
+                          packages stay missing, that environment is what to check, and \
+                          waiting does not prepare it.",
             schema_object(
                 &[(
                     "language",
@@ -140,9 +144,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             (
                 "languages",
                 "array",
-                "Per language: server, installed, serves, symbol_extraction, ast_search, and \
-                 install when it does not serve. `serves` is the capability — `installed` only \
-                 says a file resolves at that path, which a version-manager shim satisfies too",
+                "Per language: server, installed, serves, symbol_extraction, ast_search, \
+                 python_interpreter for Python, and install when it does not serve. `serves` is \
+                 the capability — `installed` only says a file resolves at that path, which a \
+                 version-manager shim satisfies too",
             ),
             ("summary", "object", "total / serving / missing"),
             (
