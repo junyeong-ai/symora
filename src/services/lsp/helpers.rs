@@ -142,9 +142,10 @@ pub(super) fn unsupported_error(
 
 /// Pre-flight gate that consults the live server. The static table is only a
 /// hint: when it says None but the connected server advertises the provider,
-/// the request proceeds (a runtime -32601 still falls back). This turns a
-/// static false-negative into a correct attempt; it never refuses a server the
-/// caps advertise, and never downgrades a statically-supported feature.
+/// the request proceeds. This turns a static false-negative into a correct
+/// attempt; it never refuses a server the caps advertise, and never downgrades
+/// a statically-supported feature — a stale supported row costs one request,
+/// whose -32601 `unsupported_if_unimplemented` reports as this same error.
 pub(super) async fn check_feature_support_live(
     manager: &LspManager,
     client: &LspClient,
@@ -158,6 +159,25 @@ pub(super) async fn check_feature_support_live(
         return Ok(());
     }
     Err(unsupported_error(manager, file, feature))
+}
+
+/// Post-flight reclassifier for a request the server rejected as JSON-RPC
+/// MethodNotFound: the server has just stated it lacks `feature`, so the error
+/// becomes the same `FeatureNotSupported` the gates build, naming the server
+/// and the alternative, whatever the static table claimed. Every other error
+/// passes through unchanged.
+pub(super) fn unsupported_if_unimplemented(
+    err: LspError,
+    manager: &LspManager,
+    file: &Path,
+    feature: LspFeature,
+) -> LspError {
+    match err {
+        LspError::ServerError { code, .. } if code == error_codes::METHOD_NOT_FOUND => {
+            unsupported_error(manager, file, feature)
+        }
+        other => other,
+    }
 }
 
 pub(super) fn find_project_entry(

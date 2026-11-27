@@ -4420,6 +4420,51 @@ fn code_action_ranges_remain_bound_to_the_request_content() {
     }
 }
 
+/// A server that rejects type hierarchy as MethodNotFound, under a language
+/// the static table lists as supporting it, is reported like any other
+/// unsupported feature: the server named and a command to run instead, not a
+/// bare JSON-RPC error.
+#[test]
+#[cfg(unix)]
+fn a_type_hierarchy_the_server_does_not_implement_names_an_alternative() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("type-hierarchy protocol fixture requires python3");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("main.go");
+    std::fs::write(&source, "package main\ntype Shape interface{}\n").unwrap();
+    std::fs::write(
+        root.path().join("go.mod"),
+        "module example.com/fixture\n\ngo 1.25\n",
+    )
+    .unwrap();
+    std::fs::create_dir(root.path().join(".symora")).unwrap();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/code_action_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"go": {
+        "command": "python3", "args": [server, source, "method-not-found"]
+    }}}});
+    std::fs::write(
+        root.path().join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    for command in ["supertypes", "subtypes"] {
+        let output = run_in(root.path(), &[command, "main.go:2:6"]);
+        let payload: serde_json::Value = common::parse_response(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{payload}");
+        assert_eq!(payload["error"]["code"], "unsupported", "{payload}");
+        let message = payload["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("does not support 'type hierarchy'"),
+            "{payload}"
+        );
+        let hint = payload["error"]["hint"].as_str().unwrap();
+        assert!(hint.contains("symora implementations"), "{payload}");
+    }
+}
+
 /// What a language server started stops with it when a command run without
 /// the daemon ends: when it answers, when it reports a failure, and when a
 /// hangup stops it; and one it started in a session of its own, which only

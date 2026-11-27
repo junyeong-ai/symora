@@ -70,7 +70,8 @@ async fn call_hierarchy(
 
                 let items: Option<Vec<LspCallHierarchyItem>> = client
                     .request("textDocument/prepareCallHierarchy", Some(prepare_params))
-                    .await?;
+                    .await
+                    .map_err(|err| unsupported_if_unimplemented(err, &manager, &file, feature))?;
 
                 let items = items.unwrap_or_default();
                 if items.is_empty() {
@@ -96,7 +97,8 @@ async fn call_hierarchy(
                 if incoming {
                     let calls: Option<Vec<CallHierarchyIncomingCall>> = client
                         .request("callHierarchy/incomingCalls", Some(follow_params))
-                        .await?;
+                        .await
+                        .map_err(|err| unsupported_if_unimplemented(err, &manager, &file, feature))?;
 
                     Ok(indexing.finish(
                         calls
@@ -123,7 +125,8 @@ async fn call_hierarchy(
                 } else {
                     let calls: Option<Vec<CallHierarchyOutgoingCall>> = client
                         .request("callHierarchy/outgoingCalls", Some(follow_params))
-                        .await?;
+                        .await
+                        .map_err(|err| unsupported_if_unimplemented(err, &manager, &file, feature))?;
 
                     Ok(indexing.finish(
                         calls
@@ -204,7 +207,10 @@ async fn type_hierarchy(
 
                 let items: Option<Vec<serde_json::Value>> = client
                     .request("textDocument/prepareTypeHierarchy", Some(prepare_params))
-                    .await?;
+                    .await
+                    .map_err(|err| {
+                        unsupported_if_unimplemented(err, &manager, &file, LspFeature::TypeHierarchy)
+                    })?;
 
                 let items = items.unwrap_or_default();
                 if items.is_empty() {
@@ -219,7 +225,9 @@ async fn type_hierarchy(
                 let follow_params = serde_json::json!({ "item": items.first().unwrap() });
 
                 let results: Option<Vec<serde_json::Value>> =
-                    client.request(&method, Some(follow_params)).await?;
+                    client.request(&method, Some(follow_params)).await.map_err(|err| {
+                        unsupported_if_unimplemented(err, &manager, &file, LspFeature::TypeHierarchy)
+                    })?;
 
                 let mut conv = PositionConverter::new(client.position_encoding().await)
                     .with_content(&file, &content);

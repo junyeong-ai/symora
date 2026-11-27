@@ -222,7 +222,15 @@ pub(super) async fn find_implementations(
                         "textDocument/implementation",
                         Some(serde_json::to_value(params)?),
                     )
-                    .await?;
+                    .await
+                    .map_err(|err| {
+                        unsupported_if_unimplemented(
+                            err,
+                            &manager,
+                            &file,
+                            LspFeature::FindImplementations,
+                        )
+                    })?;
 
                 let locs = parse_location_response(&result).unwrap_or_default();
                 // Post-flight null-gap: an empty implementation result from a
