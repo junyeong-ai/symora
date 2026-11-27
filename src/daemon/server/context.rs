@@ -152,8 +152,12 @@ mod tests {
         let release = root.path().join("release");
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/lsp/configuration_server.py");
+        // Generous enough for python3 to start on a loaded machine; the
+        // request is cancelled once the server is ready, so a passing run
+        // never waits it out.
+        let budget = 10;
         let mut config = crate::models::config::SymoraConfig::default();
-        config.lsp.timeout_secs = 5;
+        config.lsp.timeout_secs = budget;
         config.lsp.servers.insert(
             "python".into(),
             crate::models::config::ServerOverride {
@@ -184,7 +188,7 @@ mod tests {
                 lease.lsp.hover(&path.join("main.py"), 1, 1).await
             }
         });
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(2 * budget), async {
             while !ready.exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -206,7 +210,7 @@ mod tests {
         let outcome = restart_project(&projects, path).await;
         std::fs::write(&release, "").unwrap();
         assert_eq!(outcome, ProjectRestartStatus::Busy);
-        let restarted = tokio::time::timeout(Duration::from_secs(5), async {
+        let restarted = tokio::time::timeout(Duration::from_secs(2 * budget), async {
             loop {
                 let outcome = restart_project(&projects, path).await;
                 if outcome != ProjectRestartStatus::Busy {

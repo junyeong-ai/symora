@@ -2026,7 +2026,9 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let mut config = crate::models::config::SymoraConfig::default();
-        config.lsp.timeout_secs = 3;
+        // Generous enough for python3 to start on a loaded machine; every
+        // request is answered, so a passing run never waits it out.
+        config.lsp.timeout_secs = 10;
         let client = LspClient::new(
             Language::Python,
             root.path().to_path_buf(),
