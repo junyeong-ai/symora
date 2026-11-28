@@ -117,6 +117,10 @@ tikv-jemallocator = "0.7.0"
 libc = "0.2.191"
 
 [dev-dependencies]
+# The progress handler lets a store test land another connection's commit
+# between the statements of one read, which is how a read that belongs in one
+# snapshot is shown to be in one.
+rusqlite = { version = "0.43.0", features = ["bundled", "hooks"] }
 tokio-test = "0.4.6"
 insta = { version = "1.49.0", features = ["json", "redactions"] }
 

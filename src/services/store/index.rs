@@ -347,9 +347,11 @@ struct CompletedBuild {
 /// The last completed build, or `None` when none has ever completed against
 /// this store. Read inside whatever transaction needs it: the marker is the
 /// readiness answer, and a copy of it held anywhere else would be stale the
-/// moment another process built, cleared, or crashed.
+/// moment another process built, cleared, or crashed. A transaction rather
+/// than a connection, because the record is several rows that describe one
+/// build only when they are read from one snapshot.
 fn read_completed_build(
-    conn: &rusqlite::Connection,
+    conn: &rusqlite::Transaction<'_>,
 ) -> Result<Option<CompletedBuild>, rusqlite::Error> {
     let Some(scope) = read_meta(conn, META_BUILD_SCOPE)?
         .as_deref()
@@ -993,7 +995,7 @@ impl Store {
     pub async fn indexed_languages(&self) -> Result<Vec<Language>, StoreError> {
         Ok(self
             .reader
-            .call(|conn| read_completed_build(conn))
+            .call(|conn| read_completed_build(&conn.unchecked_transaction()?))
             .await?
             .map(|build| build.scope.languages())
             .unwrap_or_default())
@@ -1006,7 +1008,7 @@ impl Store {
     async fn build_scope(&self) -> Result<Option<BuildScope>, StoreError> {
         Ok(self
             .db
-            .call(|conn| read_completed_build(conn))
+            .call(|conn| read_completed_build(&conn.unchecked_transaction()?))
             .await?
             .map(|build| build.scope))
     }
@@ -1449,10 +1451,16 @@ impl Store {
         if self.build_in_progress() {
             return Ok(TreeCurrency::Unknown);
         }
+        // One snapshot, so the fingerprint is the one the build behind the
+        // marker recorded rather than a later build's.
         let recorded = self
             .reader
             .call(|conn| {
-                Ok(read_completed_build(conn)?.zip(read_meta(conn, META_TREE_FINGERPRINT)?))
+                let tx = conn.unchecked_transaction()?;
+                let recorded =
+                    read_completed_build(&tx)?.zip(read_meta(&tx, META_TREE_FINGERPRINT)?);
+                tx.commit()?;
+                Ok(recorded)
             })
             .await?;
         let Some((build, recorded)) = recorded else {
@@ -2023,6 +2031,63 @@ mod tests {
             store.tree_currency().await.unwrap(),
             TreeCurrency::Behind(vec![Language::Go]),
             "a language whose last file is gone is behind until rebuilt"
+        );
+    }
+
+    /// The fingerprint a currency check compares is the one the build behind
+    /// the marker recorded. Another connection's commit lands here while the
+    /// check is reading the marker — the reader's progress handler runs it
+    /// part-way through — and records a fingerprint the tree no longer
+    /// matches; read in the snapshot the marker came from, the check still
+    /// finds the tree current.
+    #[tokio::test]
+    async fn currency_reads_the_marker_and_its_fingerprint_in_one_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("lib.rs"), "fn snapshot_probe() {}\n").unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(store.tree_currency().await.unwrap(), TreeCurrency::Current);
+
+        let moved = serde_json::to_string(&HashMap::from([(Language::Rust, "moved")])).unwrap();
+        let mut interloper = Some(rusqlite::Connection::open(Store::db_path(root)).unwrap());
+        // Far enough into the check that its first read has begun, and short
+        // of the fingerprint the marker's rows come before.
+        let mut steps = 0;
+        store
+            .reader
+            .call(move |conn| {
+                conn.progress_handler(
+                    1,
+                    Some(move || {
+                        steps += 1;
+                        if steps == 20
+                            && let Some(other) = interloper.take()
+                        {
+                            write_meta(&other, META_TREE_FINGERPRINT, &moved).unwrap();
+                        }
+                        false
+                    }),
+                )
+            })
+            .await
+            .unwrap();
+        let currency = store.tree_currency().await.unwrap();
+        store
+            .reader
+            .call(|conn| conn.progress_handler(0, None::<fn() -> bool>))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            currency,
+            TreeCurrency::Current,
+            "the check paired the marker with a fingerprint committed after it"
+        );
+        assert_eq!(
+            store.tree_currency().await.unwrap(),
+            TreeCurrency::Behind(vec![Language::Rust]),
+            "the interloper's commit landed"
         );
     }
 
