@@ -1284,7 +1284,15 @@ fn an_impl_block_reads_as_an_impl_from_rust_analyzer_and_the_grammar() {
         &mut session,
         "search_symbols",
         json!({"query": "Circle[impl]", "path": ["src/lib.rs"]}),
-        |page| page["count"] == 2,
+        // A workspace lookup that runs out of time leaves the index's rows,
+        // the same two, to answer the path query alone; this waits for
+        // rust-analyzer's own.
+        |page| {
+            page["count"] == 2
+                && page["items"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(|item| item["backend"] == "document"))
+        },
         "a kind qualifier selects the impl blocks",
     );
     let mut chosen = Vec::new();
