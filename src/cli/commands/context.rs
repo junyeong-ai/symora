@@ -106,13 +106,17 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
         tests: config.lsp.tests_limit,
     };
 
-    let anchor = anchor_of(
+    let analysis = match anchor_of(
         app,
         &loc,
         FindSymbolsOptions::default().with_body().with_depth(10),
     )
-    .await;
-    let analysis = match LocationAnalysis::for_anchor(app.lsp.as_ref(), anchor, ctx.root()).await {
+    .await
+    {
+        Ok(anchor) => LocationAnalysis::for_anchor(app.lsp.as_ref(), anchor, ctx.root()).await,
+        Err(e) => Err(e),
+    };
+    let analysis = match analysis {
         Ok(a) => a,
         Err(e) => {
             ctx.print_error(lsp_error_at(e, &ctx.relative_path(&loc.file)));

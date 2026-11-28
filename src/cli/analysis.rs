@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::ParsedLocation;
 use crate::cli::response::disclosure::OutsideCallables;
 use crate::cli::utils::{
-    AnchorResolution, RefsClassification, SymbolResolution, ambiguity_hint,
+    AnchorResolution, RefsClassification, SymbolResolution, Unresolved, ambiguity_hint,
     column_addressed_symbol, enclosing_callable, find_named_at_position, holder_of,
     line_addressed_symbol,
 };
@@ -75,11 +75,11 @@ impl Anchor {
         }
     }
 
-    /// The anchor of an input whose resolution could not be completed: the
-    /// position as given, disclosed as unavailable, for the surfaces that
-    /// query the language server at it anyway.
-    pub fn unavailable(input: &ParsedLocation) -> Self {
-        Self::raw(input, AnchorResolution::Unavailable)
+    /// The anchor of an input whose resolution could not be completed, for
+    /// `cause`: the position as given, disclosed as unavailable, for the
+    /// surfaces that query the language server at it anyway.
+    pub fn unavailable(input: &ParsedLocation, cause: Unresolved) -> Self {
+        Self::raw(input, AnchorResolution::Unavailable(cause))
     }
 
     fn declared(input: &ParsedLocation, file: &Path, symbol: Symbol, hint: Option<String>) -> Self {
@@ -148,9 +148,10 @@ impl Anchor {
 /// shape the symbol read (a surface that renders the target's body asks for
 /// it here); a same-file definition is resolved from that read, a cross-file
 /// definition from its own file's. A read the resolution needs failing is
-/// returned as the error it was: a surface that goes on to query the server
-/// at the raw position discloses the anchor as [`Anchor::unavailable`], one
-/// that needs the resolution itself reports the failure.
+/// returned as the error it was, for the caller to classify: a surface that
+/// goes on to query the server at the raw position discloses the anchor as
+/// [`Anchor::unavailable`] where the failure is the read's own, one that needs
+/// the resolution itself reports the failure.
 pub async fn resolve_anchor(
     lsp: &dyn LspService,
     input: &ParsedLocation,
@@ -220,7 +221,7 @@ pub async fn anchor_at(
             }
             SymbolResolution::NotFound => match self_declaration {
                 Some(location) => Anchor::binding(input, &location),
-                None if loading => Anchor::unavailable(input),
+                None if loading => Anchor::unavailable(input, Unresolved::Loading),
                 None => Anchor::raw(input, AnchorResolution::NotASymbol),
             },
         });
@@ -1378,7 +1379,10 @@ mod tests {
     #[tokio::test]
     async fn a_position_a_loading_server_defines_nothing_at_is_unavailable() {
         for (indexing, resolution) in [
-            (IndexingDegradation::TimedOut, AnchorResolution::Unavailable),
+            (
+                IndexingDegradation::TimedOut,
+                AnchorResolution::Unavailable(Unresolved::Loading),
+            ),
             (
                 IndexingDegradation::Unconfirmed,
                 AnchorResolution::NotASymbol,
@@ -1435,8 +1439,11 @@ mod tests {
     async fn an_unreadable_file_is_unavailable() {
         let input = at("missing.rs", 1, 1);
         assert!(resolve(input.clone()).await.is_err());
-        let anchor = Anchor::unavailable(&input);
-        assert_eq!(anchor.resolution, AnchorResolution::Unavailable);
+        let anchor = Anchor::unavailable(&input, Unresolved::ReadFailed);
+        assert_eq!(
+            anchor.resolution,
+            AnchorResolution::Unavailable(Unresolved::ReadFailed)
+        );
         assert!(!anchor.is_declaration());
         assert_eq!((anchor.line, anchor.column), (1, 1));
     }

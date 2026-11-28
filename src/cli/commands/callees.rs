@@ -209,7 +209,13 @@ async fn probe_outgoing(app: &App, file: &std::path::Path, line: u32, column: u3
 async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) -> Result<()> {
     let ctx = &app.output;
     let loc = loc.parse()?.resolve(None)?;
-    let anchor = anchor_of(app, &loc, FindSymbolsOptions::default().with_depth(10)).await;
+    let anchor = match anchor_of(app, &loc, FindSymbolsOptions::default().with_depth(10)).await {
+        Ok(anchor) => anchor,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
+    };
 
     if probe_outgoing(app, &anchor.file, anchor.line, anchor.column)
         .await
@@ -265,13 +271,20 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
     let loc = loc.parse()?.resolve(None)?;
     let target_loc = ParsedLocation::parse(to)?.resolve(None)?;
 
-    let anchor = anchor_of(app, &loc, FindSymbolsOptions::default().with_depth(10)).await;
-    let target = anchor_of(
-        app,
-        &target_loc,
-        FindSymbolsOptions::default().with_depth(10),
-    )
-    .await;
+    let options = FindSymbolsOptions::default().with_depth(10);
+    let endpoints = match anchor_of(app, &loc, options.clone()).await {
+        Ok(anchor) => anchor_of(app, &target_loc, options)
+            .await
+            .map(|target| (anchor, target)),
+        Err(e) => Err(e),
+    };
+    let (anchor, target) = match endpoints {
+        Ok(endpoints) => endpoints,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
+    };
 
     if probe_outgoing(app, &anchor.file, anchor.line, anchor.column)
         .await

@@ -10,7 +10,8 @@ use crate::cli::output::OutputContext;
 use crate::cli::response::Section;
 use crate::cli::response::disclosure::{Cap, with_cap};
 use crate::cli::utils::{
-    AnchorResolution, SymbolResolution, ambiguity_hint, line_addressed_symbol, shell_arg,
+    AnchorResolution, SymbolResolution, Unresolved, ambiguity_hint, line_addressed_symbol,
+    shell_arg,
 };
 use crate::cli::{
     ErrorCode, FileSymbols, LocationArg, OutputError, ParsedLocation, SymbolBackend,
@@ -48,10 +49,12 @@ pub(crate) fn parse_symbol_kind(text: &str) -> Result<SymbolKind, OutputError> {
 pub(crate) fn lsp_error_at(err: LspError, file: &str) -> OutputError {
     let recoverable = err.is_recoverable();
     // A server seen to have stopped reading answers no retry and no other
-    // LSP-backed command: its mapped hint names the one way past it.
-    let unread = matches!(&err, LspError::Timeout(timed_out) if timed_out.unread.is_some());
+    // LSP-backed command, and a daemon replaced mid-command is served again
+    // by its successor: each mapped hint names the one way past it.
+    let settled = matches!(&err, LspError::Timeout(timed_out) if timed_out.unread.is_some())
+        || matches!(&err, LspError::ConnectionLost(_));
     let mapped: OutputError = err.into();
-    if unread || !matches!(mapped.code, ErrorCode::Timeout | ErrorCode::LspUnavailable) {
+    if settled || !matches!(mapped.code, ErrorCode::Timeout | ErrorCode::LspUnavailable) {
         return mapped;
     }
     if recoverable {
@@ -158,10 +161,15 @@ impl Anchor {
                  raw position and an empty result is not authoritative — anchor at a \
                  declaration (e.g. a `symora search symbols` result)"
             )),
-            AnchorResolution::Unavailable => Some(format!(
+            AnchorResolution::Unavailable(Unresolved::ReadFailed) => Some(format!(
                 "{at} could not be read to resolve a symbol; any {subject} shown are for the raw \
                  position and may be incomplete — retry, or anchor at a declaration (e.g. a \
                  `symora search symbols` result)"
+            )),
+            AnchorResolution::Unavailable(Unresolved::Loading) => Some(format!(
+                "{at} could not be resolved: {LOADING}; any {subject} shown are for the raw \
+                 position and may be incomplete — retry once it is warm, or anchor at a \
+                 declaration (e.g. a `symora search symbols` result)"
             )),
         }
     }
@@ -234,14 +242,24 @@ impl Anchor {
                 "{role} {at} is not a symbol; the reachability verdict is not authoritative — \
                  {remedy}",
             )),
-            AnchorResolution::Unavailable => hints.push(format!(
+            AnchorResolution::Unavailable(Unresolved::ReadFailed) => hints.push(format!(
                 "{role} {at} could not be read to resolve a symbol; the reachability verdict \
                  is not authoritative — retry, or {remedy}",
+            )),
+            AnchorResolution::Unavailable(Unresolved::Loading) => hints.push(format!(
+                "{role} {at} could not be resolved: {LOADING}; the reachability verdict is not \
+                 authoritative — retry once it is warm, or {remedy}",
             )),
         }
         hints
     }
 }
+
+/// What an anchor's resolution met where its language server had not
+/// loaded the workspace. The wait is spent from the command's budget, which
+/// is what tells a slow start from a position that declares nothing.
+const LOADING: &str = "the language server was still loading its workspace when its readiness \
+                       wait, which `lsp.timeout_secs` bounds, ran out, and resolved nothing there";
 
 /// Resolve a command's location argument to its anchor — see
 /// [`resolve_anchor`]. Symbol-level commands — references, callers, callees,
@@ -256,46 +274,97 @@ impl Anchor {
 /// declaration's name as its column would, and an edit the same
 /// declaration; the first of several declared on it, with the hint naming
 /// the rest.
+///
+/// A read the resolution needs failing leaves the anchor unavailable only
+/// where the failure is the read's own ([`unresolved_by`]); any other is
+/// returned, the command's error.
 pub(crate) async fn anchor_of(
     app: &App,
     input: &ParsedLocation,
     options: FindSymbolsOptions,
-) -> Anchor {
+) -> Result<Anchor, LspError> {
     let lsp = app.lsp.as_ref();
-    if input.column_explicit {
-        return resolve_anchor(lsp, input, options)
-            .await
-            .unwrap_or_else(|_| Anchor::unavailable(input));
-    }
-    let resolved = match declared_at_line(app, &input.file, options.clone(), input.line).await {
-        Ok(FileSymbols {
-            backend: SymbolBackend::Document,
-            symbols,
-            ..
-        }) => Ok(anchor_on_line(input, &symbols)),
-        Ok(FileSymbols {
-            symbols,
-            served: Some(served),
-            ..
-        }) => match line_addressed_symbol(&symbols, input.line) {
-            SymbolResolution::Match(declared) => {
-                let (line, column) = (declared.location.line, declared.location.column);
-                anchor_at(lsp, input, &served, line, column, options).await
+    let resolved = if input.column_explicit {
+        resolve_anchor(lsp, input, options).await
+    } else {
+        match declared_at_line(app, &input.file, options.clone(), input.line).await {
+            Ok(FileSymbols {
+                backend: SymbolBackend::Document,
+                symbols,
+                ..
+            }) => Ok(anchor_on_line(input, &symbols)),
+            Ok(FileSymbols {
+                symbols,
+                served: Some(served),
+                ..
+            }) => match line_addressed_symbol(&symbols, input.line) {
+                SymbolResolution::Match(declared) => {
+                    let (line, column) = (declared.location.line, declared.location.column);
+                    anchor_at(lsp, input, &served, line, column, options).await
+                }
+                SymbolResolution::Ambiguous(declared) => {
+                    let (line, column) = (declared[0].location.line, declared[0].location.column);
+                    anchor_at(lsp, input, &served, line, column, options)
+                        .await
+                        .map(|anchor| Anchor {
+                            hint: Some(ambiguity_hint(input.line, &declared)),
+                            ..anchor
+                        })
+                }
+                SymbolResolution::NotFound => Ok(anchor_on_line(input, &served)),
+            },
+            // The grammar read the file because the server's read failed:
+            // that failure is the one the resolution met.
+            Ok(FileSymbols {
+                unserved: Some(error),
+                ..
+            })
+            | Err(error) => Err(error),
+            // A grammar's reading without the server's tree beside it does
+            // not say which declaration the server reads at the line.
+            Ok(FileSymbols { .. }) => {
+                return Ok(Anchor::unavailable(input, Unresolved::ReadFailed));
             }
-            SymbolResolution::Ambiguous(declared) => {
-                let (line, column) = (declared[0].location.line, declared[0].location.column);
-                anchor_at(lsp, input, &served, line, column, options)
-                    .await
-                    .map(|anchor| Anchor {
-                        hint: Some(ambiguity_hint(input.line, &declared)),
-                        ..anchor
-                    })
-            }
-            SymbolResolution::NotFound => Ok(anchor_on_line(input, &served)),
-        },
-        _ => return Anchor::unavailable(input),
+        }
     };
-    resolved.unwrap_or_else(|_| Anchor::unavailable(input))
+    match resolved {
+        Ok(anchor) => Ok(anchor),
+        Err(error) => unresolved_by(error).map(|cause| Anchor::unavailable(input, cause)),
+    }
+}
+
+/// How a failed read that anchor resolution needed reads, decided by the
+/// error's type: as the anchor's [`Unresolved`] cause where the failure is
+/// the read's own — the server answered the read with an error about it or
+/// with an answer that does not decode, or had not loaded its workspace —
+/// and otherwise as the error itself, the command's. The query at the raw
+/// position meets every other failure again (the transport or the session
+/// lost, the budget spent, no server, capability or readable file to ask),
+/// or, where a session started anew answers it, answers for a position
+/// nothing resolved, the declaration counted among its own usages.
+fn unresolved_by(error: LspError) -> Result<Unresolved, LspError> {
+    match error {
+        LspError::Indexing { .. } => Ok(Unresolved::Loading),
+        LspError::ServerError { .. } if !error.is_recoverable() && !error.is_unsupported() => {
+            Ok(Unresolved::ReadFailed)
+        }
+        LspError::Protocol(_) | LspError::Json(_) => Ok(Unresolved::ReadFailed),
+        LspError::ServerError { .. }
+        | LspError::ServerStart(_)
+        | LspError::NotConnected
+        | LspError::ConnectionLost(_)
+        | LspError::ServerNotInstalled { .. }
+        | LspError::UnsupportedLanguage(_)
+        | LspError::FeatureNotSupported { .. }
+        | LspError::ServerTerminated { .. }
+        | LspError::Timeout(_)
+        | LspError::RequestCancelled
+        | LspError::UnsupportedEdit(_)
+        | LspError::FileTooLarge { .. }
+        | LspError::FileNotText { .. }
+        | LspError::ServerNotConsulted
+        | LspError::Io(_) => Err(error),
+    }
 }
 
 /// Execute a command that returns `Option<T>` from an LSP call.
@@ -361,7 +430,13 @@ where
 {
     let ctx = &app.output;
     let loc = loc.parse()?.resolve(None)?;
-    let anchor = anchor_of(app, &loc, FindSymbolsOptions::default().with_depth(10)).await;
+    let anchor = match anchor_of(app, &loc, FindSymbolsOptions::default().with_depth(10)).await {
+        Ok(anchor) => anchor,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
+    };
 
     match lsp_call(anchor.file.clone(), anchor.line, anchor.column).await {
         Ok(result) => {
@@ -515,11 +590,31 @@ mod tests {
     /// failure is never an authoritative "not a symbol".
     #[test]
     fn unavailable_anchor_never_claims_not_a_symbol() {
-        let hints = anchor(AnchorResolution::Unavailable, None).anchor_hints(&root(), "callees");
+        let unread = AnchorResolution::Unavailable(Unresolved::ReadFailed);
+        let hints = anchor(unread, None).anchor_hints(&root(), "callees");
         assert_eq!(hints.len(), 1);
         assert!(hints[0].contains("could not be read to resolve a symbol"));
         assert!(!hints[0].contains("is not a symbol"));
         assert!(hints[0].contains("callees"));
+    }
+
+    /// A server whose readiness wait ran out resolved nothing it had not read
+    /// yet: the disclosure says that, and names the budget the wait spent,
+    /// rather than a read failure that did not happen.
+    #[test]
+    fn a_loading_server_is_named_as_the_cause() {
+        let loading = AnchorResolution::Unavailable(Unresolved::Loading);
+        for hint in [
+            anchor(loading, None).anchor_hints(&root(), "references")[0].clone(),
+            anchor(loading, None).verdict_hints("--to target", &root(), "point --to at a symbol")
+                [0]
+            .clone(),
+        ] {
+            assert!(hint.contains("still loading its workspace"), "{hint}");
+            assert!(hint.contains("`lsp.timeout_secs`"), "{hint}");
+            assert!(!hint.contains("could not be read"), "{hint}");
+            assert!(!hint.contains("is not a symbol"), "{hint}");
+        }
     }
 
     /// A `--to` endpoint that is a binding the tree does not list gets the
@@ -558,11 +653,8 @@ mod tests {
         assert!(not_sym[0].contains("--to target src/lib.rs:42 is not a symbol"));
         assert!(not_sym[0].contains("not authoritative"));
 
-        let unavail = anchor(AnchorResolution::Unavailable, None).verdict_hints(
-            "from-position",
-            &root(),
-            "anchor at a declaration",
-        );
+        let unavail = anchor(AnchorResolution::Unavailable(Unresolved::ReadFailed), None)
+            .verdict_hints("from-position", &root(), "anchor at a declaration");
         assert!(unavail[0].contains("could not be read to resolve a symbol"));
         assert!(!unavail[0].contains("is not a symbol"));
     }
@@ -595,6 +687,15 @@ mod tests {
             .expect("a rejected handshake still has a route");
         assert!(!hint.contains("symora symbols"));
         assert!(hint.contains("symora map file"));
+
+        // A daemon replaced under the command is answered by its successor:
+        // the cause the shared mapping names is the route.
+        let replaced = lsp_error_at(LspError::ConnectionLost("find_symbols".into()), path);
+        assert!(matches!(replaced.code, ErrorCode::LspUnavailable));
+        assert_eq!(
+            replaced.hint.as_deref(),
+            Some("The daemon was stopping or being replaced — retry.")
+        );
     }
 
     /// A position-anchored timeout keeps the restart a server that stopped
@@ -635,5 +736,253 @@ mod tests {
         );
         assert!(matches!(unsupported.code, ErrorCode::Unsupported));
         assert_eq!(unsupported.hint.as_deref(), Some("use refs"));
+    }
+
+    /// Answers the symbol read with `symbols` where given and otherwise with
+    /// `failure`, and every definition with `failure`: the two reads anchor
+    /// resolution makes. Nothing else is reachable from `anchor_of`.
+    struct Unreadable {
+        symbols: Option<Vec<crate::models::symbol::Symbol>>,
+        failure: fn() -> LspError,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::services::lsp::LspService for Unreadable {
+        async fn find_symbols(
+            &self,
+            _file: &Path,
+            _options: FindSymbolsOptions,
+        ) -> Result<Vec<crate::models::symbol::Symbol>, LspError> {
+            self.symbols.clone().ok_or_else(self.failure)
+        }
+        async fn goto_definition(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Indexed<Option<crate::models::lsp::Definition>>, LspError> {
+            Err((self.failure)())
+        }
+        async fn workspace_symbols(
+            &self,
+            _query: &str,
+            _language: crate::models::symbol::Language,
+        ) -> Result<Indexed<Vec<crate::models::symbol::Symbol>>, LspError> {
+            unreachable!()
+        }
+        async fn find_references(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Indexed<Vec<crate::models::symbol::Location>>, LspError> {
+            unreachable!()
+        }
+        async fn goto_type_definition(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Indexed<Vec<crate::models::symbol::Location>>, LspError> {
+            unreachable!()
+        }
+        async fn find_implementations(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Indexed<Vec<crate::models::symbol::Location>>, LspError> {
+            unreachable!()
+        }
+        async fn hover(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Indexed<Option<crate::models::lsp::HoverInfo>>, LspError> {
+            unreachable!()
+        }
+        async fn diagnostics(
+            &self,
+            _file: &Path,
+        ) -> Result<crate::models::diagnostic::DiagnosticsReport, LspError> {
+            unreachable!()
+        }
+        async fn prepare_rename(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Option<crate::models::lsp::PrepareRenameResult>, LspError> {
+            unreachable!()
+        }
+        async fn rename(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+            _new_name: &str,
+        ) -> Result<Indexed<Option<crate::models::lsp::RenameResult>>, LspError> {
+            unreachable!()
+        }
+        async fn incoming_calls(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Indexed<Vec<crate::models::lsp::CallHierarchyItem>>, LspError> {
+            unreachable!()
+        }
+        async fn outgoing_calls(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Indexed<Vec<crate::models::lsp::CallHierarchyItem>>, LspError> {
+            unreachable!()
+        }
+        async fn code_actions(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Vec<crate::models::lsp::CodeAction>, LspError> {
+            unreachable!()
+        }
+        async fn apply_code_action(
+            &self,
+            _file: &Path,
+            _action: &crate::models::lsp::CodeAction,
+        ) -> Result<crate::models::lsp::ApplyActionResult, LspError> {
+            unreachable!()
+        }
+    }
+
+    /// How each failure of a read anchor resolution needs reads: the read's
+    /// own failure leaves the anchor `unavailable` for its cause; any failure
+    /// the query at the raw position would meet again, or that a session
+    /// started anew would answer for an unresolved position, is the command's
+    /// error. Asked of a column-less line, which the grammar still reads, of
+    /// an explicit column, whose symbol read fails, and of a column on no
+    /// name, whose definition fails.
+    #[tokio::test]
+    async fn a_failed_resolution_read_is_classified_by_its_type() {
+        use crate::infra::lsp::protocol::error_codes;
+        use crate::models::symbol::{Language, Location, Symbol};
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.py");
+        std::fs::write(&file, "def alpha():\n    return 1\n").unwrap();
+        let alpha = Symbol::new(
+            "alpha".to_string(),
+            crate::models::symbol::SymbolKind::Function,
+            Location::full(file.clone(), 1, 5, 1, 1, 2, 13).with_name_end(1, 10),
+        );
+        let mut app = App::new_at(
+            dir.path().to_path_buf(),
+            crate::cli::OutputOptions::default(),
+            crate::app::Wiring::default(),
+        )
+        .await
+        .unwrap();
+
+        type Failure = fn() -> LspError;
+        let cases: [(&str, Failure, Option<Unresolved>); 11] = [
+            (
+                "connection lost",
+                || LspError::ConnectionLost("find_symbols".into()),
+                None,
+            ),
+            ("not connected", || LspError::NotConnected, None),
+            ("budget spent", || LspError::timeout("spent"), None),
+            (
+                "session dropped",
+                || LspError::ServerTerminated {
+                    language: Language::Python,
+                    established: true,
+                },
+                None,
+            ),
+            ("cancelled", || LspError::RequestCancelled, None),
+            (
+                "content modified",
+                || LspError::ServerError {
+                    code: error_codes::CONTENT_MODIFIED,
+                    message: "content modified".into(),
+                },
+                None,
+            ),
+            (
+                "unsupported",
+                || LspError::ServerError {
+                    code: error_codes::METHOD_NOT_FOUND,
+                    message: "no such method".into(),
+                },
+                None,
+            ),
+            (
+                "server unreadable file",
+                || LspError::Io(std::io::Error::other("gone")),
+                None,
+            ),
+            (
+                "server error",
+                || LspError::ServerError {
+                    code: error_codes::INTERNAL_ERROR,
+                    message: "boom".into(),
+                },
+                Some(Unresolved::ReadFailed),
+            ),
+            (
+                "undecodable answer",
+                || LspError::Protocol("bad".into()),
+                Some(Unresolved::ReadFailed),
+            ),
+            (
+                "still indexing",
+                || LspError::Indexing {
+                    language: Language::Python,
+                },
+                Some(Unresolved::Loading),
+            ),
+        ];
+        for (case, failure, expected) in cases {
+            for (input, symbols) in [
+                ((1, 1, false), None),
+                ((1, 5, true), None),
+                ((2, 5, true), Some(vec![alpha.clone()])),
+            ] {
+                app.lsp = std::sync::Arc::new(Unreadable { symbols, failure });
+                let (line, column, column_explicit) = input;
+                let input = ParsedLocation {
+                    file: file.clone(),
+                    line,
+                    column,
+                    column_explicit,
+                };
+                let anchor = anchor_of(&app, &input, FindSymbolsOptions::default()).await;
+                match (expected, anchor) {
+                    (Some(cause), Ok(anchor)) => {
+                        assert_eq!(
+                            anchor.resolution,
+                            AnchorResolution::Unavailable(cause),
+                            "{case} at {line}:{column}"
+                        );
+                        assert_eq!((anchor.line, anchor.column), (line, column), "{case}");
+                    }
+                    (None, Err(error)) => {
+                        assert_eq!(
+                            std::mem::discriminant(&error),
+                            std::mem::discriminant(&failure()),
+                            "{case} at {line}:{column} came back as another error: {error:?}"
+                        );
+                    }
+                    (expected, anchor) => panic!(
+                        "{case} at {line}:{column}: expected {expected:?}, got {:?}",
+                        anchor.map(|anchor| anchor.resolution)
+                    ),
+                }
+            }
+        }
     }
 }

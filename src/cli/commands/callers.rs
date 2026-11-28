@@ -53,12 +53,19 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
     let cfg = app.config();
     let limit = args.limit.unwrap_or(cfg.lsp.calls_limit);
     let loc = args.loc.parse()?.resolve(None)?;
-    let anchor = crate::cli::commands::common::anchor_of(
+    let anchor = match crate::cli::commands::common::anchor_of(
         app,
         &loc,
         FindSymbolsOptions::default().with_depth(10),
     )
-    .await;
+    .await
+    {
+        Ok(anchor) => anchor,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
+    };
     let (line, column) = (anchor.line, anchor.column);
     let constructions = match &anchor.symbol {
         Some(symbol) => constructions_of(app.lsp.as_ref(), &anchor.file, symbol, ctx.root()).await,

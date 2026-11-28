@@ -41,13 +41,17 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
     let depth = args.depth.clamp(1, CALL_GRAPH_MAX_DEPTH);
     let limit = normalize_limit(args.limit);
 
-    let anchor = anchor_of(
+    let analysis = match anchor_of(
         app,
         &loc,
         FindSymbolsOptions::default().with_body().with_depth(10),
     )
-    .await;
-    match LocationAnalysis::for_anchor(app.lsp.as_ref(), anchor, root).await {
+    .await
+    {
+        Ok(anchor) => LocationAnalysis::for_anchor(app.lsp.as_ref(), anchor, root).await,
+        Err(e) => Err(e),
+    };
+    match analysis {
         Ok(analysis) => {
             let classified = analysis.classify(test_scope);
 

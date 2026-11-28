@@ -393,8 +393,23 @@ pub enum AnchorResolution {
     NotASymbol,
     /// A read failed, or the language server was still loading its workspace,
     /// so the position could not be resolved; whether it is a symbol is
-    /// unknown.
-    Unavailable,
+    /// unknown. The cause says which, and so what the disclosure prescribes.
+    Unavailable(Unresolved),
+}
+
+/// Why an anchor is [`AnchorResolution::Unavailable`]. Only a failure of the
+/// resolution's own read is one: a failure the query at the raw position
+/// would meet as well — the transport or the session lost, the budget spent,
+/// no server or capability to ask — is the command's error instead
+/// (`commands::common::anchor_of`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unresolved {
+    /// The language server answered a read the resolution needed with an
+    /// error about it, or with an answer that could not be decoded.
+    ReadFailed,
+    /// The language server was still loading its workspace when its
+    /// readiness wait ran out, and resolved nothing at the position.
+    Loading,
 }
 
 impl AnchorResolution {
@@ -418,7 +433,7 @@ impl AnchorResolution {
             AnchorResolution::Resolved => None,
             AnchorResolution::Binding => Some("binding"),
             AnchorResolution::NotASymbol => Some("not_a_symbol"),
-            AnchorResolution::Unavailable => Some("unavailable"),
+            AnchorResolution::Unavailable(_) => Some("unavailable"),
         }
     }
 }

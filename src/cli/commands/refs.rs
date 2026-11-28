@@ -37,13 +37,17 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
     let limit = args.limit.unwrap_or(cfg.lsp.refs_limit);
     let loc = args.loc.parse()?.resolve(None)?;
 
-    let anchor = anchor_of(
+    let analysis = match anchor_of(
         app,
         &loc,
         FindSymbolsOptions::default().with_body().with_depth(10),
     )
-    .await;
-    match LocationAnalysis::for_anchor(app.lsp.as_ref(), anchor, ctx.root()).await {
+    .await
+    {
+        Ok(anchor) => LocationAnalysis::for_anchor(app.lsp.as_ref(), anchor, ctx.root()).await,
+        Err(e) => Err(e),
+    };
+    match analysis {
         Ok(analysis) => {
             let root = ctx.root();
             let usages = analysis.references();

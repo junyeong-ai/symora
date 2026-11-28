@@ -42,6 +42,9 @@ pub struct FileSymbols {
     /// tree holds nothing on, which can still hold the same declaration
     /// under another path or kind.
     pub served: Option<Vec<Symbol>>,
+    /// Why the language server's tree is absent from an answer the grammar
+    /// gave in its stead ([`declared_in`]): what asking the server returned.
+    pub unserved: Option<LspError>,
 }
 
 impl FileSymbols {
@@ -158,12 +161,19 @@ pub async fn declared_in(
                 symbols,
                 backend: SymbolBackend::Document,
                 served: None,
+                unserved: None,
             });
         }
         Err(e) => e,
     };
 
-    read_by_grammar(app, file, &options).await.ok_or(error)
+    match read_by_grammar(app, file, &options).await {
+        Some(read) => Ok(FileSymbols {
+            unserved: Some(error),
+            ..read
+        }),
+        None => Err(error),
+    }
 }
 
 /// A file's declarations ([`declared_in`]), read by the grammar where the
@@ -361,6 +371,7 @@ pub async fn read_by_grammar(
         symbols,
         backend: SymbolBackend::Ast,
         served: None,
+        unserved: None,
     })
 }
 

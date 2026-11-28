@@ -430,7 +430,11 @@ mod tests {
     #[test]
     fn fallback_target_discloses_unavailable_distinctly() {
         let target = TargetOutput::from_analysis(
-            &analysis(None, None, AnchorResolution::Unavailable),
+            &analysis(
+                None,
+                None,
+                AnchorResolution::Unavailable(crate::cli::utils::Unresolved::ReadFailed),
+            ),
             Path::new("/proj"),
         );
         let value = serde_json::to_value(&target).unwrap();
