@@ -124,7 +124,7 @@ pub(super) async fn handle_connection(
                 ));
             }
             Ok(Some(
-                process_request(request, &projects, &config, &instance).await,
+                process_request(request, &projects, &config, &instance, received).await,
             ))
         };
         let work = async {
@@ -160,22 +160,33 @@ pub(super) async fn handle_connection(
     Ok(())
 }
 
+/// Serve one RPC as part of the command or tool call that sent it, which
+/// began the request's age before the RPC arrived, and hand back what its
+/// queries noted for that request's response.
 async fn process_request(
     request: Request,
     projects: &ProjectsMap,
     config: &DaemonRuntimeConfig,
     instance: &Instance,
+    received: tokio::time::Instant,
 ) -> (Response, bool) {
     let id = request.id.clone();
     let is_shutdown = request.method == methods::SHUTDOWN;
+    let began = request
+        .request_age_ms
+        .and_then(|age| received.checked_sub(std::time::Duration::from_millis(age)))
+        .unwrap_or(received);
 
-    let result = dispatch(request, projects, config, instance).await;
-    let response = match result {
-        Ok(v) => Response::success(id, v),
-        Err(e) => Response::error(id, e),
-    };
-
-    (response, is_shutdown)
+    crate::infra::request::scope(began, async {
+        let result = dispatch(request, projects, config, instance).await;
+        let mut response = match result {
+            Ok(v) => Response::success(id, v),
+            Err(e) => Response::error(id, e),
+        };
+        response.cold_servers = crate::infra::request::cold_servers();
+        (response, is_shutdown)
+    })
+    .await
 }
 
 #[cfg(test)]

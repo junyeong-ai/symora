@@ -385,6 +385,8 @@ pub struct LspClient {
     /// initialize result or, from one that sends none, the product its
     /// startup log names ([`announced_product`]).
     server_name: std::sync::Mutex<Option<String>>,
+    /// When the server process was spawned, once it has been.
+    started_at: std::sync::Mutex<Option<tokio::time::Instant>>,
     /// Kept only for a language whose server is offered pull diagnostics.
     pull_providers: std::sync::Mutex<PullProviders>,
     /// The settings snapshot used for this session's configuration replies.
@@ -453,6 +455,7 @@ impl LspClient {
             watched_files: std::sync::Mutex::new(WatchRegistry::default()),
             watched_backlog: Arc::default(),
             server_name: std::sync::Mutex::new(None),
+            started_at: std::sync::Mutex::new(None),
             pull_providers: std::sync::Mutex::new(PullProviders::default()),
             settings: RwLock::new(None),
         })
@@ -491,6 +494,8 @@ impl LspClient {
                 .stderr(Stdio::piped()),
         )
         .map_err(|e| LspError::ServerStart(format!("{}: {}", launch.command.display(), e)))?;
+        *self.started_at.lock().expect("start time lock poisoned") =
+            Some(tokio::time::Instant::now());
 
         let (stdin, stdout, stderr) = child.take_stdio();
         let stdin =
@@ -823,16 +828,25 @@ impl LspClient {
     /// so the cancellation buys nothing there; left alone, the abandoned one
     /// runs to its end and its answer is dropped.
     fn cancels(&self, method: &str) -> bool {
-        method != "textDocument/references"
-            || !self
-                .server_name
-                .lock()
-                .expect("server name lock poisoned")
-                .as_deref()
-                .is_some_and(|name| {
-                    name.eq_ignore_ascii_case("pyright")
-                        || name.eq_ignore_ascii_case("basedpyright")
-                })
+        method != "textDocument/references" || self.pyright_name().is_none()
+    }
+
+    /// The name the server gives itself, where it is pyright or its fork
+    /// basedpyright.
+    pub(super) fn pyright_name(&self) -> Option<String> {
+        self.server_name
+            .lock()
+            .expect("server name lock poisoned")
+            .as_deref()
+            .filter(|name| {
+                name.eq_ignore_ascii_case("pyright") || name.eq_ignore_ascii_case("basedpyright")
+            })
+            .map(str::to_string)
+    }
+
+    /// When the server process was spawned, once it has been.
+    pub(super) fn started_at(&self) -> Option<tokio::time::Instant> {
+        *self.started_at.lock().expect("start time lock poisoned")
     }
 
     pub async fn cancel_request(&self, id: u64) {

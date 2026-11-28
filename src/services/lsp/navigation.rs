@@ -50,6 +50,7 @@ pub(super) async fn find_references(
                     .map_err(|err| {
                         unsupported_if_unimplemented(err, &manager, &file, LspFeature::FindReferences)
                     })?;
+                client.note_workspace_answer();
 
                 if result.is_null() {
                     return Ok(indexing.finish(Vec::new()));
@@ -255,6 +256,7 @@ pub(super) async fn find_implementations(
                             LspFeature::FindImplementations,
                         )
                     })?;
+                client.note_workspace_answer();
 
                 let locs = parse_location_response(result)?;
                 // Post-flight null-gap: an empty implementation result from a

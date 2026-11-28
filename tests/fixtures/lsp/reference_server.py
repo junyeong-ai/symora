@@ -18,7 +18,9 @@ JSON-RPC MethodNotFound, as a server that lacks the feature does, and
 `held-symbols` creates the file named by the first argument with `.held`
 appended on a document-symbol request and answers it once the test creates
 the one with `.release` appended, or after 30 seconds, so that a test can act
-while one is in flight and choose when it is answered.
+while one is in flight and choose when it is answered. `pyright` names the
+server as pyright does, in a log line sent before it answers initialize, and,
+like pyright, reports no workspace status.
 """
 
 import json
@@ -146,6 +148,9 @@ while True:
     result = None
     if method == "initialize":
         root = path_of(params["rootUri"])
+        if "pyright" in modes:
+            send({"jsonrpc": "2.0", "method": "window/logMessage",
+                  "params": {"type": 3, "message": "Pyright language server 1.1.414 starting"}})
         result = {"capabilities": {
             "textDocumentSync": 1,
             "documentSymbolProvider": True,
@@ -153,8 +158,9 @@ while True:
             "callHierarchyProvider": "no-call-hierarchy" not in modes,
         }}
     elif method == "initialized":
-        send({"jsonrpc": "2.0", "method": "experimental/serverStatus",
-              "params": {"health": "ok", "quiescent": True}})
+        if "pyright" not in modes:
+            send({"jsonrpc": "2.0", "method": "experimental/serverStatus",
+                  "params": {"health": "ok", "quiescent": True}})
         continue
     elif method == "textDocument/documentSymbol":
         if "held-symbols" in modes:

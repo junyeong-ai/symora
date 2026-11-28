@@ -522,6 +522,8 @@ impl DaemonClient {
         if binds {
             request.instance = bound_instance();
         }
+        request.request_age_ms =
+            crate::infra::request::age().map(|age| age.as_millis().try_into().unwrap_or(u64::MAX));
         if let Some(limit) = timeout_duration.filter(|_| spends_caller_budget(method)) {
             request.timeout_ms = Some(
                 crate::infra::deadline::remaining(limit)
@@ -577,6 +579,11 @@ impl DaemonClient {
         let response: Response = serde_json::from_str(&line)?;
         if binds {
             bind(method, response.instance.as_deref())?;
+        }
+        // Noted once the answer is the command's own: one refused as another
+        // instance's says nothing of the servers the command was answered by.
+        for server in &response.cold_servers {
+            crate::infra::request::note_cold_server(server);
         }
         Ok(response)
     }
@@ -1026,8 +1033,9 @@ mod tests {
     }
 
     /// A stand-in daemon on `socket` answering every request as the instance
-    /// `serving` names at the time, its ping as this build's; `None` stops
-    /// it listening. Records each project request's bound instance.
+    /// `serving` names at the time, its ping as this build's, and as having
+    /// started a server named for that instance during the request; `None`
+    /// stops it listening. Records each project request's bound instance.
     fn stand_in(
         socket: PathBuf,
         serving: std::sync::Arc<std::sync::Mutex<Option<&'static str>>>,
@@ -1055,6 +1063,9 @@ mod tests {
                 let instance = *serving.lock().unwrap();
                 let mut response = Response::success(request.id, result);
                 response.instance = instance.map(str::to_string);
+                response.cold_servers = instance
+                    .map(|instance| vec![format!("pyright of {instance}")])
+                    .unwrap_or_default();
                 let json = serde_json::to_string(&response).unwrap();
                 writer
                     .write_all(format!("{json}\n").as_bytes())
@@ -1071,9 +1082,9 @@ mod tests {
 
     /// One command's requests are answered by the daemon that answered its
     /// first: the next carries that instance, and an answer from another is
-    /// refused, as is going on where none listens any more — without
-    /// starting one, which could only be another. Separate commands bind
-    /// separately.
+    /// refused, the servers it says it started with it, as is going on where
+    /// none listens any more — without starting one, which could only be
+    /// another. Separate commands bind separately.
     #[tokio::test]
     async fn a_command_is_answered_by_the_daemon_that_answered_it_first() {
         use std::sync::{Arc, Mutex};
@@ -1089,11 +1100,14 @@ mod tests {
         );
         let ask = || client.search_content("needle", None, &[]);
 
-        let across = one_command(async {
-            let first = ask().await;
-            *serving.lock().unwrap() = Some("second");
-            (first, ask().await)
-        })
+        let across = crate::infra::request::scope(
+            tokio::time::Instant::now(),
+            one_command(async {
+                let first = ask().await;
+                *serving.lock().unwrap() = Some("second");
+                (first, ask().await, crate::infra::request::cold_servers())
+            }),
+        )
         .await;
         assert!(across.0.is_ok(), "{:?}", across.0);
         assert!(
@@ -1105,6 +1119,11 @@ mod tests {
             *bound.lock().unwrap(),
             [None, Some("first".to_string())],
             "the second request named the instance the first was answered by"
+        );
+        assert_eq!(
+            across.2,
+            ["pyright of first"],
+            "only the answer the command was bound to says which servers answered it"
         );
 
         for _ in 0..2 {

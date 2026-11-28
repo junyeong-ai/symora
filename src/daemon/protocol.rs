@@ -15,6 +15,10 @@ pub struct Request {
     /// request before doing any of its work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
+    /// How long before this RPC the command or tool call it serves began
+    /// (`infra::request`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_age_ms: Option<u64>,
 }
 
 impl Request {
@@ -26,6 +30,7 @@ impl Request {
             params,
             timeout_ms: None,
             instance: None,
+            request_age_ms: None,
         }
     }
 }
@@ -42,6 +47,10 @@ pub struct Response {
     /// process, before or after it, shares.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
+    /// The cold servers the RPC's queries noted for the request it serves
+    /// (`infra::request::note_cold_server`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cold_servers: Vec<String>,
 }
 
 impl Response {
@@ -52,6 +61,7 @@ impl Response {
             result: Some(result),
             error: None,
             instance: None,
+            cold_servers: Vec::new(),
         }
     }
 
@@ -62,6 +72,7 @@ impl Response {
             result: None,
             error: Some(error),
             instance: None,
+            cold_servers: Vec::new(),
         }
     }
 }

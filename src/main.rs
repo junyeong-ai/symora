@@ -304,7 +304,11 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
     let command = symora::daemon::client::one_command(execute_scoped(command, app));
     #[cfg(not(unix))]
     let command = execute_scoped(command, app);
-    symora::infra::deadline::scope(limit, command).await
+    symora::infra::request::scope(
+        tokio::time::Instant::now(),
+        symora::infra::deadline::scope(limit, command),
+    )
+    .await
 }
 
 async fn execute_scoped(command: Commands, app: &App) -> anyhow::Result<()> {

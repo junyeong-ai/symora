@@ -1,5 +1,31 @@
 //! Workspace readiness: the states a server's structured status moves a
 //! client through, and how a query is qualified by what happened while it ran.
+//!
+//! pyright reports none, so its answers stay unconfirmed, and a cold one can
+//! be far short. These facts hold for pyright 1.1.414's language server.
+//! - It enumerates the workspace's files in timer slices of up to 200 ms
+//!   after its settings are applied (`scheduleReanalysis`, service.ts).
+//!   Until a slice completes the list and hands it to the program whole
+//!   (`setTrackedFiles`), references, call hierarchies and workspace symbols
+//!   walk the open documents alone (`getSourceFileInfoList`, filtered to
+//!   user code). Measured on a 3,858-file workspace: 1 of 9 references and
+//!   0 of 6 callers right after a start.
+//! - It holds a file's requests only until its settings are applied
+//!   (`getWorkspaceForFile` awaits `isInitialized`, workspaceFactory.ts),
+//!   which happens as the enumeration starts, so a request queued behind the
+//!   configuration exchange runs before its first slice.
+//! - Nothing typed marks the end. The one message sent at that moment is
+//!   the log line "Found N source files". `workspace/diagnostic/refresh`
+//!   also follows applied settings and file invalidations. Offered pull
+//!   diagnostics, it runs no analysis passes (`shouldRunAnalysis`,
+//!   languageServerBase.ts), so it publishes nothing then either.
+//!   On publishes, a publish stamped with a document version proves the
+//!   enumeration done but not the list fresh, so pull stays
+//!   (`offers_pull_diagnostics`).
+//!
+//! What a client does know is when it started the server. A pyright started
+//! after a request began is cold for it, which the request's response says
+//! ([`LspClient::note_workspace_answer`]).
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -166,6 +192,24 @@ impl LspClient {
     /// remains signal-driven; elapsed time does not confirm indexing.
     pub fn note_document_changed(&self) {
         bump_content_generation();
+    }
+
+    /// Note, for the running request's response, that this server answered
+    /// one of its workspace-wide queries cold. That holds where the server
+    /// is pyright, which reports no readiness (see the module doc), and was
+    /// started after the request began. The note confirms nothing and marks
+    /// no answer short: it is when the server started, which the request's
+    /// response states with what that has been measured to cost.
+    pub fn note_workspace_answer(&self) {
+        let Some(name) = self.pyright_name() else {
+            return;
+        };
+        if let (Some(started_at), Some(request)) =
+            (self.started_at(), crate::infra::request::started())
+            && started_at >= request
+        {
+            crate::infra::request::note_cold_server(&name);
+        }
     }
 
     pub async fn await_indexing_signal(&self) -> Option<IndexingDegradation> {

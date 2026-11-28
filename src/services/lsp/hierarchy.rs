@@ -99,6 +99,7 @@ async fn call_hierarchy(
                         .request("callHierarchy/incomingCalls", Some(follow_params))
                         .await
                         .map_err(|err| unsupported_if_unimplemented(err, &manager, &file, feature))?;
+                    client.note_workspace_answer();
 
                     Ok(indexing.finish(
                         calls

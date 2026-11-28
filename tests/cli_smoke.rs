@@ -2962,6 +2962,96 @@ fn reference_served_repo(files: &[(&str, &str, &str)]) -> Option<tempfile::TempD
     Some(dir)
 }
 
+/// A workspace-wide answer from a pyright started during the command leads
+/// its hints with that fact, since pyright reports no readiness: in process,
+/// where every run starts it, and through a daemon for the first command
+/// after a start but not the next one it serves warm. A server that does not
+/// name itself pyright adds nothing. pyright's answers keep their
+/// `unconfirmed` marker throughout.
+#[cfg(unix)]
+#[test]
+fn an_answer_from_a_pyright_started_during_the_command_says_so() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("skipped: the reference fixture requires python3");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("a.py"), "def target():\n    return 1\n").unwrap();
+    std::fs::write(root.join("b.py"), "from a import target\ntarget()\n").unwrap();
+    std::fs::create_dir(root.join(".symora")).unwrap();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/reference_server.py");
+    let configure = |modes: &[&str]| {
+        let mut args = vec![
+            serde_json::json!(server),
+            serde_json::json!(root.join(".symora/log")),
+        ];
+        args.extend(modes.iter().map(|mode| serde_json::json!(mode)));
+        let config = serde_json::json!({"lsp": {"servers": {"python": {
+            "command": "python3", "args": args
+        }}}});
+        std::fs::write(
+            root.join(".symora/config.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+    };
+    let cold = |page: &serde_json::Value| {
+        assert_eq!(page["count"], 2, "{page}");
+        page["hints"]
+            .as_array()
+            .and_then(|hints| hints.first())
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|hint| hint.starts_with("Pyright was started during this command"))
+    };
+    let refs = ["refs", "a.py:1:5"];
+
+    let unconfirmed = |page: &serde_json::Value| page["indexing"] == "unconfirmed";
+
+    configure(&["pyright"]);
+    let in_process = json_ok(root, &refs);
+    assert!(
+        cold(&in_process) && unconfirmed(&in_process),
+        "{in_process}"
+    );
+
+    // A private copy of the binary under a home of its own, so no daemon
+    // another run left behind answers.
+    let home = tempfile::tempdir().unwrap();
+    let exe = home.path().join("symora");
+    assert!(
+        Command::new("cp")
+            .arg(common::SYMORA)
+            .arg(&exe)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let through_daemon = |args: &[&str]| {
+        let output = Command::new(&exe)
+            .args(args)
+            .args(["--format", "compact"])
+            .current_dir(root)
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env_remove("SYMORA_NO_DAEMON")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        common::parse_response(&output.stdout).unwrap()
+    };
+    let first = through_daemon(&refs);
+    let second = through_daemon(&refs);
+    through_daemon(&["daemon", "stop"]);
+    assert!(cold(&first) && unconfirmed(&first), "{first}");
+    assert!(!cold(&second) && unconfirmed(&second), "{second}");
+
+    configure(&["not-pyright"]);
+    let other = json_ok(root, &refs);
+    assert!(!cold(&other), "{other}");
+}
+
 /// `diff-impact` run in process, so the fake its configuration names is
 /// the server that answers.
 #[cfg(unix)]

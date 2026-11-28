@@ -5,6 +5,7 @@ pub mod fd_limit;
 pub mod file_filter;
 pub mod file_lock;
 pub mod lsp;
+pub mod request;
 pub mod retry;
 pub mod signal;
 

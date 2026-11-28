@@ -19,6 +19,17 @@ use crate::infra::lsp::protocol::{
 /// report until its build settings load. A server offered pulls may stop
 /// publishing, so every other server stays on publishes, which it sends
 /// once it has analyzed the document.
+///
+/// Offered pull, pyright 1.1.414 runs no analysis passes of its own
+/// (`shouldRunAnalysis`, languageServerBase.ts). On publishes it would, and
+/// only after enumerating the workspace, but what it publishes proves no
+/// freshness. Each pass publishes every open document whose diagnostics
+/// differ from those last published, checked in that pass or not, with the
+/// list it holds under the document's current version (`getDiagnostics`,
+/// program.ts). A document opened before its check is published empty. One
+/// sent again is re-published under the new version with its old list
+/// (`setFileOpened` resets what was last published). So pyright stays on
+/// pull, and its readiness unconfirmed (`client::indexing`).
 pub(super) fn offers_pull_diagnostics(language: Language) -> bool {
     matches!(language, Language::Python | Language::Rust)
 }

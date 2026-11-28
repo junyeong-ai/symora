@@ -141,6 +141,7 @@ pub(super) async fn rename(
                     .request("textDocument/rename", Some(params))
                     .await
                     .map_err(|err| unsupported_if_unimplemented(err, &manager, &file, LspFeature::Rename))?;
+                client.note_workspace_answer();
                 let snapshots = client.validate_workspace_edit(&result).await?;
                 verify_workspace_edit_target(
                     &file,

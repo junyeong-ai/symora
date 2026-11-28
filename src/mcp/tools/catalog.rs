@@ -322,6 +322,12 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "find_references",
             "References to the symbol at file:line[:column]. Check indexing before \
              treating the count as complete; unconfirmed does not verify workspace readiness. \
+             A pyright started during the call (every call in process, the first after a \
+             daemon starts it) answers from its open files until it has read the workspace, as \
+             few as 1 of 9 references, and the first hint says so: re-run once it is warm, as one \
+             at once can still be short, unmarked. \
+             That holds for find_callers, find_implementations, search_symbols, get_impact, \
+             get_context, get_diff_impact and rename_symbol too. \
              coverage_gaps member_shadowed (the server's interpreter installs the declaration's \
              uv workspace member from another checkout or as a site-packages copy, so imports \
              of it resolve to that copy) or \

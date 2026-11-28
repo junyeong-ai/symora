@@ -207,6 +207,7 @@ impl OutputContext {
         // Source bodies and Section items may be omitted; configuration
         // failures remain visible in the fixed response envelope.
         self.inject_config_errors(&mut response);
+        inject_cold_servers(&mut response, &crate::infra::request::cold_servers());
         if self.max_response_chars > 0 {
             // Measure compact JSON so display format does not change the items.
             let measure = |value: &serde_json::Value| -> usize {
@@ -274,7 +275,38 @@ impl OutputContext {
             );
         }
     }
+}
 
+/// Lead a response's hints with what each server its workspace-wide queries
+/// were answered by cold means (`infra::request`). The fact belongs to the
+/// command, not a section, so it qualifies the whole response however its
+/// sections were built: `diff-impact`'s rows and an MCP tool's result
+/// alike.
+fn inject_cold_servers(response: &mut serde_json::Value, servers: &[String]) {
+    if servers.is_empty() {
+        return;
+    }
+    let Some(obj) = response.as_object_mut() else {
+        return;
+    };
+    let hints: Vec<serde_json::Value> = servers
+        .iter()
+        .map(|server| {
+            serde_json::Value::String(crate::cli::response::disclosure::cold_server_hint(server))
+        })
+        .collect();
+    match obj.get_mut("hints") {
+        Some(serde_json::Value::Array(existing)) => {
+            existing.splice(0..0, hints);
+        }
+        _ => {
+            let at = usize::from(obj.contains_key("config_errors"));
+            obj.shift_insert(at, "hints".to_string(), serde_json::Value::Array(hints));
+        }
+    }
+}
+
+impl OutputContext {
     /// True once any handler reported a handled failure via `print_error`.
     /// The single predicate behind the CLI process exit code and the MCP
     /// `isError` flag.
@@ -305,6 +337,37 @@ impl OutputContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cold server leads the response's hints, or opens a hints list of its
+    /// own ahead of every list, after only the configuration errors.
+    #[test]
+    fn a_cold_server_leads_the_hints_ahead_of_every_list() {
+        let servers = ["pyright".to_string()];
+        let mut led = serde_json::json!({"count": 1, "hints": ["other"], "items": [1]});
+        inject_cold_servers(&mut led, &servers);
+        let hints = led["hints"].as_array().unwrap();
+        assert!(
+            hints[0]
+                .as_str()
+                .unwrap()
+                .starts_with("pyright was started")
+        );
+        assert_eq!(hints[1], "other");
+
+        let mut opened = serde_json::json!({"config_errors": ["bad"], "items": [1]});
+        inject_cold_servers(&mut opened, &servers);
+        let keys: Vec<&str> = opened
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["config_errors", "hints", "items"]);
+
+        let mut untouched = serde_json::json!({"items": [1]});
+        inject_cold_servers(&mut untouched, &[]);
+        assert_eq!(untouched, serde_json::json!({"items": [1]}));
+    }
 
     #[test]
     fn relative_path_strips_root_prefix() {

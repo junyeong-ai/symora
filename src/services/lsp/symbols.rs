@@ -200,6 +200,7 @@ pub(super) async fn workspace_symbols(
 
                 let symbols: Option<Vec<SymbolInformation>> =
                     client.request("workspace/symbol", Some(params)).await?;
+                client.note_workspace_answer();
 
                 tracing::debug!(
                     "Received workspace/symbol response: {} symbols",
