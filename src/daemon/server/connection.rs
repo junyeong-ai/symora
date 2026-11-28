@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -9,6 +8,7 @@ use serde::Serialize;
 
 use crate::daemon::protocol::{Request, RequestId, Response, RpcError, methods};
 
+use super::Instance;
 use super::config::DaemonRuntimeConfig;
 use super::context::ProjectsMap;
 use super::dispatch::dispatch;
@@ -26,7 +26,7 @@ pub(super) async fn handle_connection(
     projects: ProjectsMap,
     semaphore: Arc<Semaphore>,
     config: Arc<DaemonRuntimeConfig>,
-    start_time: Instant,
+    instance: Instance,
     shutdown: watch::Sender<bool>,
 ) -> Result<(), std::io::Error> {
     let (reader, mut writer) = stream.into_split();
@@ -117,7 +117,7 @@ pub(super) async fn handle_connection(
                 ));
             }
             Ok(Some(
-                process_request(request, &projects, &config, start_time).await,
+                process_request(request, &projects, &config, &instance).await,
             ))
         };
         let processed = match allowance {
@@ -125,9 +125,10 @@ pub(super) async fn handle_connection(
             None => process.await,
         }
         .unwrap_or_else(|error| Some((Response::error(id, RpcError::from(error)), false)));
-        let Some((response, should_shutdown)) = processed else {
+        let Some((mut response, should_shutdown)) = processed else {
             break;
         };
+        response.instance = Some(instance.id.to_string());
 
         let json = serialize_response(&response);
 
@@ -147,12 +148,12 @@ async fn process_request(
     request: Request,
     projects: &ProjectsMap,
     config: &DaemonRuntimeConfig,
-    start_time: Instant,
+    instance: &Instance,
 ) -> (Response, bool) {
     let id = request.id.clone();
     let is_shutdown = request.method == methods::SHUTDOWN;
 
-    let result = dispatch(request, projects, config, start_time).await;
+    let result = dispatch(request, projects, config, instance).await;
     let response = match result {
         Ok(v) => Response::success(id, v),
         Err(e) => Response::error(id, e),
@@ -188,7 +189,7 @@ mod tests {
             Arc::clone(&projects),
             Arc::clone(&semaphore),
             config,
-            Instant::now(),
+            Instance::new(),
             shutdown,
         ));
         let (reader, mut writer) = client.into_split();
@@ -232,6 +233,79 @@ mod tests {
         let response: Response = serde_json::from_str(&line).unwrap();
         assert_eq!(response.id, RequestId::Number(2));
         assert_eq!(response.result.unwrap()["pong"], true);
+        drop(writer);
+        drop(reader);
+        handler.await.unwrap().unwrap();
+    }
+
+    /// Every answer names the instance that gave it, and a request bound to
+    /// another instance is refused, typed, before any of its work: no project
+    /// is loaded for it. One bound to this instance is served.
+    #[tokio::test]
+    async fn a_request_bound_to_another_instance_is_refused_before_its_work() {
+        let root = tempfile::tempdir().unwrap();
+        let projects: ProjectsMap = Arc::new(RwLock::new(HashMap::new()));
+        let config = Arc::new(DaemonRuntimeConfig {
+            socket_path: root.path().join("daemon.sock"),
+            pid_path: root.path().join("daemon.pid"),
+            lock_path: root.path().join("daemon.lock"),
+            bind_lock_path: root.path().join("bind.lock"),
+            idle_timeout: Duration::from_secs(60),
+            max_concurrent: 1,
+        });
+        let instance = Instance::new();
+        let (shutdown, _) = watch::channel(false);
+        let (client, server) = UnixStream::pair().unwrap();
+        let handler = tokio::spawn(handle_connection(
+            server,
+            Arc::clone(&projects),
+            Arc::new(Semaphore::new(1)),
+            config,
+            instance.clone(),
+            shutdown,
+        ));
+        let (reader, mut writer) = client.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut exchange = async |request: Request| {
+            writer
+                .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            serde_json::from_str::<Response>(&line).unwrap()
+        };
+
+        let mut hover = Request::new(
+            1,
+            methods::HOVER,
+            Some(serde_json::json!({
+                "project": root.path(), "file": "main.go", "line": 1, "column": 1
+            })),
+        );
+        hover.instance = Some(format!("not-{}", instance.id));
+        let refused = exchange(hover).await;
+        assert_eq!(refused.instance.as_deref(), Some(&*instance.id));
+        let wire: crate::daemon::wire_error::WireLspError =
+            serde_json::from_value(refused.error.unwrap().data.unwrap()).unwrap();
+        assert!(
+            matches!(
+                crate::error::LspError::from(wire),
+                crate::error::LspError::DaemonReplaced(ref method) if method == methods::HOVER
+            ),
+            "the refusal is typed"
+        );
+        assert!(projects.read().await.is_empty(), "no project was loaded");
+
+        let mut ping = Request::new(2, methods::PING, None);
+        ping.instance = Some(instance.id.to_string());
+        let served = exchange(ping).await;
+        assert_eq!(served.result.unwrap()["pong"], true);
+        assert_eq!(served.instance.as_deref(), Some(&*instance.id));
+        drop(exchange);
         drop(writer);
         drop(reader);
         handler.await.unwrap().unwrap();

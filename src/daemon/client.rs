@@ -63,6 +63,48 @@ fn spends_caller_budget(method: &str) -> bool {
     methods::to_lsp_method(method).is_some() || method == methods::INDEX_BUILD
 }
 
+tokio::task_local! {
+    /// The daemon instance that answered the running command's first request
+    /// that binds ([`methods::binds_to_instance`]).
+    static ANSWERED_BY: std::sync::OnceLock<String>;
+}
+
+/// Run `command` as one command: each request it makes that binds
+/// ([`methods::binds_to_instance`]) is answered by the daemon instance that
+/// answered its first, or fails as [`LspError::DaemonReplaced`] — refused by
+/// any other daemon before it does any of the work, and a request no daemon
+/// accepts is not taken to a new one. A command that spans a daemon's
+/// restart would otherwise go on against its successor, whose sessions hold
+/// none of what the earlier answers rested on, and answer with a mix of the
+/// two. The CLI runs each invocation as one, the MCP server each tool call.
+pub async fn one_command<F: std::future::Future>(command: F) -> F::Output {
+    ANSWERED_BY.scope(std::sync::OnceLock::new(), command).await
+}
+
+/// The instance the running command is bound to, once one answered it.
+fn bound_instance() -> Option<String> {
+    ANSWERED_BY
+        .try_with(|bound| bound.get().cloned())
+        .ok()
+        .flatten()
+}
+
+/// Bind the running command to `answered`, the instance that answered its
+/// request for `method`, refusing the answer of any instance but the one it
+/// is bound to. Outside a command nothing binds; an answer naming no
+/// instance came from a daemon of another build, which is never the one a
+/// bound command began on.
+fn bind(method: &str, answered: Option<&str>) -> Result<(), LspError> {
+    let same = ANSWERED_BY.try_with(|bound| match answered {
+        Some(answered) => bound.get_or_init(|| answered.to_string()) == answered,
+        None => bound.get().is_none(),
+    });
+    match same {
+        Ok(false) => Err(LspError::DaemonReplaced(method.to_string())),
+        Ok(true) | Err(_) => Ok(()),
+    }
+}
+
 /// A peer closing with the request unread appears as EOF on macOS and as a
 /// reset or broken pipe on Linux. Both are the lost answer described by
 /// `ConnectionLost`, and neither permits replaying the request.
@@ -476,6 +518,10 @@ impl DaemonClient {
 
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let mut request = Request::new(id, method, params);
+        let binds = methods::binds_to_instance(method);
+        if binds {
+            request.instance = bound_instance();
+        }
         if let Some(limit) = timeout_duration.filter(|_| spends_caller_budget(method)) {
             request.timeout_ms = Some(
                 crate::infra::deadline::remaining(limit)
@@ -526,7 +572,11 @@ impl DaemonClient {
             return Err(LspError::ConnectionLost(method.to_string()));
         }
 
-        Ok(serde_json::from_str(&line)?)
+        let response: Response = serde_json::from_str(&line)?;
+        if binds {
+            bind(method, response.instance.as_deref())?;
+        }
+        Ok(response)
     }
 
     fn inject_project(&self, params: &mut serde_json::Value) {
@@ -568,6 +618,15 @@ impl DaemonClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<Response, LspError> {
+        // A command bound to a daemon goes on only there: that daemon is of
+        // this build and was serving, and one started or found in its place
+        // would refuse the request, so none is.
+        if methods::binds_to_instance(method) && bound_instance().is_some() {
+            return match self.send_request_with_project(method, params).await {
+                Err(LspError::NotConnected) => Err(LspError::DaemonReplaced(method.to_string())),
+                result => result,
+            };
+        }
         self.ensure_running().await?;
         match self.send_request_with_project(method, params.clone()).await {
             Err(LspError::NotConnected) => {
@@ -962,6 +1021,108 @@ mod tests {
             })
         ));
         assert!(!client.can_start_daemon());
+    }
+
+    /// A stand-in daemon on `socket` answering every request as the instance
+    /// `serving` names at the time, its ping as this build's; `None` stops
+    /// it listening. Records each project request's bound instance.
+    fn stand_in(
+        socket: PathBuf,
+        serving: std::sync::Arc<std::sync::Mutex<Option<&'static str>>>,
+        bound: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(reader).read_line(&mut line).await.unwrap();
+                let request: Request = serde_json::from_str(&line).unwrap();
+                let result = match request.method.as_str() {
+                    methods::PING => serde_json::json!({
+                        "pong": true,
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "build": crate::daemon::protocol::BUILD_ID,
+                    }),
+                    _ => {
+                        bound.lock().unwrap().push(request.instance.clone());
+                        serde_json::json!([])
+                    }
+                };
+                let instance = *serving.lock().unwrap();
+                let mut response = Response::success(request.id, result);
+                response.instance = instance.map(str::to_string);
+                let json = serde_json::to_string(&response).unwrap();
+                writer
+                    .write_all(format!("{json}\n").as_bytes())
+                    .await
+                    .unwrap();
+                if instance.is_none() {
+                    drop(listener);
+                    std::fs::remove_file(&socket).unwrap();
+                    return;
+                }
+            }
+        })
+    }
+
+    /// One command's requests are answered by the daemon that answered its
+    /// first: the next carries that instance, and an answer from another is
+    /// refused, as is going on where none listens any more — without
+    /// starting one, which could only be another. Separate commands bind
+    /// separately.
+    #[tokio::test]
+    async fn a_command_is_answered_by_the_daemon_that_answered_it_first() {
+        use std::sync::{Arc, Mutex};
+
+        let runtime = tempfile::tempdir().unwrap();
+        let client = client(runtime.path(), Path::new("/work/tree"));
+        let serving = Arc::new(Mutex::new(Some("first")));
+        let bound = Arc::new(Mutex::new(Vec::new()));
+        let daemon = stand_in(
+            client.config.socket_path.clone(),
+            Arc::clone(&serving),
+            Arc::clone(&bound),
+        );
+        let ask = || client.search_content("needle", None, &[]);
+
+        let across = one_command(async {
+            let first = ask().await;
+            *serving.lock().unwrap() = Some("second");
+            (first, ask().await)
+        })
+        .await;
+        assert!(across.0.is_ok(), "{:?}", across.0);
+        assert!(
+            matches!(&across.1, Err(LspError::DaemonReplaced(method)) if method == methods::SEARCH_CONTENT),
+            "{:?}",
+            across.1
+        );
+        assert_eq!(
+            *bound.lock().unwrap(),
+            [None, Some("first".to_string())],
+            "the second request named the instance the first was answered by"
+        );
+
+        for _ in 0..2 {
+            assert!(one_command(ask()).await.is_ok(), "a new command binds anew");
+        }
+
+        let gone = one_command(async {
+            let first = ask().await;
+            *serving.lock().unwrap() = None;
+            let last = ask().await;
+            (first, last, ask().await)
+        })
+        .await;
+        assert!(gone.0.is_ok() && gone.1.is_err(), "{gone:?}");
+        assert!(
+            matches!(&gone.2, Err(LspError::DaemonReplaced(_))),
+            "{:?}",
+            gone.2
+        );
+        daemon.await.unwrap();
     }
 
     #[test]

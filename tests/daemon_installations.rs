@@ -151,6 +151,91 @@ impl Drop for Daemons {
     }
 }
 
+/// A command whose daemon is replaced between two of its requests fails
+/// rather than going on against the replacement: `refs` resolves its
+/// declaration on one daemon, the daemon restarts while that request is in
+/// flight, and the references request that follows would otherwise be
+/// answered by the new daemon's fresh server.
+#[test]
+fn a_command_spanning_a_daemon_restart_fails_rather_than_going_on() {
+    use std::time::Instant;
+
+    if Command::new("python3")
+        .arg("--version")
+        .output()
+        .map_or(true, |out| !out.status.success())
+    {
+        eprintln!("skipped: the reference fixture requires python3");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let exe = home.path().join("symora");
+    copy_binary(&exe);
+    let _cleanup = Daemons {
+        home: home.path().to_path_buf(),
+        binaries: vec![exe.clone()],
+    };
+    let project = home.path().join("project");
+    std::fs::create_dir_all(project.join(".symora")).unwrap();
+    std::fs::write(
+        project.join("a.py"),
+        "def alpha():\n    return 1\n\n\ndef beta():\n    return alpha()\n",
+    )
+    .unwrap();
+    let log = project.join(".symora/log");
+    let server =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp/reference_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"python": {
+        "command": "python3", "args": [server, &log, "held-symbols"],
+    }}}});
+    std::fs::write(
+        project.join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    json_ok(&exe, home.path(), "start");
+
+    let refs = project_command(
+        &exe,
+        home.path(),
+        &["--format", "compact", "refs", "a.py:1"],
+    )
+    .current_dir(&project)
+    .stdout(std::process::Stdio::piped())
+    .spawn()
+    .unwrap();
+    let held = log.with_extension("held");
+    let deadline = Instant::now() + progress::wait();
+    while !held.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the symbol request never arrived"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    json_ok(&exe, home.path(), "restart");
+    let out = refs.wait_with_output().unwrap();
+
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "lsp_unavailable", "{value}");
+    assert_eq!(
+        value["error"]["hint"], "The daemon was stopping or being replaced — retry.",
+        "{value}"
+    );
+    assert!(!out.status.success());
+    let rerun = project_command(
+        &exe,
+        home.path(),
+        &["--format", "compact", "refs", "a.py:1"],
+    )
+    .current_dir(&project)
+    .output()
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&rerun.stdout).unwrap();
+    assert_eq!(value["target"]["name"], "alpha", "{value}");
+    assert_eq!(value["count"], 1, "{value}");
+}
+
 #[test]
 fn zero_idle_timeout_allows_start_and_project_request() {
     let home = tempfile::tempdir().unwrap();

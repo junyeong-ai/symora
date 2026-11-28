@@ -299,7 +299,11 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
         return execute_scoped(command, app).await;
     }
     let limit = std::time::Duration::from_secs(app.config().lsp.timeout_secs);
-    symora::infra::deadline::scope(limit, execute_scoped(command, app)).await
+    #[cfg(unix)]
+    let command = symora::daemon::client::one_command(execute_scoped(command, app));
+    #[cfg(not(unix))]
+    let command = execute_scoped(command, app);
+    symora::infra::deadline::scope(limit, command).await
 }
 
 async fn execute_scoped(command: Commands, app: &App) -> anyhow::Result<()> {

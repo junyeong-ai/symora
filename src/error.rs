@@ -20,6 +20,14 @@ pub enum LspError {
     #[error("Connection closed before '{0}' was answered")]
     ConnectionLost(String),
 
+    /// A daemon other than the one that answered the command's first request
+    /// was asked `'{0}'`: the one that did was stopped or replaced meanwhile.
+    /// Its successor holds none of the state those answers came from — a
+    /// language server's session, the declaration they resolved — so the
+    /// command cannot go on there, and is not continued.
+    #[error("The daemon this command began on was replaced before '{0}' was asked")]
+    DaemonReplaced(String),
+
     /// `searched` is where the command was looked for, the fact the message
     /// states; `install_hint` is the step that makes it resolve, which a
     /// caller shows apart from the message.
@@ -180,6 +188,7 @@ impl LspError {
             Self::ServerTerminated { .. }
                 | Self::NotConnected
                 | Self::ConnectionLost(_)
+                | Self::DaemonReplaced(_)
                 | Self::Timeout(_)
                 | Self::RequestCancelled
         ) || matches!(

@@ -12,9 +12,12 @@ declaration's own name, inside a function or method, which is the caller.
 Every message's method, and the name of the file it asks about, is appended
 to the file named by the first argument. `no-call-hierarchy` among the
 arguments after it leaves the call hierarchy provider out,
-`unanswered-references` leaves every references request without a reply, and
+`unanswered-references` leaves every references request without a reply,
 `method-not-found` answers every other request it does not serve with
-JSON-RPC MethodNotFound, as a server that lacks the feature does.
+JSON-RPC MethodNotFound, as a server that lacks the feature does, and
+`held-symbols` answers a document-symbol request a second after creating the
+file named by the first argument with `.held` appended, so that a test can
+act while one is in flight.
 """
 
 import json
@@ -22,6 +25,7 @@ import os
 import pathlib
 import re
 import sys
+import time
 import urllib.parse
 
 log = pathlib.Path(sys.argv[1])
@@ -152,6 +156,9 @@ while True:
               "params": {"health": "ok", "quiescent": True}})
         continue
     elif method == "textDocument/documentSymbol":
+        if "held-symbols" in modes:
+            log.with_name(log.name + ".held").touch()
+            time.sleep(1)
         result = document_symbols(path_of(params["textDocument"]["uri"]))
     elif method == "textDocument/references" and "unanswered-references" in modes:
         continue

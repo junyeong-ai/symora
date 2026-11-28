@@ -20,6 +20,9 @@ pub enum WireLspError {
     ConnectionLost {
         method: String,
     },
+    DaemonReplaced {
+        method: String,
+    },
     ServerNotInstalled {
         name: String,
         searched: Vec<String>,
@@ -87,6 +90,9 @@ impl From<&LspError> for WireLspError {
             },
             LspError::NotConnected => Self::NotConnected,
             LspError::ConnectionLost(method) => Self::ConnectionLost {
+                method: method.clone(),
+            },
+            LspError::DaemonReplaced(method) => Self::DaemonReplaced {
                 method: method.clone(),
             },
             LspError::ServerNotInstalled {
@@ -167,6 +173,7 @@ impl From<WireLspError> for LspError {
             WireLspError::ServerStart { message } => LspError::ServerStart(message),
             WireLspError::NotConnected => LspError::NotConnected,
             WireLspError::ConnectionLost { method } => LspError::ConnectionLost(method),
+            WireLspError::DaemonReplaced { method } => LspError::DaemonReplaced(method),
             WireLspError::ServerNotInstalled {
                 name,
                 searched,
@@ -316,6 +323,17 @@ mod tests {
                 }
                 other => panic!("expected ServerTerminated, got {other:?}"),
             }
+        }
+    }
+
+    /// A refusal for having begun on another daemon is made by the daemon
+    /// that replaced it, so it has to cross the socket as itself to read as
+    /// the command's lost daemon rather than a protocol failure.
+    #[test]
+    fn daemon_replaced_round_trips_as_itself() {
+        match round_trip(LspError::DaemonReplaced("find_references".into())) {
+            LspError::DaemonReplaced(method) => assert_eq!(method, "find_references"),
+            other => panic!("expected DaemonReplaced, got {other:?}"),
         }
     }
 

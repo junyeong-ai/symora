@@ -20,6 +20,10 @@ A daemon that has held no project and had no connection open for `idle_timeout` 
 
 Project restart unloads only the addressed project's retained services and preserves its on-disk index. Active requests and outstanding server starts prevent restart or idle eviction. Release the projects-map lock before awaiting server shutdown so other projects remain serviceable.
 
+## One command, one daemon
+
+A command's requests that answer for it (`methods::binds_to_instance`) are answered by the daemon instance that answered its first: a CLI invocation and an MCP tool call each run in `client::one_command`. Every answer names its daemon's instance, which no other daemon process shares; a bound request carries the instance it is bound to, and any other daemon refuses it as `DaemonReplaced` before doing any of its work, which the client also makes of an answer from another instance. A bound command whose daemon no longer listens fails the same way and starts none, since a new one could only be another. A command spanning a restart would otherwise go on against the successor, whose sessions hold none of what its earlier answers rested on, and on a daemon several sessions share one session's restart would answer another's command with that mix. Lifecycle requests and the notes of files written address whichever daemon is serving. An unbound command's first request keeps the retry a request no daemon accepted gets.
+
 ## Request timeouts
 
 LSP operations use the project's retained `lsp.timeout_secs` budget. CLI/MCP establish a shared deadline, and daemon requests carry remaining milliseconds. Admission waits and dispatch preparation consume that allowance; expired queued requests do not start project work. The server also clamps it to the project's retained configuration. Language and operation multipliers do not extend it. Timeout errors retain their typed wire identity. An index build spends its caller's budget the same way where it carries one — a symbol search's — and none otherwise; it runs on its own task either way, so the budget bounds the answer, never the build. Other non-LSP store/lifecycle operations keep their separate bounds.

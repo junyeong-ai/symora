@@ -50,11 +50,38 @@ impl Drop for ConnectionUse {
     }
 }
 
+/// This daemon process as its callers tell it apart: when it began, and an
+/// identity no other daemon process shares, before or after it, which binds
+/// the requests of one command to it ([`crate::daemon::client::one_command`]).
+#[derive(Debug, Clone)]
+pub(super) struct Instance {
+    pub(super) started: Instant,
+    pub(super) id: Arc<str>,
+}
+
+impl Instance {
+    fn new() -> Self {
+        // A process id is reused once its process has exited, so its start
+        // makes it this process's; the count tells apart servers one process
+        // starts, as tests do.
+        static STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let since_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let count = STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self {
+            started: Instant::now(),
+            id: format!("{}-{since_epoch}-{count}", std::process::id()).into(),
+        }
+    }
+}
+
 pub struct DaemonServer {
     config: Arc<DaemonRuntimeConfig>,
     projects: ProjectsMap,
     semaphore: Arc<Semaphore>,
-    start_time: Instant,
+    instance: Instance,
     connection_usage: Arc<Mutex<ConnectionUseState>>,
     /// Level-triggered, so the signal is a state rather than an event: an
     /// observer that subscribes after the flag is already set still sees it
@@ -74,7 +101,7 @@ impl DaemonServer {
             config: Arc::new(config),
             semaphore,
             projects: Arc::new(RwLock::new(HashMap::new())),
-            start_time: Instant::now(),
+            instance: Instance::new(),
             connection_usage: Arc::new(Mutex::new(ConnectionUseState {
                 connections: 0,
                 last_used: Instant::now(),
@@ -193,7 +220,7 @@ impl DaemonServer {
         let projects = Arc::clone(&self.projects);
         let semaphore = Arc::clone(&self.semaphore);
         let config = Arc::clone(&self.config);
-        let start_time = self.start_time;
+        let instance = self.instance.clone();
         let shutdown = self.shutdown.clone();
         // Count before spawning: cleanup runs on this same task, so the exit
         // check cannot miss an accepted connection.
@@ -202,7 +229,7 @@ impl DaemonServer {
         tokio::spawn(async move {
             let _usage = usage;
             if let Err(e) =
-                handle_connection(stream, projects, semaphore, config, start_time, shutdown).await
+                handle_connection(stream, projects, semaphore, config, instance, shutdown).await
             {
                 tracing::warn!("Connection error: {}", e);
             }

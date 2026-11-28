@@ -52,7 +52,10 @@ pub(crate) fn lsp_error_at(err: LspError, file: &str) -> OutputError {
     // LSP-backed command, and a daemon replaced mid-command is served again
     // by its successor: each mapped hint names the one way past it.
     let settled = matches!(&err, LspError::Timeout(timed_out) if timed_out.unread.is_some())
-        || matches!(&err, LspError::ConnectionLost(_));
+        || matches!(
+            &err,
+            LspError::ConnectionLost(_) | LspError::DaemonReplaced(_)
+        );
     let mapped: OutputError = err.into();
     if settled || !matches!(mapped.code, ErrorCode::Timeout | ErrorCode::LspUnavailable) {
         return mapped;
@@ -353,6 +356,7 @@ fn unresolved_by(error: LspError) -> Result<Unresolved, LspError> {
         | LspError::ServerStart(_)
         | LspError::NotConnected
         | LspError::ConnectionLost(_)
+        | LspError::DaemonReplaced(_)
         | LspError::ServerNotInstalled { .. }
         | LspError::UnsupportedLanguage(_)
         | LspError::FeatureNotSupported { .. }

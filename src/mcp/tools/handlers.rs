@@ -106,7 +106,13 @@ where
     // command future; this is the same flag the CLI exit code reads.
     let errored = scoped.output.errored_flag();
     let limit = std::time::Duration::from_secs(scoped.config().lsp.timeout_secs);
-    crate::infra::deadline::scope(limit, run(scoped)).await?;
+    // One tool call is one command: its daemon requests are answered by one
+    // daemon, and the next call by whichever is serving then.
+    #[cfg(unix)]
+    let command = crate::daemon::client::one_command(run(scoped));
+    #[cfg(not(unix))]
+    let command = run(scoped);
+    crate::infra::deadline::scope(limit, command).await?;
     Ok(CapturedOutput {
         body: buf.take().join("\n"),
         errored: errored.load(std::sync::atomic::Ordering::Relaxed),

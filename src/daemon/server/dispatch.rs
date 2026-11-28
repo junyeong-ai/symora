@@ -11,6 +11,7 @@ use crate::daemon::wire;
 use crate::error::LspError;
 use crate::services::lsp::LspService;
 
+use super::Instance;
 use super::config::DaemonRuntimeConfig;
 use super::context::{ProjectContext, ProjectLease, ProjectsMap, get_context, restart_project};
 use super::handlers;
@@ -22,10 +23,20 @@ pub(super) async fn dispatch(
     request: Request,
     projects: &ProjectsMap,
     config: &DaemonRuntimeConfig,
-    start_time: Instant,
+    instance: &Instance,
 ) -> Result<serde_json::Value, RpcError> {
     let received = Instant::now();
     let caller_budget = request.timeout_ms.map(Duration::from_millis);
+    // A request bound to the daemon that answered its command's first one
+    // is that daemon's to answer: here, none of its state stands behind the
+    // earlier answers, so nothing of it is done.
+    if request
+        .instance
+        .as_deref()
+        .is_some_and(|bound| bound != &*instance.id)
+    {
+        return Err(RpcError::from(&LspError::DaemonReplaced(request.method)));
+    }
     match request.method.as_str() {
         // `version` lets the client detect a daemon left over from a
         // different binary and restart it before any wire exchange, so the
@@ -38,7 +49,7 @@ pub(super) async fn dispatch(
         methods::SHUTDOWN => Ok(serde_json::json!({"shutting_down": true})),
         methods::STATUS => tokio::time::timeout(
             NON_LSP_REQUEST_TIMEOUT,
-            handlers::handle_status(projects, config, start_time),
+            handlers::handle_status(projects, config, instance.started),
         )
         .await
         .map_err(timeout_error)?,
@@ -390,7 +401,7 @@ mod tests {
             Some(serde_json::json!({"project": root.path(), "force": false})),
         );
         request.timeout_ms = Some(100);
-        let answered = dispatch(request, &projects, &config, Instant::now()).await;
+        let answered = dispatch(request, &projects, &config, &Instance::new()).await;
         drop(held);
         assert_eq!(
             answered.unwrap_err().code,
@@ -417,13 +428,13 @@ mod tests {
         let config = DaemonRuntimeConfig::load().unwrap();
         let projects: ProjectsMap = Arc::new(RwLock::new(HashMap::new()));
         let params = serde_json::json!({"project": root.path(), "files": []});
-        let start = Instant::now();
+        let start = Instance::new();
         for count in 1..=2 {
             let result = dispatch(
                 Request::new(count, methods::NOTE_FILES_EDITED, Some(params.clone())),
                 &projects,
                 &config,
-                start,
+                &start,
             )
             .await
             .unwrap();
@@ -432,7 +443,7 @@ mod tests {
                 Request::new(3, methods::STATUS, None),
                 &projects,
                 &config,
-                start,
+                &start,
             )
             .await
             .unwrap();
@@ -464,6 +475,7 @@ mod tests {
                     wait.recv().unwrap();
                 });
                 ready.recv().unwrap();
+                let instance = Instance::new();
                 let mut request = Box::pin(dispatch(
                     Request::new(
                         1,
@@ -472,7 +484,7 @@ mod tests {
                     ),
                     &projects,
                     &config,
-                    Instant::now(),
+                    &instance,
                 ));
                 std::future::poll_fn(|cx| {
                     assert!(std::future::Future::poll(request.as_mut(), cx).is_pending());
@@ -507,7 +519,7 @@ mod tests {
                     Request::new(1, method, params),
                     &projects,
                     &config,
-                    Instant::now(),
+                    &Instance::new(),
                 )
                 .await
                 .unwrap();
@@ -539,7 +551,7 @@ mod tests {
                 idle_timeout: Duration::from_secs(60),
                 max_concurrent: 1,
             },
-            Instant::now(),
+            &Instance::new(),
         )
         .await
         .unwrap_err();

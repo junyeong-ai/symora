@@ -10,6 +10,11 @@ pub struct Request {
     pub params: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// The daemon instance that answered the sending command's first request
+    /// ([`methods::binds_to_instance`]); a daemon that is not it refuses the
+    /// request before doing any of its work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 impl Request {
@@ -20,6 +25,7 @@ impl Request {
             method: method.into(),
             params,
             timeout_ms: None,
+            instance: None,
         }
     }
 }
@@ -32,6 +38,10 @@ pub struct Response {
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RpcError>,
+    /// The daemon instance that answered: its own, which no other daemon
+    /// process, before or after it, shares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 impl Response {
@@ -41,6 +51,7 @@ impl Response {
             id,
             result: Some(result),
             error: None,
+            instance: None,
         }
     }
 
@@ -50,6 +61,7 @@ impl Response {
             id,
             result: None,
             error: Some(error),
+            instance: None,
         }
     }
 }
@@ -194,6 +206,20 @@ pub mod methods {
     pub const INDEXED_LANGUAGES: &str = "indexed_languages";
     pub const TREE_CURRENCY: &str = "tree_currency";
     pub const INDEX_CLEAR: &str = "index_clear";
+
+    /// Whether a request's answer belongs to the command that sends it, so
+    /// that every such request of one command must be answered by the daemon
+    /// instance that answered its first: a later answer from a successor
+    /// would rest on none of the state the earlier ones did. A lifecycle
+    /// request is addressed to whichever daemon is serving, and a note of
+    /// files written tells whichever daemon holds them, a successor's
+    /// sessions included, what is now on disk.
+    pub fn binds_to_instance(daemon_method: &str) -> bool {
+        !matches!(
+            daemon_method,
+            PING | STATUS | SHUTDOWN | RESTART_PROJECT | REFRESH_FILES | NOTE_FILES_EDITED
+        )
+    }
 
     pub fn to_lsp_method(daemon_method: &str) -> Option<&'static str> {
         match daemon_method {
