@@ -1091,31 +1091,48 @@ impl Store {
         let owned = self
             .db
             .call(move |conn| {
-                let tx =
-                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                let owned = read_build_epoch(&tx)? == epoch;
-                if owned {
-                    if defer_text_index {
-                        tx.execute_batch(REBUILD_TEXT_INDEX)?;
-                        tx.execute_batch(TEXT_INDEX_TRIGGERS)?;
+                // The commit that publishes is the build's last act as the
+                // index's owner, and SQLite checkpoints the log inside a
+                // commit that leaves it past its threshold, as a build does:
+                // the whole build is copied into the database file after the
+                // publication is visible and before the commit returns, which
+                // holds the lock — a build in progress to every reader —
+                // past the publication. The upkeep after the build
+                // checkpoints instead, with the index released.
+                let threshold: i64 =
+                    conn.pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))?;
+                conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+                let published = (|| -> Result<bool, rusqlite::Error> {
+                    let tx =
+                        conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    let owned = read_build_epoch(&tx)? == epoch;
+                    if owned {
+                        if defer_text_index {
+                            tx.execute_batch(REBUILD_TEXT_INDEX)?;
+                            tx.execute_batch(TEXT_INDEX_TRIGGERS)?;
+                        }
+                        write_meta(&tx, META_BUILD_SCOPE, &value)?;
+                        write_meta(&tx, META_BUILD_COMPLETED_AT, &now_unix().to_string())?;
+                        write_meta(&tx, META_TREE_FINGERPRINT, &fingerprints)?;
+                        write_meta(&tx, META_EXTRACTOR, &extraction_digest())?;
+                        // The rows qualify exactly the marker written beside
+                        // them, so they are replaced wholesale in the same
+                        // transaction: what an earlier build could not read
+                        // says nothing about what this one could.
+                        tx.execute("DELETE FROM unread_paths", [])?;
+                        let mut stmt =
+                            tx.prepare("INSERT INTO unread_paths (path, is_file) VALUES (?1, ?2)")?;
+                        for unread in &unread_paths {
+                            stmt.execute(rusqlite::params![unread.path, unread.is_file])?;
+                        }
+                        drop(stmt);
                     }
-                    write_meta(&tx, META_BUILD_SCOPE, &value)?;
-                    write_meta(&tx, META_BUILD_COMPLETED_AT, &now_unix().to_string())?;
-                    write_meta(&tx, META_TREE_FINGERPRINT, &fingerprints)?;
-                    write_meta(&tx, META_EXTRACTOR, &extraction_digest())?;
-                    // The rows qualify exactly the marker written beside them,
-                    // so they are replaced wholesale in the same transaction:
-                    // what an earlier build could not read says nothing about
-                    // what this one could.
-                    tx.execute("DELETE FROM unread_paths", [])?;
-                    let mut stmt =
-                        tx.prepare("INSERT INTO unread_paths (path, is_file) VALUES (?1, ?2)")?;
-                    for unread in &unread_paths {
-                        stmt.execute(rusqlite::params![unread.path, unread.is_file])?;
-                    }
-                    drop(stmt);
-                }
-                tx.commit()?;
+                    tx.commit()?;
+                    Ok(owned)
+                })();
+                let restored = conn.pragma_update(None, "wal_autocheckpoint", threshold);
+                let owned = published?;
+                restored?;
                 Ok(owned)
             })
             .await?;
@@ -1195,26 +1212,30 @@ impl Store {
     /// The index's scope, row counts, and size, read in one transaction so
     /// they describe the same committed state — a rebuild committing
     /// mid-read cannot make the report name one build's languages beside
-    /// another build's counts. `is_indexing` answers the question the
-    /// counts raise — could a build have been moving these numbers while
-    /// they were read — so the lock is inspected on both sides of the
-    /// snapshot and either sighting is the answer. Reading it once could
-    /// only ever be true of an instant: before the snapshot it misses a
-    /// build that starts during it, after the snapshot it misses one that
-    /// ends during it, and each miss pairs "no build in progress" with a
-    /// build's own half-written rows. The size is the database's
-    /// own page count times page size — the logical size of the index,
-    /// which every connection observing this state reports identically. The
-    /// main file's length would not: under WAL, pages committed since the
-    /// last checkpoint live in the log, so that number depends on when the
-    /// last checkpoint ran rather than on what the index holds.
+    /// another build's counts. `is_indexing` says whether a build owns the
+    /// index as of that state, read from the lock on the connection's own
+    /// thread right beside the snapshot, so no wait in front of the read can
+    /// leave it describing an earlier moment than the counts do. The lock is
+    /// read after the snapshot, and before it too where the snapshot holds no
+    /// completed build: a build that published during the read left the
+    /// snapshot its own unfinished rows, and those are a build's in
+    /// progress, not an index nobody built. A snapshot holding a completed
+    /// build is no build's work in progress, so the sighting before it, of a
+    /// build that has since published, does not speak for it. The size is
+    /// the database's own page count times page size — the logical size of
+    /// the index, which every connection observing this state reports
+    /// identically. The main file's length would not: under WAL, pages
+    /// committed since the last checkpoint live in the log, so that number
+    /// depends on when the last checkpoint ran rather than on what the index
+    /// holds.
     pub async fn stats(&self) -> Result<IndexStats, StoreError> {
-        let owned_before = self.build_in_progress();
-        let mut stats = self
-            .reader
+        let lock_path = Self::lock_path(&self.project_root);
+        self.reader
             .call(move |conn| {
+                let owned_before = index_owned(&lock_path);
                 let tx = conn.unchecked_transaction()?;
                 let build = read_completed_build(&tx)?;
+                let completed = build.is_some();
                 let languages = build
                     .as_ref()
                     .map(|build| build.scope.languages())
@@ -1231,7 +1252,7 @@ impl Store {
                     tx.query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
                         .unwrap_or(0) as u64
                 };
-                Ok(IndexStats {
+                let mut stats = IndexStats {
                     file_count: count_of("files"),
                     symbol_count: count_of("symbols"),
                     content_line_count: count_of("content_lines"),
@@ -1240,11 +1261,12 @@ impl Store {
                     is_indexing: false,
                     languages,
                     unread_paths,
-                })
+                };
+                tx.commit()?;
+                stats.is_indexing = index_owned(&lock_path) || (!completed && owned_before);
+                Ok(stats)
             })
-            .await?;
-        stats.is_indexing = owned_before || self.build_in_progress();
-        Ok(stats)
+            .await
     }
 
     pub async fn index(&self, options: IndexOptions) -> Result<IndexStats, StoreError> {
@@ -1270,7 +1292,7 @@ impl Store {
     /// another user's checkout, a read-only mount, a restored cache — and a
     /// reader there wants the index reported, not an I/O error.
     fn build_in_progress(&self) -> bool {
-        FileLock::shared(&Self::lock_path(&self.project_root)).is_ok_and(|holder| holder.is_none())
+        index_owned(&Self::lock_path(&self.project_root))
     }
 
     /// Take the index for an operation that rewrites it. Another such
@@ -1666,6 +1688,12 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Whether an operation that rewrites the index holds its lock
+/// ([`Store::build_in_progress`]).
+fn index_owned(lock_path: &Path) -> bool {
+    FileLock::shared(lock_path).is_ok_and(|holder| holder.is_none())
 }
 
 /// Snapshot the indexed `content_hash` of each distinct file backing a
@@ -3011,6 +3039,58 @@ mod tests {
         );
     }
 
+    /// The commit that publishes a build leaves the log to the upkeep after
+    /// it. SQLite checkpoints inside a commit that leaves the log past its
+    /// threshold, after the publication is visible and before the commit
+    /// returns, so a build checkpointing there would hold the index past the
+    /// publication for as long as copying itself into the file takes. A
+    /// threshold of one page makes every other commit here checkpoint, which
+    /// is what shows the publication did not: its marker is in the log and
+    /// not yet in the file.
+    #[tokio::test]
+    async fn the_publication_leaves_the_checkpoint_to_the_upkeep() {
+        fn marker_in_file(root: &Path, copy: &Path) -> bool {
+            std::fs::copy(Store::db_path(root), copy).unwrap();
+            let conn = rusqlite::Connection::open(copy).unwrap();
+            read_meta(&conn, META_BUILD_COMPLETED_AT).unwrap().is_some()
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn checkpoint_probe() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store
+            .db
+            .execute("PRAGMA wal_autocheckpoint = 1;")
+            .await
+            .unwrap();
+
+        let epoch = store.begin_build(Reindex::InPlace, true).await.unwrap();
+        store
+            .publish_build(epoch, &BuildScope::All, HashMap::new(), Vec::new(), true)
+            .await
+            .unwrap();
+        assert!(store.build_scope().await.unwrap().is_some());
+        assert!(
+            !marker_in_file(root, &scratch.path().join("published.db")),
+            "the publication checkpointed inside its commit"
+        );
+        let threshold: i64 = store
+            .db
+            .call(|conn| conn.pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0)))
+            .await
+            .unwrap();
+        assert_eq!(threshold, 1, "the connection's own threshold is restored");
+
+        store.checkpoint().await.unwrap();
+        assert!(
+            marker_in_file(root, &scratch.path().join("checkpointed.db")),
+            "the copy reads the file a checkpoint writes"
+        );
+    }
+
     /// A build window that closes with work still on the connection — a
     /// caller stopped awaiting the build — keeps the index until that work
     /// has run. Released with the caller, the lock would let another
@@ -3153,6 +3233,48 @@ mod tests {
             Err(StoreError::Rebuilding)
         ));
         other.execute_batch("ROLLBACK").unwrap();
+    }
+
+    /// `is_indexing` describes the state the counts were read from. A build
+    /// that published and let the index go while the status waited its turn
+    /// on the connection is over by the time the counts are read, so a status
+    /// asked for during it reports the completed build alone; a build holding
+    /// the index once the counts are read is one running beside them.
+    #[tokio::test]
+    async fn is_indexing_describes_the_state_the_counts_were_read_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn sighting_probe() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        let held = FileLock::exclusive(&Store::lock_path(root))
+            .unwrap()
+            .expect("nothing else holds the index");
+        let running = store.stats().await.unwrap();
+        assert!(running.is_indexing && !running.languages.is_empty());
+
+        // A read ahead of the status on the connection, and the build ending
+        // while the status waits behind it.
+        let ahead = store.reader.call(|_conn| {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            Ok(())
+        });
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), ahead).await;
+        let status = store.stats();
+        let ended = async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            drop(held);
+        };
+        let (status, ()) = tokio::join!(status, ended);
+        let status = status.unwrap();
+        assert!(
+            !status.is_indexing,
+            "a build that ended before the counts were read was reported beside them: {status:?}"
+        );
+        assert!(status.last_indexed > 0);
     }
 
     /// A build only marks the index whole while it still owns the epoch it
