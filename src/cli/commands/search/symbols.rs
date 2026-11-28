@@ -1133,14 +1133,13 @@ async fn read_index(
         budget_secs: budget.as_secs(),
     };
     let mut failed = None;
-    // Whether the search has met a build that owns the index. A store's
-    // connection answers one request at a time; a read through the handle
-    // whose build runs is answered without it, but one can still wait there
-    // behind other work — the upkeep after a build publishes — so a read made
-    // while waiting on a build spends the budget as the wait does. The first
-    // read is not bounded: a completed index answers it at once, and refusing
-    // it for want of budget, which a path query's live lookup may have spent,
-    // would leave the index out of an answer it could join.
+    // Whether the search has met a build that owns the index. A store's read
+    // connection answers one request at a time, so a read can still wait
+    // there behind other reads; one made while waiting on a build spends the
+    // budget as the wait does. The first read is not bounded: a completed
+    // index answers it at once, and refusing it for want of budget, which a
+    // path query's live lookup may have spent, would leave the index out of
+    // an answer it could join.
     let mut waiting = false;
     loop {
         let read = app

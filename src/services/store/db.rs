@@ -39,7 +39,25 @@ pub struct SqliteDb {
 }
 
 impl SqliteDb {
+    /// A connection that may write, creating the file if there is none.
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
+        Self::open_with(path, rusqlite::OpenFlags::default()).await
+    }
+
+    /// A connection that only reads a file that already exists. Under WAL it
+    /// reads the last committed state without waiting for a writer, whether
+    /// that writer is another process or a connection of this one.
+    pub async fn open_read_only(path: &Path) -> Result<Self, StoreError> {
+        Self::open_with(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .await
+    }
+
+    async fn open_with(path: &Path, flags: rusqlite::OpenFlags) -> Result<Self, StoreError> {
         let path = path.to_path_buf();
         let (ready_tx, ready_rx) =
             oneshot::channel::<Result<rusqlite::InterruptHandle, StoreError>>();
@@ -50,7 +68,8 @@ impl SqliteDb {
         let worker = thread::Builder::new()
             .name("symora-sqlite".to_string())
             .spawn(move || {
-                let mut conn = match rusqlite::Connection::open(&path).and_then(|conn| {
+                let opened = rusqlite::Connection::open_with_flags(&path, flags);
+                let mut conn = match opened.and_then(|conn| {
                     // Before any statement can contend: another process
                     // writing is a reason to wait, and a connection without
                     // this would call that failure instead.
@@ -102,7 +121,8 @@ impl SqliteDb {
     }
 
     /// Run `f` once the connection has run every job given to it so far,
-    /// without waiting for it. Nothing runs it on a store abandoned first.
+    /// without waiting for it. On a store abandoned first it is dropped
+    /// unrun, so whatever it owns is released either way.
     pub fn after_queued(&self, f: impl FnOnce() + Send + 'static) {
         if let Some(sender) = &self.sender {
             let _ = sender.send(Box::new(move |_conn: &mut rusqlite::Connection| f()));

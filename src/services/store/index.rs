@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::OptionalExtension;
@@ -396,53 +395,61 @@ fn read_build_epoch(conn: &rusqlite::Connection) -> Result<i64, rusqlite::Error>
 }
 
 pub struct Store {
+    /// The connection every answer is read from. A connection of its own
+    /// rather than a turn on the writer's: under WAL it reads the last
+    /// committed state without waiting for any writer, so no answer queues
+    /// behind a build's transaction on this handle — the publication alone
+    /// can outlast a search's whole budget — and a handle that builds reads
+    /// what any other process reads. Declared before `db` so it closes first,
+    /// leaving the writer the connection that finalizes the file.
+    reader: SqliteDb,
+    /// The connection every write goes through, one at a time, with the reads
+    /// that decide what it writes.
     db: SqliteDb,
     project_root: PathBuf,
     config: StoreConfig,
-    /// The build windows this handle has open ([`BuildWindow`]).
-    building: Arc<AtomicUsize>,
     /// Whether a build of this handle stopped before it published — an
     /// error, or a caller that stopped awaiting it — perhaps leaving work on
     /// the connection.
     unfinished: AtomicBool,
 }
 
-/// A build window this handle opened: `begin_build` took the completion
-/// marker away, and the build has not put it back. While one is open, a read
-/// through this handle can only find no completed build, and says so without
-/// queueing on the connection behind the build's own work — the last of
-/// which, the publication, can take longer than a search's whole budget. A
-/// build that stops with its window open — an error, or a caller that
-/// stopped awaiting it — may leave work on the connection: the window stays
-/// open until that work has run, and the build counts as unfinished
-/// ([`Store::abandon_unfinished_build`]).
+/// A build window this handle opened: from the transaction that takes the
+/// completion marker away until the one that puts it back. It holds the index
+/// lock, which is how every process, this one included, reads that a build
+/// owns the index. A build that stops with its window open — an error, or a
+/// caller that stopped awaiting it — may leave work on the connection, so the
+/// lock is let go only once that work has run, and the build counts as
+/// unfinished ([`Store::abandon_unfinished_build`]). Releasing it with the
+/// caller instead would leave a build writing the index that no process
+/// could see, and another could take the index from under it.
 struct BuildWindow<'a> {
     store: &'a Store,
-    open: bool,
+    lock: Option<FileLock>,
 }
 
 impl<'a> BuildWindow<'a> {
-    fn open(store: &'a Store) -> Self {
-        store.building.fetch_add(1, Ordering::AcqRel);
-        Self { store, open: true }
+    fn open(store: &'a Store, lock: FileLock) -> Self {
+        Self {
+            store,
+            lock: Some(lock),
+        }
     }
 
+    /// The build's last transaction has returned: nothing of it is left on
+    /// the connection.
     fn close(mut self) {
-        self.open = false;
-        self.store.building.fetch_sub(1, Ordering::AcqRel);
+        drop(self.lock.take());
     }
 }
 
 impl Drop for BuildWindow<'_> {
     fn drop(&mut self) {
-        if !self.open {
+        let Some(lock) = self.lock.take() else {
             return;
-        }
+        };
         self.store.unfinished.store(true, Ordering::Release);
-        let building = Arc::clone(&self.store.building);
-        self.store.db.after_queued(move || {
-            building.fetch_sub(1, Ordering::AcqRel);
-        });
+        self.store.db.after_queued(move || drop(lock));
     }
 }
 
@@ -491,12 +498,13 @@ impl Store {
             }
             Err(e) => return Err(e),
         };
+        let reader = Self::connect(SqliteDb::open_read_only(&db_path).await?).await?;
 
         Ok(Self {
+            reader,
             db,
             project_root: project_root.to_path_buf(),
             config,
-            building: Arc::new(AtomicUsize::new(0)),
             unfinished: AtomicBool::new(false),
         })
     }
@@ -644,7 +652,6 @@ impl Store {
         language: Option<Language>,
         within: &[PathBuf],
     ) -> Result<SearchPage<SymbolSearchResult>, StoreError> {
-        self.outside_build_window()?;
         let query = query.to_string();
         let limit = limit as i64;
         let kind_str = kind_filter.map(|k| k.to_string());
@@ -663,7 +670,7 @@ impl Store {
             .collect();
 
         let answer = self
-            .db
+            .reader
             .call(move |conn| {
                 let tx = conn.unchecked_transaction()?;
                 let Some(build) = read_completed_build(&tx)? else {
@@ -761,17 +768,6 @@ impl Store {
         Ok(page)
     }
 
-    /// A read through a handle whose own build window is open finds no
-    /// completed build, since that build took the marker away: it is told so
-    /// at once ([`BuildWindow`]) rather than after the build's work queued
-    /// ahead of it on the connection.
-    fn outside_build_window(&self) -> Result<(), StoreError> {
-        match self.building.load(Ordering::Acquire) {
-            0 => Ok(()),
-            _ => Err(StoreError::Rebuilding),
-        }
-    }
-
     /// Why the index has no completed build to answer from. A build owns the
     /// index for its whole duration — `begin_build` clears the completion
     /// marker and `publish_build` restores it — so an absent marker is two
@@ -798,7 +794,6 @@ impl Store {
         limit: usize,
         languages: &[Language],
     ) -> Result<SearchPage<ContentSearchResult>, StoreError> {
-        self.outside_build_window()?;
         let requested = languages.to_vec();
         let query = query.to_string();
         let limit = limit as i64;
@@ -807,7 +802,7 @@ impl Store {
         let use_fts = query.chars().count() >= FTS_MIN_QUERY_CHARS;
 
         let answer = self
-            .db
+            .reader
             .call(move |conn| {
                 let tx = conn.unchecked_transaction()?;
                 let Some(build) = read_completed_build(&tx)? else {
@@ -997,9 +992,10 @@ impl Store {
     /// covered, so nothing here can be trusted as complete.
     pub async fn indexed_languages(&self) -> Result<Vec<Language>, StoreError> {
         Ok(self
-            .build_scope()
+            .reader
+            .call(|conn| read_completed_build(conn))
             .await?
-            .map(|scope| scope.languages())
+            .map(|build| build.scope.languages())
             .unwrap_or_default())
     }
 
@@ -1215,7 +1211,7 @@ impl Store {
     pub async fn stats(&self) -> Result<IndexStats, StoreError> {
         let owned_before = self.build_in_progress();
         let mut stats = self
-            .db
+            .reader
             .call(move |conn| {
                 let tx = conn.unchecked_transaction()?;
                 let build = read_completed_build(&tx)?;
@@ -1252,10 +1248,8 @@ impl Store {
     }
 
     pub async fn index(&self, options: IndexOptions) -> Result<IndexStats, StoreError> {
-        {
-            let _lock = self.own_index().await?;
-            self.do_index(options).await?;
-        }
+        let lock = self.own_index().await?;
+        self.do_index(options, lock).await?;
         // A build owns the index until it publishes, and no longer. Settling
         // the storage it freed and counting what it wrote change no row, and
         // a lock held through them reads as a build in progress to every
@@ -1296,7 +1290,7 @@ impl Store {
         }
     }
 
-    async fn do_index(&self, options: IndexOptions) -> Result<(), StoreError> {
+    async fn do_index(&self, options: IndexOptions, lock: FileLock) -> Result<(), StoreError> {
         let filter = FileFilter::new(&self.project_root);
         let scope = BuildScope::from_options(&options.languages);
         let extensions = scope.extensions();
@@ -1338,8 +1332,8 @@ impl Store {
             true => Reindex::FromScratch,
             false => Reindex::InPlace,
         };
+        let window = BuildWindow::open(self, lock);
         let epoch = self.begin_build(reindex, defer_text_index).await?;
-        let window = BuildWindow::open(self);
         // Pruning reads "absent from the walk" as "gone from the tree", which
         // holds only where the walk went. It is scoped to that rather than
         // refused outright: a single directory the walk could not enter would
@@ -1432,7 +1426,7 @@ impl Store {
             return Ok(TreeCurrency::Unknown);
         }
         let recorded = self
-            .db
+            .reader
             .call(|conn| {
                 Ok(read_completed_build(conn)?.zip(read_meta(conn, META_TREE_FINGERPRINT)?))
             })
@@ -3015,6 +3009,93 @@ mod tests {
             !owned_after_publishing,
             "a published build still read as one in progress"
         );
+    }
+
+    /// A build window that closes with work still on the connection — a
+    /// caller stopped awaiting the build — keeps the index until that work
+    /// has run. Released with the caller, the lock would let another
+    /// operation take the index while the build still writes it, and every
+    /// process would read a build still writing as an index nobody is
+    /// building.
+    #[tokio::test]
+    async fn a_build_cut_off_owns_the_index_until_its_work_has_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        // Work still on the connection when the caller goes: the job is
+        // handed over when first polled and runs on after the wait ends.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let working = store.db.call(move |_conn| {
+            let _ = released.recv_timeout(std::time::Duration::from_secs(10));
+            Ok(())
+        });
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), working).await;
+
+        let lock = FileLock::exclusive(&Store::lock_path(root))
+            .unwrap()
+            .expect("nothing else holds a fresh project's index");
+        drop(BuildWindow::open(&store, lock));
+        assert!(
+            store.build_in_progress(),
+            "the index was let go while the build's work was still on the connection"
+        );
+        assert!(store.unfinished.load(Ordering::Acquire));
+
+        release.send(()).unwrap();
+        store.db.call(|_conn| Ok(())).await.unwrap();
+        assert!(
+            !store.build_in_progress(),
+            "the index is let go once the build's work has run"
+        );
+    }
+
+    /// A read answers from the last committed state rather than queueing
+    /// behind the writer's work. The writer here holds a transaction that
+    /// has taken the completion marker away and does not end — a build's
+    /// publication running on the same handle — and both a status and a
+    /// search answer at once from the index as it was committed.
+    #[tokio::test]
+    async fn a_read_does_not_wait_for_the_writers_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn reader_probe() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        let publishing = store.db.call(|conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute(
+                "DELETE FROM meta WHERE key = ?1",
+                rusqlite::params![META_BUILD_SCOPE],
+            )?;
+            tx.query_row(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) \
+                 SELECT count(*) FROM n",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?;
+            tx.commit()
+        });
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), publishing).await;
+
+        let wait = std::time::Duration::from_secs(2);
+        let stats = tokio::time::timeout(wait, store.stats()).await;
+        let page = tokio::time::timeout(
+            wait,
+            store.search_symbols("reader_probe", 10, None, None, &[]),
+        )
+        .await;
+        // Before anything can fail: the writer's work never ends otherwise,
+        // and the store would wait for it as it closes.
+        store.db.abandon();
+
+        let stats = stats.expect("status waited for the writer").unwrap();
+        assert_eq!(stats.file_count, 1);
+        assert!(!stats.languages.is_empty(), "{stats:?}");
+        let page = page.expect("a search waited for the writer").unwrap();
+        assert_eq!(page.total, 1);
     }
 
     /// Opening a store writes nothing it already holds, so a write another
