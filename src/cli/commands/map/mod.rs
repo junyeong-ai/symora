@@ -464,7 +464,7 @@ impl ProjectScan {
                     .to_string(),
             ));
         }
-        OutputError::not_found(format!("File not found in project: {path}"))
+        crate::cli::CliInputError::FileNotFound(PathBuf::from(path)).into()
     }
 }
 

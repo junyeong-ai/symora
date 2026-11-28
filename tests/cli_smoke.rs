@@ -1372,6 +1372,54 @@ fn a_named_path_that_is_not_there_fails_rather_than_answering_zero() {
     }
 }
 
+/// A file that is not there is refused as the other position errors are:
+/// by the path as it was given, relative to the project, with a hint the
+/// agent can follow — on every surface that takes a file.
+#[test]
+fn a_file_that_is_not_there_is_refused_by_the_path_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("packages")).unwrap();
+    std::fs::write(
+        root.join("packages/real.py"),
+        "def alpha():\n    return 1\n",
+    )
+    .unwrap();
+
+    for args in [
+        &["refs", "packages/nope.py:1"][..],
+        &["callers", "packages/nope.py:1:5"],
+        &["context", "packages/nope.py:1"],
+        &["symbols", "packages/nope.py"],
+        &["map", "file", "packages/nope.py"],
+        &[
+            "edit",
+            "delete",
+            "packages/nope.py",
+            "--symbol",
+            "alpha",
+            "--dry-run",
+        ],
+    ] {
+        let mut command = vec!["--format", "compact"];
+        command.extend_from_slice(args);
+        let out = run_in(root, &command);
+        let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
+        assert!(!out.status.success(), "{args:?}: {json}");
+        assert_eq!(json["error"]["code"], "not_found", "{args:?}: {json}");
+        assert_eq!(
+            json["error"]["message"], "File not found: packages/nope.py",
+            "{args:?}: {json}"
+        );
+        assert!(
+            json["error"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("symora map summary")),
+            "{args:?}: {json}"
+        );
+    }
+}
+
 /// Naming a path narrows a search and never widens it, so a path the
 /// project's ignore rules exclude is refused by every search, whether it is
 /// the ignored directory or a file beneath it, rather than answered with a

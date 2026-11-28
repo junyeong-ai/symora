@@ -92,7 +92,7 @@ pub(crate) fn resolve_file_path(app: &App, target: impl AsRef<Path>) -> Result<P
     // `canonicalize` fail with an opaque io error that reads as an internal
     // fault, when it is really a `not_found` the caller can act on.
     if !resolved.is_file() {
-        anyhow::bail!(crate::cli::CliInputError::FileNotFound(resolved));
+        anyhow::bail!(crate::cli::CliInputError::FileNotFound(path.to_path_buf()));
     }
     let canonical = resolved
         .canonicalize()

@@ -20,7 +20,7 @@ pub fn resolve_project_file(file: &Path, root: &Path) -> Result<PathBuf, CliInpu
     if resolved.is_file() {
         Ok(resolved)
     } else {
-        Err(CliInputError::FileNotFound(resolved))
+        Err(CliInputError::FileNotFound(file.to_path_buf()))
     }
 }
 
@@ -77,7 +77,9 @@ pub enum CliInputError {
         chars: usize,
     },
 
-    #[error("File not found: {0}")]
+    /// A path names no file. It is the path as it was given, so a relative
+    /// one is refused in the terms it was asked in.
+    #[error("File not found: {}", .0.display())]
     FileNotFound(PathBuf),
 
     #[error("Access denied: {0} is outside project boundary")]
@@ -94,7 +96,13 @@ impl From<CliInputError> for OutputError {
     fn from(err: CliInputError) -> Self {
         let message = err.to_string();
         match err {
-            CliInputError::FileNotFound(_) => OutputError::new(ErrorCode::NotFound, message),
+            // A mistyped or moved path, or one read from another directory:
+            // what the project holds is one call away.
+            CliInputError::FileNotFound(_) => OutputError::new(ErrorCode::NotFound, message)
+                .with_hint(
+                    "A relative path is read from the project root. Its top-level directories \
+                     and packages: symora map summary",
+                ),
             CliInputError::FileTooLarge { .. } => {
                 OutputError::new(ErrorCode::FileTooLarge, message)
             }

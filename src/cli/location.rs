@@ -175,7 +175,7 @@ impl ParsedLocation {
             {
                 CliInputError::LocationMalformed
             } else {
-                CliInputError::FileNotFound(file.clone())
+                CliInputError::FileNotFound(self.file.clone())
             }
         })?;
 
