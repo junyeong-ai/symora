@@ -6,7 +6,11 @@ use std::time::Duration;
 use crate::models::config::SymoraConfig;
 use crate::models::symbol::Language;
 
-#[derive(Debug, Clone)]
+/// What the language-server layer and the store are built from: two values
+/// that compare equal build services that answer alike, so a process that
+/// serves many commands keeps its services while the value it built them from
+/// stands.
+#[derive(Debug, Clone, PartialEq)]
 pub struct LspRuntimeConfig {
     base_timeout: Duration,
     pub max_file_size_bytes: u64,

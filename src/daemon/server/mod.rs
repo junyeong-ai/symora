@@ -311,6 +311,7 @@ impl DaemonServer {
         };
 
         join_all(contexts.iter().map(|(_, ctx)| async move {
+            ctx.retire_predecessor().await;
             ctx.lsp.cleanup_idle(self.config.idle_timeout).await;
             let cache_expired = ctx.lsp.cleanup_expired_caches().await;
             if cache_expired > 0 {
@@ -338,10 +339,7 @@ impl DaemonServer {
         };
 
         join_all(idle.into_iter().map(|(path, ctx)| async move {
-            if let Err(e) = ctx.store.checkpoint().await {
-                tracing::debug!("Failed to checkpoint store for {:?}: {}", path, e);
-            }
-            ctx.lsp.shutdown().await;
+            ctx.stop().await;
             tracing::info!("Removed idle project: {:?}", path);
         }))
         .await;
@@ -364,21 +362,8 @@ impl DaemonServer {
     /// here: a teardown slow enough to overlap a successor would otherwise
     /// delete the successor's socket and strand it.
     async fn cleanup(&self) {
-        let contexts: Vec<_> = {
-            let projects = self.projects.read().await;
-            projects
-                .iter()
-                .map(|(p, c)| (p.clone(), Arc::clone(c)))
-                .collect()
-        };
-
-        join_all(contexts.iter().map(|(_path, ctx)| async move {
-            if let Err(e) = ctx.store.checkpoint().await {
-                tracing::debug!("Failed to checkpoint store during shutdown: {}", e);
-            }
-            ctx.lsp.shutdown().await;
-        }))
-        .await;
+        let contexts: Vec<_> = self.projects.read().await.values().cloned().collect();
+        join_all(contexts.iter().map(|ctx| ctx.stop())).await;
     }
 
     pub fn shutdown(&self) {
@@ -540,7 +525,7 @@ mod tests {
             .lsp
             .servers
             .insert("go".to_string(), fake.server("serve", 0));
-        let mut ctx = ProjectContext::new(root);
+        let mut ctx = ProjectContext::load(root);
         ctx.lsp = Arc::new(DefaultLspService::new(
             root,
             Arc::new(crate::config::LspRuntimeConfig::from(&config)),
@@ -599,7 +584,7 @@ mod tests {
         let lease = get_context(&server.projects, busy.to_str().unwrap())
             .await
             .unwrap();
-        let unused = Arc::new(ProjectContext::new(&idle));
+        let unused = Arc::new(ProjectContext::load(&idle));
         server.projects.write().await.insert(idle.clone(), unused);
         tokio::time::sleep(Duration::from_millis(2)).await;
         server.cleanup_idle_servers().await;

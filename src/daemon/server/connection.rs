@@ -429,7 +429,7 @@ mod tests {
             .lsp
             .servers
             .insert("go".to_string(), fake.server("serve", 0));
-        let mut ctx = super::super::context::ProjectContext::new(root);
+        let mut ctx = super::super::context::ProjectContext::load(root);
         ctx.lsp = Arc::new(DefaultLspService::new(
             root,
             Arc::new(crate::config::LspRuntimeConfig::from(&config)),

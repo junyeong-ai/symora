@@ -290,8 +290,10 @@ mod tests {
         root
     }
 
+    /// A request is bounded by its own project's configuration as the request
+    /// reads it, never by another project's or by an earlier reading.
     #[tokio::test]
-    async fn request_bounds_use_each_retained_project_config() {
+    async fn request_bounds_use_each_project_config_as_the_request_reads_it() {
         let projects: ProjectsMap = Arc::new(RwLock::new(HashMap::new()));
         let first = project(10);
         let second = project(100);
@@ -308,13 +310,12 @@ mod tests {
                 "[lsp]\ntimeout_secs = 1\n",
             )
             .unwrap();
-            let retained = get_context(&projects, root.path().to_str().unwrap())
+            let edited = get_context(&projects, root.path().to_str().unwrap())
                 .await
                 .unwrap();
-            assert!(Arc::ptr_eq(&ctx, &retained));
             assert_eq!(
-                estimate_request_timeout(methods::HOVER, &retained),
-                Some(Duration::from_secs(seconds))
+                estimate_request_timeout(methods::HOVER, &edited),
+                Some(Duration::from_secs(1))
             );
         }
         assert_eq!(projects.read().await.len(), 2);
@@ -323,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn client_and_server_share_the_configured_lsp_budget() {
         let root = project(60);
-        let ctx = ProjectContext::new(root.path());
+        let ctx = ProjectContext::load(root.path());
         assert_eq!(
             estimate_request_timeout(methods::WORKSPACE_SYMBOLS, &ctx),
             Some(Duration::from_secs(60))
@@ -337,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn lsp_budget_is_language_independent_and_store_bounds_stay_fixed() {
         let root = project(10);
-        let ctx = ProjectContext::new(root.path());
+        let ctx = ProjectContext::load(root.path());
         assert_eq!(
             estimate_request_timeout(methods::WORKSPACE_SYMBOLS, &ctx),
             Some(Duration::from_secs(10))

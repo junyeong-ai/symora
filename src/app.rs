@@ -24,6 +24,10 @@ pub struct App {
     pub(crate) config_service: Arc<dyn ConfigService>,
     pub(crate) config: SymoraConfig,
     test_scope: crate::services::TestScope,
+    /// What `lsp`, `ast` and `store` were built from.
+    runtime: Arc<LspRuntimeConfig>,
+    /// How they were reached, whether a daemon can serve already decided.
+    wiring: Wiring,
 }
 
 /// The store's slice of the resolved configuration. The size ceiling is one
@@ -54,6 +58,79 @@ pub struct Wiring {
     pub file_watch: FileWatch,
 }
 
+struct Services {
+    lsp: Arc<dyn LspService + Send + Sync>,
+    ast: Arc<dyn AstQueryService>,
+    store: Arc<dyn StoreService>,
+}
+
+impl Services {
+    fn build(root: &Path, runtime: &Arc<LspRuntimeConfig>, wiring: Wiring) -> anyhow::Result<Self> {
+        let Wiring {
+            use_daemon,
+            deterministic,
+            file_watch,
+        } = wiring;
+
+        let ast = Arc::new(DefaultAstQueryService::new(runtime.max_file_size_bytes));
+
+        #[cfg(unix)]
+        let lsp: Arc<dyn LspService + Send + Sync> = if use_daemon {
+            Arc::new(DaemonLspService::new(root)?)
+        } else {
+            Arc::new(DefaultLspService::new(
+                root,
+                Arc::clone(runtime),
+                file_watch,
+            ))
+        };
+
+        #[cfg(not(unix))]
+        let lsp: Arc<dyn LspService + Send + Sync> = {
+            let _ = use_daemon;
+            Arc::new(DefaultLspService::new(
+                root,
+                Arc::clone(runtime),
+                file_watch,
+            ))
+        };
+
+        let lsp = if deterministic {
+            Arc::new(DeterministicLspService::new(lsp)) as Arc<dyn LspService + Send + Sync>
+        } else {
+            lsp
+        };
+
+        #[cfg(unix)]
+        let store: Arc<dyn StoreService> = if use_daemon {
+            Arc::new(DaemonStoreService::new(root)?)
+        } else {
+            Arc::new(DefaultStoreService::new(root, store_config(runtime)))
+        };
+
+        #[cfg(not(unix))]
+        let store: Arc<dyn StoreService> =
+            Arc::new(DefaultStoreService::new(root, store_config(runtime)));
+
+        Ok(Self { lsp, ast, store })
+    }
+}
+
+/// The configuration a run answers under, and why any of it was not applied:
+/// a default-backed answer must disclose settings that were not applied.
+async fn read_config(service: &dyn ConfigService) -> (SymoraConfig, Vec<String>) {
+    match service.load(false).await {
+        Ok(config) => {
+            let errors = config.problems();
+            (config, errors)
+        }
+        Err(e) => {
+            tracing::warn!("config load failed, falling back to defaults: {e}");
+            (SymoraConfig::default(), vec![e.to_string()])
+        }
+    }
+}
+
 impl App {
     pub async fn new(output_options: OutputOptions, wiring: Wiring) -> anyhow::Result<Self> {
         Self::new_at(std::env::current_dir()?, output_options, wiring).await
@@ -67,90 +144,86 @@ impl App {
         output_options: OutputOptions,
         wiring: Wiring,
     ) -> anyhow::Result<Self> {
-        let Wiring {
-            use_daemon,
-            deterministic,
-            file_watch,
-        } = wiring;
         tracing::debug!("Initializing Symora at {:?}", root);
 
         let config_service = Arc::new(DefaultConfigService::new(&root));
-        // A default-backed answer must disclose settings that were not applied.
-        let (config, config_errors) = match config_service.load(false).await {
-            Ok(config) => {
-                let errors = config.problems();
-                (config, errors)
-            }
-            Err(e) => {
-                tracing::warn!("config load failed, falling back to defaults: {e}");
-                (SymoraConfig::default(), vec![e.to_string()])
-            }
-        };
-
-        let output = OutputContext::new(root.clone(), output_options)
-            .with_max_response_chars(config.output.max_response_chars)
-            .with_config_errors(config_errors);
-
-        let runtime_config = Arc::new(LspRuntimeConfig::from(&config));
+        let (config, config_errors) = read_config(config_service.as_ref()).await;
 
         #[cfg(unix)]
-        let use_daemon = use_daemon && crate::daemon::DaemonClient::new(&root)?.can_start_daemon();
-
-        let ast = Arc::new(DefaultAstQueryService::new(
-            runtime_config.max_file_size_bytes,
-        ));
-
-        #[cfg(unix)]
-        let lsp: Arc<dyn LspService + Send + Sync> = if use_daemon {
-            Arc::new(DaemonLspService::new(&root)?)
-        } else {
-            Arc::new(DefaultLspService::new(
-                &root,
-                Arc::clone(&runtime_config),
-                file_watch,
-            ))
+        let wiring = Wiring {
+            use_daemon: wiring.use_daemon
+                && crate::daemon::DaemonClient::new(&root)?.can_start_daemon(),
+            ..wiring
         };
 
-        #[cfg(not(unix))]
-        let lsp: Arc<dyn LspService + Send + Sync> = {
-            let _ = use_daemon;
-            Arc::new(DefaultLspService::new(
-                &root,
-                Arc::clone(&runtime_config),
-                file_watch,
-            ))
-        };
-
-        let lsp = if deterministic {
-            Arc::new(DeterministicLspService::new(lsp)) as Arc<dyn LspService + Send + Sync>
-        } else {
-            lsp
-        };
-
-        #[cfg(unix)]
-        let store: Arc<dyn StoreService> = if use_daemon {
-            Arc::new(DaemonStoreService::new(&root)?)
-        } else {
-            Arc::new(DefaultStoreService::new(
-                &root,
-                store_config(&runtime_config),
-            ))
-        };
-
-        #[cfg(not(unix))]
-        let store: Arc<dyn StoreService> = Arc::new(DefaultStoreService::new(
-            &root,
-            store_config(&runtime_config),
-        ));
+        let runtime = Arc::new(LspRuntimeConfig::from(&config));
+        let services = Services::build(&root, &runtime, wiring)?;
 
         tracing::info!(
             "Symora initialized (daemon: {})",
-            if use_daemon { "enabled" } else { "disabled" }
+            if wiring.use_daemon {
+                "enabled"
+            } else {
+                "disabled"
+            }
         );
 
-        let test_scope = crate::services::TestScope::from_config(&config.test).with_root(&root);
+        let output = OutputContext::new(root.clone(), output_options);
+        Ok(Self::assemble(
+            root,
+            output,
+            config_service,
+            (config, config_errors),
+            runtime,
+            services,
+            wiring,
+        ))
+    }
 
-        Ok(Self {
+    /// The app a command starting now runs in, for a process that serves many
+    /// (`mcp serve`): the configuration as it reads now, over this app's
+    /// services wherever they were built from settings that still read the
+    /// same, so editing an output or search setting keeps the servers warm.
+    pub(crate) async fn reloaded(&self) -> anyhow::Result<Self> {
+        let (config, config_errors) = read_config(self.config_service.as_ref()).await;
+        let runtime = LspRuntimeConfig::from(&config);
+        let (runtime, services) = if runtime == *self.runtime {
+            let services = Services {
+                lsp: Arc::clone(&self.lsp),
+                ast: Arc::clone(&self.ast),
+                store: Arc::clone(&self.store),
+            };
+            (Arc::clone(&self.runtime), services)
+        } else {
+            let runtime = Arc::new(runtime);
+            let services = Services::build(&self.root, &runtime, self.wiring)?;
+            (runtime, services)
+        };
+        Ok(Self::assemble(
+            self.root.clone(),
+            self.output.clone(),
+            Arc::clone(&self.config_service),
+            (config, config_errors),
+            runtime,
+            services,
+            self.wiring,
+        ))
+    }
+
+    fn assemble(
+        root: PathBuf,
+        output: OutputContext,
+        config_service: Arc<dyn ConfigService>,
+        (config, config_errors): (SymoraConfig, Vec<String>),
+        runtime: Arc<LspRuntimeConfig>,
+        Services { lsp, ast, store }: Services,
+        wiring: Wiring,
+    ) -> Self {
+        let output = output
+            .with_max_response_chars(config.output.max_response_chars)
+            .with_config_errors(config_errors);
+        let test_scope = crate::services::TestScope::from_config(&config.test).with_root(&root);
+        Self {
             root,
             output,
             lsp,
@@ -159,7 +232,14 @@ impl App {
             config_service,
             config,
             test_scope,
-        })
+            runtime,
+            wiring,
+        }
+    }
+
+    /// Whether `other` answers through this app's services.
+    pub(crate) fn shares_services_with(&self, other: &App) -> bool {
+        Arc::ptr_eq(&self.runtime, &other.runtime)
     }
 
     pub fn root(&self) -> &Path {
@@ -217,6 +297,8 @@ impl App {
             config_service: Arc::clone(&self.config_service),
             config: self.config.clone(),
             test_scope: self.test_scope.clone(),
+            runtime: Arc::clone(&self.runtime),
+            wiring: self.wiring,
         }
     }
 }

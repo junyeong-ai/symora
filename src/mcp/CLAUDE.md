@@ -32,6 +32,10 @@ Claude Code shows the model only the first 4,096 characters of server instructio
 
 Tools that accept a `file:line[:column]` target embed `LocationInput` via `#[serde(flatten)]` rather than redeclaring the fields (its `column` is optional). New location-taking tools follow the same pattern. The edit tools embed `EditTargetInput` instead (file plus exactly one of symbol or line); navigation/analysis tools keep `LocationInput`.
 
+## A call reads its configuration
+
+A tool call is one command, so it runs in the app `Apps::for_call` builds from the configuration as it reads when the call starts (`App::reloaded`), as a CLI command does. The app keeps the previous app's language servers and store while the `LspRuntimeConfig` they were built from reads the same, so an output or search edit leaves them warm; an app whose services were replaced is shut down once no call holds it, and `Apps::shutdown` stops what every app started once the transport ends.
+
 ## Output discipline
 
 Handlers run the underlying command against a `BufferedSink` and return whatever JSON the command emitted. Don't post-process at the handler — the CLI's output contract is the MCP contract. If a tool needs a different output shape, add it to the CLI command first. The server layer re-emits that same JSON as `structuredContent` alongside the text block and sets `isError` from the captured error flag; that envelope is the only shaping, and it stays a faithful pass-through.

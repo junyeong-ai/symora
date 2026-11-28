@@ -56,8 +56,11 @@ struct Daemons {
     binaries: Vec<PathBuf>,
 }
 
+/// A settings edit applies from the project's next request, and a project
+/// restart unloads that project alone; neither stops the daemon or another
+/// project's session.
 #[test]
-fn project_restart_reloads_settings_without_stopping_other_sessions() {
+fn settings_apply_from_the_next_request_and_a_restart_spares_other_sessions() {
     let python = Path::new("/usr/bin/python3");
     if !Command::new(python)
         .arg("--version")
@@ -122,8 +125,25 @@ fn project_restart_reloads_settings_without_stopping_other_sessions() {
     let before = json_ok(&exe, home.path(), "status");
     assert_eq!(before["active_projects"], 2);
 
+    let second_row = |status: &serde_json::Value| {
+        status["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| {
+                Path::new(row["project"].as_str().unwrap()) == second.canonicalize().unwrap()
+            })
+            .cloned()
+            .unwrap()
+    };
+
     configure(&first, "changed");
-    assert_eq!(run(&first, &["hover", "main.py:1:1"])["content"], "first");
+    assert_eq!(run(&first, &["hover", "main.py:1:1"])["content"], "changed");
+    let reloaded = json_ok(&exe, home.path(), "status");
+    assert_eq!(reloaded["pid"], before["pid"]);
+    assert_eq!(reloaded["active_projects"], 2);
+    assert_eq!(second_row(&reloaded), second_row(&before));
+
     assert_eq!(
         run(&first, &["daemon", "restart", "--project"])["restarted"],
         true
@@ -131,13 +151,7 @@ fn project_restart_reloads_settings_without_stopping_other_sessions() {
     let after = json_ok(&exe, home.path(), "status");
     assert_eq!(after["pid"], before["pid"]);
     assert_eq!(after["active_projects"], 1);
-    let unchanged = before["projects"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| Path::new(row["project"].as_str().unwrap()) == second.canonicalize().unwrap())
-        .unwrap();
-    assert_eq!(&after["projects"][0], unchanged);
+    assert_eq!(after["projects"][0], second_row(&before));
     assert_eq!(run(&first, &["hover", "main.py:1:1"])["content"], "changed");
     assert_eq!(run(&second, &["hover", "main.py:1:1"])["content"], "second");
     assert_eq!(json_ok(&exe, home.path(), "status")["pid"], before["pid"]);

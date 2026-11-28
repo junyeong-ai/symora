@@ -296,7 +296,7 @@ fn not_found_hint(install: &str) -> String {
     let mut hint = format!(
         "{install}. If the server is installed somewhere off PATH, set \
          command = \"/absolute/path\" under [lsp.servers.<language>] in \
-         .symora/config.toml and run `symora daemon restart --project`"
+         .symora/config.toml"
     );
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
         && home.join(".nvm").is_dir()
@@ -314,7 +314,7 @@ fn override_not_found_hint(command: &str) -> String {
     format!(
         "command `{command}` is set by [lsp.servers] in symora config but was not found \
          or not executable. Fix the override's path or remove it to fall back to the \
-         builtin server, then run `symora daemon restart --project`"
+         builtin server"
     )
 }
 

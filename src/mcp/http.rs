@@ -21,7 +21,8 @@ pub async fn serve_http(app: App, addr: SocketAddr, profile: McpProfile) -> Resu
         .with_hint("Expose it through an authenticated proxy for remote access.")
         .into());
     }
-    let server = McpServer::new(Arc::new(app), profile);
+    let server = McpServer::new(app, profile);
+    let apps = server.apps();
     let mut config = StreamableHttpServerConfig::default();
     config.legacy_session_mode = false;
     config.json_response = true;
@@ -45,11 +46,13 @@ pub async fn serve_http(app: App, addr: SocketAddr, profile: McpProfile) -> Resu
     let router = Router::new().route_service("/", service);
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("Symora MCP listening on http://{addr}");
-    axum::serve(listener, router)
+    let served = axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             crate::infra::signal::stop_requested().await;
             cancellation.cancel();
         })
-        .await?;
+        .await;
+    apps.shutdown().await;
+    served?;
     Ok(())
 }
