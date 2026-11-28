@@ -175,7 +175,7 @@ pub fn normalized_distribution_name(name: &str) -> String {
 /// A `.dist-info` directory is named `{name}-{version}`, so one whose
 /// normalized stem does not begin with a sought name and a `-` records
 /// another distribution; one that does is confirmed by its `METADATA`
-/// `Name`, since `aix-core-extra` begins with `aix-core-` too. Limits: the
+/// `Name`, since `app-core-extra` begins with `app-core-` too. Limits: the
 /// environment is the interpreter's prefix, `<prefix>/lib/python*/site-packages`
 /// (`Lib/site-packages` on Windows), so an interpreter whose packages live
 /// elsewhere (a distribution's `dist-packages`, the user site) reads as
@@ -589,9 +589,9 @@ mod tests {
     #[test]
     fn distribution_names_normalize_as_pep_503_compares_them() {
         for (written, normalized) in [
-            ("aix-core", "aix-core"),
-            ("Aix_Core", "aix-core"),
-            ("aix.__core", "aix-core"),
+            ("app-core", "app-core"),
+            ("App_Core", "app-core"),
+            ("app.__core", "app-core"),
             ("  PyYAML ", "pyyaml"),
         ] {
             assert_eq!(

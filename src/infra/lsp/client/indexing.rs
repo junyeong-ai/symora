@@ -8,8 +8,7 @@
 //!   Until a slice completes the list and hands it to the program whole
 //!   (`setTrackedFiles`), references, call hierarchies and workspace symbols
 //!   walk the open documents alone (`getSourceFileInfoList`, filtered to
-//!   user code). Measured on a 3,858-file workspace: 1 of 9 references and
-//!   0 of 6 callers right after a start.
+//!   user code).
 //! - It holds a file's requests only until its settings are applied
 //!   (`getWorkspaceForFile` awaits `isInitialized`, workspaceFactory.ts),
 //!   which happens as the enumeration starts, so a request queued behind the

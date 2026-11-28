@@ -1733,13 +1733,13 @@ fn a_declaration_the_grammar_reads_is_editable_without_a_server() {
             "--symbol",
             "project_id",
             "--body",
-            "variable \"project_id\" {\n  type    = string\n  default = \"aix\"\n}",
+            "variable \"project_id\" {\n  type    = string\n  default = \"demo\"\n}",
         ],
     );
 
     let after = std::fs::read_to_string(dir.path().join("main.tf")).unwrap();
     assert!(
-        after.contains("default = \"aix\""),
+        after.contains("default = \"demo\""),
         "the edit did not land: {after}"
     );
     assert!(
@@ -3933,7 +3933,7 @@ fn a_diff_in_a_serverless_language_still_names_what_changed() {
     git(repo, &["commit", "-qm", "init"]);
     std::fs::write(
         repo.join("main.tf"),
-        "variable \"project_id\" {\n  type    = string\n  default = \"aix\"\n}\n\noutput \"bucket_url\" {\n  value = 1\n}\n",
+        "variable \"project_id\" {\n  type    = string\n  default = \"demo\"\n}\n\noutput \"bucket_url\" {\n  value = 1\n}\n",
     )
     .unwrap();
     git(repo, &["add", "-A"]);

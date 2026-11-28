@@ -1206,16 +1206,16 @@ pub fn unindexed_live_disclosure(
 /// What it means that `server`, which reports no workspace readiness, was
 /// started during the command its workspace-wide answers are for
 /// (`infra::request`), and what gets the whole answer. The fact is when the
-/// server started; the shortfall is what that was measured to cost pyright
-/// on a 3,858-file workspace (`client::indexing`), and the answer keeps
-/// its `indexing` marker either way.
+/// server started; the shortfall is that pyright answers from its open
+/// documents until it has enumerated the workspace (`client::indexing`), and
+/// the answer keeps its `indexing` marker either way.
 pub fn cold_server_hint(server: &str) -> String {
     format!(
         "{server} was started during this command and reports no workspace readiness: until it \
          has read the workspace it answers references, callers, implementations and workspace \
-         symbols from its open files alone, as few as 1 of 9 references and 0 of 6 callers on a \
-         3,858-file workspace. Re-run once it has had time to read it: a daemon keeps it running, \
-         while in process (SYMORA_NO_DAEMON) every run starts it cold"
+         symbols from its open files alone, so the answer can be far short. Re-run once it has \
+         had time to read it: a daemon keeps it running, while in process (SYMORA_NO_DAEMON) \
+         every run starts it cold"
     )
 }
 

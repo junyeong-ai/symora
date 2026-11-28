@@ -839,18 +839,18 @@ mod tests {
     #[test]
     fn a_python_module_answers_to_its_package_names() {
         let files = paths(&[
-            "packages/aix-core/src/aix_core/__init__.py",
-            "packages/aix-core/src/aix_core/llm/__init__.py",
-            "packages/aix-core/src/aix_core/llm/deadline.py",
+            "packages/app-core/src/app_core/__init__.py",
+            "packages/app-core/src/app_core/llm/__init__.py",
+            "packages/app-core/src/app_core/llm/deadline.py",
             "scripts/deploy/build.py",
         ]);
         assert_eq!(
-            python_module_names("packages/aix-core/src/aix_core/llm/deadline.py", &files),
-            vec!["aix_core.llm.deadline"]
+            python_module_names("packages/app-core/src/app_core/llm/deadline.py", &files),
+            vec!["app_core.llm.deadline"]
         );
         assert_eq!(
-            python_module_names("packages/aix-core/src/aix_core/llm/__init__.py", &files),
-            vec!["aix_core.llm"]
+            python_module_names("packages/app-core/src/app_core/llm/__init__.py", &files),
+            vec!["app_core.llm"]
         );
         assert_eq!(
             python_module_names("scripts/deploy/build.py", &files),

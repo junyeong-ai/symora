@@ -7707,7 +7707,7 @@ variable "project_id" {
 }
 
 locals {
-  name_prefix = "aix"
+  name_prefix = "demo"
 }
 
 data "google_project" "current" {}
@@ -7749,7 +7749,7 @@ output "bucket_url" {
             language: Language::Terraform,
             path: "a.tfvars",
             source: r#"
-project_id = "aix"
+project_id = "demo"
 region     = "us-central1"
 "#,
             declares: &["property:project_id", "property:region"],
