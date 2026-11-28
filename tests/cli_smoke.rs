@@ -390,6 +390,93 @@ fn response_size_ceiling_keeps_json_parseable() {
 
 #[cfg(unix)]
 #[test]
+fn a_member_installed_from_another_checkout_is_disclosed_and_guarded() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tree = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let root = tree.path();
+    let write = |path: &std::path::Path, text: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        &root.join("pyproject.toml"),
+        "[project]\nname = \"ws\"\n\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\n",
+    );
+    write(
+        &root.join("packages/core/pyproject.toml"),
+        "[project]\nname = \"core\"\n",
+    );
+    write(
+        &root.join("packages/core/src/core/errors.py"),
+        "def leaves():\n    return 1\n",
+    );
+    // No server is asked: the guard refuses before any reference lookup.
+    write(
+        &root.join(".symora/config.toml"),
+        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright-langserver\"\n",
+    );
+    let interpreter = root.join(".venv/bin/python");
+    write(&interpreter, "");
+    std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let source = other.path().join("packages/core");
+    std::fs::create_dir_all(&source).unwrap();
+    let record = root.join(".venv/lib/python3.12/site-packages/core-0.1.0.dist-info");
+    write(&record.join("METADATA"), "Name: core\n");
+    write(
+        &record.join("direct_url.json"),
+        &format!(
+            r#"{{"url": "file://{}", "dir_info": {{"editable": true}}}}"#,
+            source.display()
+        ),
+    );
+
+    let out = run_in(root, &["--format", "compact", "doctor", "python"]);
+    let json = common::parse_response(&out.stdout).expect("doctor stdout must be valid JSON");
+    let gaps = &json["languages"][0]["member_gaps"];
+    assert_eq!(
+        gaps["items"],
+        serde_json::json!([{
+            "name": "core",
+            "path": "packages/core",
+            "reason": "member_shadowed",
+            "installed_from": source.canonicalize().unwrap().display().to_string(),
+        }]),
+        "{json}"
+    );
+    assert!(
+        gaps["hints"][0].as_str().unwrap().contains("`uv sync`"),
+        "{json}"
+    );
+
+    let out = run_in(
+        root,
+        &[
+            "--format",
+            "compact",
+            "edit",
+            "delete",
+            "packages/core/src/core/errors.py",
+            "--symbol",
+            "leaves",
+            "--expect-no-references",
+            "--dry-run",
+        ],
+    );
+    let json = common::parse_response(&out.stdout).expect("edit stdout must be valid JSON");
+    assert_eq!(json["error"]["code"], "precondition_failed", "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("(member_shadowed)"),
+        "{json}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn doctor_reports_override_provenance_and_spawnability() {
     use std::os::unix::fs::PermissionsExt;
 
