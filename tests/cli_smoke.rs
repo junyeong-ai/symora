@@ -3060,6 +3060,12 @@ fn callers_are_read_off_the_references_counted() {
     );
     assert_eq!(page["changes"]["items"][0]["callers"]["count"], 2, "{page}");
     assert!(
+        page["changes"]["items"][0]["callers"]["hints"][0]
+            .as_str()
+            .is_some_and(|hint| hint.starts_with("1 of the 3 references")),
+        "the import names no caller, and the row says so: {page}"
+    );
+    assert!(
         page["changes"]["items"][1].get("callers").is_none(),
         "{page}"
     );
@@ -3375,6 +3381,14 @@ fn callers_without_call_hierarchy_name_none_for_a_type() {
     );
     assert_eq!(function["items"][0]["name"], "use", "{function}");
     assert_eq!(function["count"], 1, "{function}");
+    assert!(
+        function["hints"]
+            .as_array()
+            .is_some_and(|hints| hints.iter().any(|hint| hint
+                .as_str()
+                .is_some_and(|hint| hint.starts_with("1 of the 2 references")))),
+        "the import names no caller, and the answer says so: {function}"
+    );
 
     let class = callers_at("shapes.py:1");
     assert_eq!(class["callers_status"], "not_callable", "{class}");

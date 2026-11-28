@@ -763,6 +763,42 @@ pub fn with_cap<T>(mut section: Section<T>, cap: Cap) -> Section<T> {
     section
 }
 
+/// The references a caller list was read off that named no caller: each
+/// lies outside every function, method and constructor, at module level or
+/// in a type's body, as an import, an annotation or a call made where the
+/// module or type is defined does. The list is every callable holding the
+/// rest, so it is not short of its own count; this says what it leaves out,
+/// which a call hierarchy that names a module as a caller lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutsideCallables {
+    /// The references the callers were read off.
+    pub references: usize,
+    /// Those of them no callable holds.
+    pub outside: usize,
+}
+
+impl OutsideCallables {
+    /// Both lists' references, for callers read off two of them.
+    pub fn and(self, other: Self) -> Self {
+        Self {
+            references: self.references + other.references,
+            outside: self.outside + other.outside,
+        }
+    }
+
+    /// The fact, where any reference named no caller.
+    pub fn hint(self) -> Option<String> {
+        (self.outside > 0).then(|| {
+            format!(
+                "{} of the {} references these callers were read off lie outside every \
+                 function, method and constructor (an import, an annotation, a call at module \
+                 level or in a type's body), so they name no caller",
+                self.outside, self.references
+            )
+        })
+    }
+}
+
 /// How much advice one answer carries. Two facts and two remedies is what an
 /// agent acts on; a reader that has to pick from six picks none.
 const ADVICE_LIMIT: usize = 2;

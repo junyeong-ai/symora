@@ -7,13 +7,13 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::LocationArg;
-use crate::cli::analysis::{callers_from_references, constructions_of};
+use crate::cli::analysis::{DerivedCallers, callers_from_references, constructions_of};
 use crate::cli::declarations_of;
 use crate::cli::python_members::{Qualifier, qualifier};
-use crate::cli::response::disclosure::{Cap, with_cap};
+use crate::cli::response::disclosure::{Cap, OutsideCallables, with_cap};
 use crate::cli::response::{CallHierarchyOutput, NOT_CALLABLE, REFERENCES_DERIVED, Section};
 use crate::error::LspError;
-use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
+use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Location, Symbol};
 
 #[derive(Args, Debug)]
@@ -65,6 +65,8 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
         None => None,
     };
 
+    // The references callers were read off that named none.
+    let mut outside = OutsideCallables::default();
     let (mut callers, indexing, mut derived) =
         match app.lsp.incoming_calls(&anchor.file, line, column).await {
             Ok(calls) => (calls.data, calls.indexing, false),
@@ -91,7 +93,10 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
                     return Ok(());
                 }
                 match fallback_from_refs(app, &anchor.file, line, column).await {
-                    Ok((calls, indexing)) => (calls, indexing, true),
+                    Ok((read, indexing)) => {
+                        outside = read.outside;
+                        (read.callers, indexing, true)
+                    }
                     Err(e) => {
                         ctx.print_error(e);
                         return Ok(());
@@ -119,7 +124,8 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
         };
         match found {
             Some(found) => {
-                for caller in found {
+                outside = outside.and(found.outside);
+                for caller in found.callers {
                     if !callers
                         .iter()
                         .any(|named| named.location == caller.location)
@@ -135,6 +141,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
         }
         hints.push(constructions.hint(&symbol.name));
     }
+    hints.extend(outside.hint());
     hints.extend(anchor.inbound_hints(ctx.root(), "callers"));
 
     let total = callers.len();
@@ -173,9 +180,9 @@ fn not_callable_hint(symbol: &Symbol, at: &str) -> String {
 /// Derive callers from plain references when the server lacks call
 /// hierarchy, as `diff-impact --callers` derives them
 /// ([`callers_from_references`]): every caller, one per callable however
-/// many of its references it holds, and the indexing state the reference
-/// query ran under, so the fallback's marker is as computation-time-accurate
-/// as the direct path's.
+/// many of its references it holds, with how many references named none,
+/// and the indexing state the reference query ran under, so the fallback's
+/// marker is as computation-time-accurate as the direct path's.
 async fn fallback_from_refs(
     app: &App,
     file: &Path,
@@ -183,7 +190,7 @@ async fn fallback_from_refs(
     column: u32,
 ) -> Result<
     (
-        Vec<CallHierarchyItem>,
+        DerivedCallers,
         Option<crate::models::lsp::IndexingDegradation>,
     ),
     LspError,

@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::cli::ParsedLocation;
+use crate::cli::response::disclosure::OutsideCallables;
 use crate::cli::utils::{
     AnchorResolution, RefsClassification, SymbolResolution, ambiguity_hint,
     column_addressed_symbol, enclosing_callable, find_named_at_position, holder_of,
@@ -778,35 +779,63 @@ pub fn callables_holding<'a, 'r>(
     references: impl IntoIterator<Item = &'r Location>,
     declarations: impl Fn(&Path) -> Option<&'a [Symbol]>,
 ) -> Option<Vec<(&'a Symbol, &'r Location)>> {
+    holding(references, declarations).map(|held| held.callables)
+}
+
+/// The callables holding references ([`callables_holding`]), and how many
+/// of the references none holds.
+struct Held<'a, 'r> {
+    callables: Vec<(&'a Symbol, &'r Location)>,
+    outside: OutsideCallables,
+}
+
+fn holding<'a, 'r>(
+    references: impl IntoIterator<Item = &'r Location>,
+    declarations: impl Fn(&Path) -> Option<&'a [Symbol]>,
+) -> Option<Held<'a, 'r>> {
     let mut seen = HashSet::new();
-    let mut holding = Vec::new();
+    let mut callables = Vec::new();
+    let mut outside = OutsideCallables::default();
     for reference in references {
         let symbols = declarations(&reference.file)?;
+        outside.references += 1;
         let Some(callable) = enclosing_callable(symbols, reference.line, Some(reference.column))
         else {
+            outside.outside += 1;
             continue;
         };
         let declared = &callable.location;
         if seen.insert((declared.file.clone(), declared.line, declared.column)) {
-            holding.push((callable, reference));
+            callables.push((callable, reference));
         }
     }
-    Some(holding)
+    Some(Held { callables, outside })
+}
+
+/// The callers read off references ([`callers_from_references`]), and the
+/// references that named none.
+pub struct DerivedCallers {
+    pub callers: Vec<CallHierarchyItem>,
+    pub outside: OutsideCallables,
 }
 
 /// The callers references name: the callables holding them
 /// ([`callables_holding`]), each at the first reference it holds as its
-/// call site. A reference inside one is a call or a use of the symbol as a
+/// call site, and how many references lie outside every callable, which
+/// name none. A reference inside one is a call or a use of the symbol as a
 /// value there, a callback it registers, which these do not tell apart:
 /// they are the callers a call hierarchy names where it counts every use
 /// inside a callable, as rust-analyzer's does, and more than one that counts
-/// calls alone, as pyright's does.
+/// calls alone, as pyright's does. One that names the module it runs in as
+/// its caller, as pyright's does for a call at module level, names a caller
+/// these do not.
 pub fn callers_from_references<'a>(
     references: &[Location],
     declarations: impl Fn(&Path) -> Option<&'a [Symbol]>,
-) -> Option<Vec<CallHierarchyItem>> {
-    Some(
-        callables_holding(references, declarations)?
+) -> Option<DerivedCallers> {
+    let Held { callables, outside } = holding(references, declarations)?;
+    Some(DerivedCallers {
+        callers: callables
             .into_iter()
             .map(|(caller, reference)| CallHierarchyItem {
                 name: caller.name.clone(),
@@ -815,7 +844,8 @@ pub fn callers_from_references<'a>(
                 call_site: Some(reference.clone()),
             })
             .collect(),
-    )
+        outside,
+    })
 }
 
 #[cfg(test)]
@@ -835,8 +865,9 @@ mod tests {
 
     /// A reference names the innermost callable whose code holds it, once,
     /// at the first reference it holds; one in a type's header or body
-    /// outside its methods, or at module level, names none; and one in a
-    /// file with no declarations to read leaves the callers unknown.
+    /// outside its methods, or at module level, names none, and is counted
+    /// as such; and one in a file with no declarations to read leaves the
+    /// callers unknown.
     #[test]
     fn references_name_the_callables_that_hold_them() {
         let file = PathBuf::from("/repo/m.py");
@@ -866,10 +897,17 @@ mod tests {
             at(14, 5),
             at(20, 1),
         ];
-        let callers = callers_from_references(&references, |path| {
+        let DerivedCallers { callers, outside } = callers_from_references(&references, |path| {
             (path == file.as_path()).then_some(symbols.as_slice())
         })
         .expect("the file's declarations were read");
+        assert_eq!(
+            outside,
+            OutsideCallables {
+                references: 7,
+                outside: 3
+            }
+        );
         let named: Vec<(&str, u32)> = callers
             .iter()
             .map(|caller| {

@@ -7,7 +7,7 @@ use futures::StreamExt;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::analysis::{Constructions, callers_from_references};
+use crate::cli::analysis::{Constructions, DerivedCallers, callers_from_references};
 use crate::cli::errors::OutputError;
 use crate::cli::python_members::{MemberGap, PythonMembers};
 use crate::cli::response::disclosure::{
@@ -980,7 +980,10 @@ async fn analyze_hunks(
         match callers_from_references(&references, |file| {
             declarations.get(file).and_then(|read| read.as_deref())
         }) {
-            Some(derived) => {
+            Some(DerivedCallers {
+                callers: derived,
+                outside,
+            }) => {
                 let mut callers = std::mem::take(&mut row.named);
                 for caller in derived {
                     if !callers
@@ -998,7 +1001,8 @@ async fn analyze_hunks(
                             .map(|caller| CallHierarchyOutput::from_item(caller, root))
                             .collect(),
                         callers.len(),
-                    ),
+                    )
+                    .with_hints(outside.hint().into_iter().collect()),
                     Cap::Config("lsp.calls_limit"),
                 ));
             }
