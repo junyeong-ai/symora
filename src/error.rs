@@ -28,6 +28,14 @@ pub enum LspError {
     #[error("The daemon this command began on was replaced before '{0}' was asked")]
     DaemonReplaced(String),
 
+    /// The daemon `'{0}'` was sent to stopped before answering it: the
+    /// request was still waiting to start when the daemon was told to stop,
+    /// or still running when its drain ran out. It is answered with this
+    /// rather than with what its stopped servers would give, and a retry is
+    /// answered by the daemon serving next.
+    #[error("The daemon stopped before '{0}' was answered")]
+    DaemonStopping(String),
+
     /// `searched` is where the command was looked for, the fact the message
     /// states; `install_hint` is the step that makes it resolve, which a
     /// caller shows apart from the message.
@@ -152,7 +160,7 @@ impl LspError {
     /// How many variants there are. It lives here, beside the variants,
     /// because the round-trip test that samples them cannot count them for
     /// itself: a list it keeps would only ever agree with itself.
-    pub const VARIANTS: usize = 19;
+    pub const VARIANTS: usize = 20;
 
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::Timeout(TimedOut {
@@ -194,6 +202,7 @@ impl LspError {
                 | Self::NotConnected
                 | Self::ConnectionLost(_)
                 | Self::DaemonReplaced(_)
+                | Self::DaemonStopping(_)
                 | Self::Timeout(_)
                 | Self::RequestCancelled
         ) || matches!(

@@ -151,31 +151,21 @@ impl Drop for Daemons {
     }
 }
 
-/// A command whose daemon is replaced between two of its requests fails
-/// rather than going on against the replacement: `refs` resolves its
-/// declaration on one daemon, the daemon restarts while that request is in
-/// flight, and the references request that follows would otherwise be
-/// answered by the new daemon's fresh server.
-#[test]
-fn a_command_spanning_a_daemon_restart_fails_rather_than_going_on() {
-    use std::time::Instant;
-
+/// A project in `home` whose Python server is the reference fixture holding
+/// its document-symbol answers (`held-symbols`), served by a started daemon
+/// of `exe`, a private copy of the binary; its path and the fixture's log, or
+/// `None` where python3, which runs the fixture, is absent.
+fn held_symbols_project(exe: &Path, home: &Path) -> Option<(PathBuf, PathBuf)> {
     if Command::new("python3")
         .arg("--version")
         .output()
         .map_or(true, |out| !out.status.success())
     {
         eprintln!("skipped: the reference fixture requires python3");
-        return;
+        return None;
     }
-    let home = tempfile::tempdir().unwrap();
-    let exe = home.path().join("symora");
-    copy_binary(&exe);
-    let _cleanup = Daemons {
-        home: home.path().to_path_buf(),
-        binaries: vec![exe.clone()],
-    };
-    let project = home.path().join("project");
+    copy_binary(exe);
+    let project = home.join("project");
     std::fs::create_dir_all(project.join(".symora")).unwrap();
     std::fs::write(
         project.join("a.py"),
@@ -193,7 +183,39 @@ fn a_command_spanning_a_daemon_restart_fails_rather_than_going_on() {
         toml::to_string(&config).unwrap(),
     )
     .unwrap();
-    json_ok(&exe, home.path(), "start");
+    json_ok(exe, home, "start");
+    Some((project, log))
+}
+
+/// Wait for the fixture to be holding a document-symbol answer.
+fn await_held(log: &Path) {
+    let held = log.with_extension("held");
+    let deadline = std::time::Instant::now() + progress::wait();
+    while !held.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the symbol request never arrived"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// A command whose daemon is replaced between two of its requests fails
+/// rather than going on against the replacement: `refs` resolves its
+/// declaration on one daemon, the daemon restarts while that request is in
+/// flight, and the references request that follows would otherwise be
+/// answered by the new daemon's fresh server.
+#[test]
+fn a_command_spanning_a_daemon_restart_fails_rather_than_going_on() {
+    let home = tempfile::tempdir().unwrap();
+    let exe = home.path().join("symora");
+    let _cleanup = Daemons {
+        home: home.path().to_path_buf(),
+        binaries: vec![exe.clone()],
+    };
+    let Some((project, log)) = held_symbols_project(&exe, home.path()) else {
+        return;
+    };
 
     let refs = project_command(
         &exe,
@@ -204,16 +226,9 @@ fn a_command_spanning_a_daemon_restart_fails_rather_than_going_on() {
     .stdout(std::process::Stdio::piped())
     .spawn()
     .unwrap();
-    let held = log.with_extension("held");
-    let deadline = Instant::now() + progress::wait();
-    while !held.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "the symbol request never arrived"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    await_held(&log);
     json_ok(&exe, home.path(), "restart");
+    std::fs::write(log.with_extension("release"), "").unwrap();
     let out = refs.wait_with_output().unwrap();
 
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -234,6 +249,44 @@ fn a_command_spanning_a_daemon_restart_fails_rather_than_going_on() {
     let value: serde_json::Value = serde_json::from_slice(&rerun.stdout).unwrap();
     assert_eq!(value["target"]["name"], "alpha", "{value}");
     assert_eq!(value["count"], 1, "{value}");
+}
+
+/// A request a daemon is working on when it is told to stop is answered
+/// before the daemon stops its servers and exits: `symbols`, whose one
+/// request it is, gets the server's answer. Held past the two seconds a
+/// server has to answer its own shutdown, it would otherwise be cancelled by
+/// that shutdown, and `symbols` answer from the grammar.
+#[test]
+fn a_request_in_flight_when_its_daemon_stops_is_answered() {
+    let home = tempfile::tempdir().unwrap();
+    let exe = home.path().join("symora");
+    let _cleanup = Daemons {
+        home: home.path().to_path_buf(),
+        binaries: vec![exe.clone()],
+    };
+    let Some((project, log)) = held_symbols_project(&exe, home.path()) else {
+        return;
+    };
+
+    let symbols = project_command(
+        &exe,
+        home.path(),
+        &["--format", "compact", "symbols", "a.py"],
+    )
+    .current_dir(&project)
+    .stdout(std::process::Stdio::piped())
+    .spawn()
+    .unwrap();
+    await_held(&log);
+    json_ok(&exe, home.path(), "stop");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    std::fs::write(log.with_extension("release"), "").unwrap();
+    let out = symbols.wait_with_output().unwrap();
+
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(out.status.success(), "{value}");
+    assert_eq!(value["backend"], "document", "{value}");
+    assert_eq!(value["count"], 2, "{value}");
 }
 
 #[test]

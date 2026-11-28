@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use tokio::net::{UnixListener, UnixStream};
+use tokio_util::task::TaskTracker;
 
 use crate::daemon::proves_no_listener;
 use crate::infra::file_lock::FileLock;
@@ -22,6 +23,18 @@ use tokio::sync::{RwLock, Semaphore, watch};
 pub use config::DaemonRuntimeConfig;
 use connection::handle_connection;
 use context::{ProjectContext, ProjectsMap};
+
+/// How long a daemon that has stopped serving waits for the requests it was
+/// working on to be answered before it stops their language servers and
+/// exits. A request's own budget, `lsp.timeout_secs`, ends most of them
+/// sooner; this bounds the rest — an index build no budget bounds, a server
+/// that answers nothing — so a stopped or replaced daemon lingers no longer.
+/// A request still running at the bound is answered `DaemonStopping`.
+const DRAIN_LIMIT: Duration = Duration::from_secs(10);
+
+/// How long the answers given at [`DRAIN_LIMIT`] have to be written. A client
+/// that stopped reading cannot hold the daemon past it.
+const REFUSAL_GRACE: Duration = Duration::from_secs(1);
 
 struct ConnectionUseState {
     connections: usize,
@@ -91,6 +104,12 @@ pub struct DaemonServer {
     /// subscribes a moment late must not be the one connection that keeps
     /// answering for projects the replacement now owns.
     shutdown: watch::Sender<bool>,
+    /// Every accepted connection's task, which stopping waits for
+    /// ([`Self::drain`]).
+    connections: TaskTracker,
+    /// Set once the drain has run to its bound: a request a connection is
+    /// still working on is then answered `DaemonStopping`.
+    abandon: watch::Sender<bool>,
 }
 
 impl DaemonServer {
@@ -107,6 +126,8 @@ impl DaemonServer {
                 last_used: Instant::now(),
             })),
             shutdown,
+            connections: TaskTracker::new(),
+            abandon: watch::channel(false).0,
         }
     }
 
@@ -191,17 +212,42 @@ impl DaemonServer {
         }
 
         // Serving ends here, so the socket is released here — before the
-        // teardown below, which checkpoints every project's store and shuts
-        // down its language servers and can take many times longer than the
-        // client's wait. A bound listener answers connections whether or not
+        // drain and teardown below, which wait for the requests in progress,
+        // checkpoint every project's store and shut down its language
+        // servers, and can take many times longer than the client's wait. A bound listener answers connections whether or not
         // anything is being served, so holding it across teardown makes a
         // daemon that has stopped look like one that never did, and a
         // successful shutdown gets reported as a timeout. Nothing here
         // unlinks the path: the next daemon settles it under the bind lock,
         // once it has confirmed nobody answers.
         drop(listener);
+        self.drain().await;
         self.cleanup().await;
         Ok(())
+    }
+
+    /// Wait for what every accepted connection owes: the answer to a request
+    /// it is working on, and to one it had queued, `DaemonStopping`. The
+    /// language servers run on meanwhile, so a request in progress is
+    /// answered as it would have been rather than cancelled by their stop,
+    /// and the process, which exits once this returns, cuts no answer off
+    /// while it is being written. At [`DRAIN_LIMIT`] what is still running is
+    /// answered `DaemonStopping` instead.
+    async fn drain(&self) {
+        self.connections.close();
+        if tokio::time::timeout(DRAIN_LIMIT, self.connections.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tracing::warn!(
+            "{} connection(s) still unanswered {:?} after shutdown; answering them as stopping",
+            self.connections.len(),
+            DRAIN_LIMIT
+        );
+        self.abandon.send_replace(true);
+        let _ = tokio::time::timeout(REFUSAL_GRACE, self.connections.wait()).await;
     }
 
     async fn setup_socket_dir(&self) -> Result<(), std::io::Error> {
@@ -222,14 +268,17 @@ impl DaemonServer {
         let config = Arc::clone(&self.config);
         let instance = self.instance.clone();
         let shutdown = self.shutdown.clone();
+        let abandon = self.abandon.subscribe();
         // Count before spawning: cleanup runs on this same task, so the exit
         // check cannot miss an accepted connection.
         let usage = ConnectionUse::acquire(&self.connection_usage);
 
-        tokio::spawn(async move {
+        self.connections.spawn(async move {
             let _usage = usage;
-            if let Err(e) =
-                handle_connection(stream, projects, semaphore, config, instance, shutdown).await
+            if let Err(e) = handle_connection(
+                stream, projects, semaphore, config, instance, shutdown, abandon,
+            )
+            .await
             {
                 tracing::warn!("Connection error: {}", e);
             }
@@ -360,6 +409,33 @@ mod tests {
             .lock()
             .expect("daemon connection usage lock poisoned")
             .last_used = Instant::now() - 2 * IDLE_LIMIT;
+    }
+
+    /// Stopping waits for every accepted connection until its bound, and
+    /// there gives up what is still running — which then answers as stopping
+    /// — rather than waiting for it any longer.
+    #[tokio::test(start_paused = true)]
+    async fn the_drain_waits_for_its_connections_until_its_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let server = idle_test_server(root.path());
+        let answering = server
+            .connections
+            .spawn(tokio::time::sleep(DRAIN_LIMIT / 2));
+        let started = tokio::time::Instant::now();
+        server.drain().await;
+        assert!(answering.is_finished());
+        assert_eq!(started.elapsed(), DRAIN_LIMIT / 2);
+        assert!(!*server.abandon.borrow(), "nothing was given up");
+
+        let server = idle_test_server(root.path());
+        let mut abandon = server.abandon.subscribe();
+        let stuck = server.connections.spawn(async move {
+            let _ = abandon.wait_for(|given_up| *given_up).await;
+        });
+        let started = tokio::time::Instant::now();
+        server.drain().await;
+        assert!(stuck.is_finished(), "the stuck connection was not given up");
+        assert_eq!(started.elapsed(), DRAIN_LIMIT);
     }
 
     #[tokio::test]

@@ -134,13 +134,13 @@ impl From<LspError> for OutputError {
             LspError::NotConnected => {
                 Self::new(ErrorCode::LspUnavailable, message).with_hint("Try: symora daemon start")
             }
-            // The answer was lost, or refused for having begun on another
-            // daemon: the command run again against the daemon that replaced
-            // that one is answered there throughout.
-            LspError::ConnectionLost(_) | LspError::DaemonReplaced(_) => {
-                Self::new(ErrorCode::LspUnavailable, message)
-                    .with_hint("The daemon was stopping or being replaced — retry.")
-            }
+            // The answer was lost, refused for having begun on another
+            // daemon, or given up by a daemon stopping: the command run again
+            // against the daemon serving next is answered there throughout.
+            LspError::ConnectionLost(_)
+            | LspError::DaemonReplaced(_)
+            | LspError::DaemonStopping(_) => Self::new(ErrorCode::LspUnavailable, message)
+                .with_hint("The daemon was stopping or being replaced — retry."),
             // A server that stopped reading stays until restarted, so retrying
             // meets it again; one that was only slow answers once warm.
             LspError::Timeout(timed_out) => {

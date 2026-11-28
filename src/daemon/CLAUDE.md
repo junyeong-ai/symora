@@ -18,6 +18,8 @@ A daemon leaves its socket and pid files behind: the next daemon settles them wh
 
 A daemon that has held no project and had no connection open for `idle_timeout` shuts down through `DaemonServer::shutdown`, and the client starts one on demand; work the daemon does outside a project or a connection does not keep it alive.
 
+A daemon told to stop takes no new work at once: it releases its socket, reads no further request on an accepted connection, and answers one still waiting for a permit `DaemonStopping`. It then drains (`DaemonServer::drain`): its language servers keep running until every request it was working on is answered, so none is cancelled by their shutdown or cut off by the process exiting mid-answer. The drain lasts at most `DRAIN_LIMIT` (10 s); a request still running then is answered `DaemonStopping`, and those answers get `REFUSAL_GRACE` (1 s) to be written. Only then does the daemon checkpoint its stores, stop its servers and exit, so a stopped or replaced daemon can outlive its socket by that bound while its successor serves. The client maps `DaemonStopping`, like a lost connection, to `lsp_unavailable` with the retry hint, and still reads an answer cut off by the stream's end as a lost connection.
+
 Project restart unloads only the addressed project's retained services and preserves its on-disk index. Active requests and outstanding server starts prevent restart or idle eviction. Release the projects-map lock before awaiting server shutdown so other projects remain serviceable.
 
 ## One command, one daemon

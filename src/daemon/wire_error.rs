@@ -26,6 +26,9 @@ pub enum WireLspError {
     DaemonReplaced {
         method: String,
     },
+    DaemonStopping {
+        method: String,
+    },
     ServerNotInstalled {
         name: String,
         searched: Vec<String>,
@@ -99,6 +102,9 @@ impl From<&LspError> for WireLspError {
                 method: method.clone(),
             },
             LspError::DaemonReplaced(method) => Self::DaemonReplaced {
+                method: method.clone(),
+            },
+            LspError::DaemonStopping(method) => Self::DaemonStopping {
                 method: method.clone(),
             },
             LspError::ServerNotInstalled {
@@ -180,6 +186,7 @@ impl From<WireLspError> for LspError {
             WireLspError::NotConnected => LspError::NotConnected,
             WireLspError::ConnectionLost { method } => LspError::ConnectionLost(method),
             WireLspError::DaemonReplaced { method } => LspError::DaemonReplaced(method),
+            WireLspError::DaemonStopping { method } => LspError::DaemonStopping(method),
             WireLspError::ServerNotInstalled {
                 name,
                 searched,
@@ -401,6 +408,7 @@ mod tests {
             || LspError::NotConnected,
             || LspError::ConnectionLost("find_references".to_string()),
             || LspError::DaemonReplaced("find_references".to_string()),
+            || LspError::DaemonStopping("find_references".to_string()),
             || LspError::ServerNotInstalled {
                 name: "rust-analyzer".to_string(),
                 searched: vec!["/usr/bin".to_string()],
@@ -456,6 +464,7 @@ mod tests {
             LspError::NotConnected => "NotConnected",
             LspError::ConnectionLost(_) => "ConnectionLost",
             LspError::DaemonReplaced(_) => "DaemonReplaced",
+            LspError::DaemonStopping(_) => "DaemonStopping",
             LspError::ServerNotInstalled { .. } => "ServerNotInstalled",
             LspError::UnsupportedLanguage(_) => "UnsupportedLanguage",
             LspError::FeatureNotSupported { .. } => "FeatureNotSupported",

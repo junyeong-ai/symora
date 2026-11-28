@@ -15,9 +15,10 @@ arguments after it leaves the call hierarchy provider out,
 `unanswered-references` leaves every references request without a reply,
 `method-not-found` answers every other request it does not serve with
 JSON-RPC MethodNotFound, as a server that lacks the feature does, and
-`held-symbols` answers a document-symbol request a second after creating the
-file named by the first argument with `.held` appended, so that a test can
-act while one is in flight.
+`held-symbols` creates the file named by the first argument with `.held`
+appended on a document-symbol request and answers it once the test creates
+the one with `.release` appended, or after 30 seconds, so that a test can act
+while one is in flight and choose when it is answered.
 """
 
 import json
@@ -158,7 +159,10 @@ while True:
     elif method == "textDocument/documentSymbol":
         if "held-symbols" in modes:
             log.with_name(log.name + ".held").touch()
-            time.sleep(1)
+            release = log.with_name(log.name + ".release")
+            given_up = time.monotonic() + 30
+            while not release.exists() and time.monotonic() < given_up:
+                time.sleep(0.01)
         result = document_symbols(path_of(params["textDocument"]["uri"]))
     elif method == "textDocument/references" and "unanswered-references" in modes:
         continue

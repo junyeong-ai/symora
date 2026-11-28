@@ -289,6 +289,36 @@ mod tests {
             assert_eq!(direct.message, through_store.message);
             assert_eq!(direct.hint, through_store.hint);
         }
+
+        // What a daemon sends of its own going — its refusal of a request
+        // bound to the daemon it replaced, a request it stopped before
+        // answering — crosses the wire as the same lost daemon.
+        for sent in [
+            || LspError::DaemonReplaced("index_status".to_string()),
+            || LspError::DaemonStopping("index_status".to_string()),
+        ] {
+            use crate::daemon::DaemonClient;
+            use crate::daemon::protocol::{RequestId, Response, RpcError};
+
+            let response = Response::error(RequestId::Number(1), RpcError::from(&sent()));
+            let received = store_error(
+                DaemonClient::extract_result(response)
+                    .expect_err("an error response must not read as a result"),
+            );
+            assert!(
+                matches!(received, StoreError::Unreachable(_)),
+                "{received:?}"
+            );
+            let (direct, through_store) = (OutputError::from(sent()), OutputError::from(received));
+            assert_eq!(
+                (direct.code, direct.message, direct.hint),
+                (
+                    through_store.code,
+                    through_store.message,
+                    through_store.hint
+                )
+            );
+        }
     }
 
     /// A page crosses the wire whole: the daemon emits rows, staleness, and

@@ -49,12 +49,13 @@ pub(crate) fn parse_symbol_kind(text: &str) -> Result<SymbolKind, OutputError> {
 pub(crate) fn lsp_error_at(err: LspError, file: &str) -> OutputError {
     let recoverable = err.is_recoverable();
     // A server seen to have stopped reading answers no retry and no other
-    // LSP-backed command, and a daemon replaced mid-command is served again
-    // by its successor: each mapped hint names the one way past it.
+    // LSP-backed command, and a daemon replaced or stopping mid-command is
+    // served again by its successor: each mapped hint names the one way past
+    // it.
     let settled = matches!(&err, LspError::Timeout(timed_out) if timed_out.unread.is_some())
         || matches!(
             &err,
-            LspError::ConnectionLost(_) | LspError::DaemonReplaced(_)
+            LspError::ConnectionLost(_) | LspError::DaemonReplaced(_) | LspError::DaemonStopping(_)
         );
     let mapped: OutputError = err.into();
     if settled || !matches!(mapped.code, ErrorCode::Timeout | ErrorCode::LspUnavailable) {
@@ -357,6 +358,7 @@ fn unresolved_by(error: LspError) -> Result<Unresolved, LspError> {
         | LspError::NotConnected
         | LspError::ConnectionLost(_)
         | LspError::DaemonReplaced(_)
+        | LspError::DaemonStopping(_)
         | LspError::ServerNotInstalled { .. }
         | LspError::UnsupportedLanguage(_)
         | LspError::FeatureNotSupported { .. }
@@ -692,14 +694,20 @@ mod tests {
         assert!(!hint.contains("symora symbols"));
         assert!(hint.contains("symora map file"));
 
-        // A daemon replaced under the command is answered by its successor:
-        // the cause the shared mapping names is the route.
-        let replaced = lsp_error_at(LspError::ConnectionLost("find_symbols".into()), path);
-        assert!(matches!(replaced.code, ErrorCode::LspUnavailable));
-        assert_eq!(
-            replaced.hint.as_deref(),
-            Some("The daemon was stopping or being replaced — retry.")
-        );
+        // A daemon replaced or stopping under the command is answered by its
+        // successor: the cause the shared mapping names is the route.
+        for gone in [
+            LspError::ConnectionLost("find_symbols".into()),
+            LspError::DaemonReplaced("find_symbols".into()),
+            LspError::DaemonStopping("find_symbols".into()),
+        ] {
+            let replaced = lsp_error_at(gone, path);
+            assert!(matches!(replaced.code, ErrorCode::LspUnavailable));
+            assert_eq!(
+                replaced.hint.as_deref(),
+                Some("The daemon was stopping or being replaced — retry.")
+            );
+        }
     }
 
     /// A position-anchored timeout keeps the restart a server that stopped
