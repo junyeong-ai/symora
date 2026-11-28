@@ -1044,7 +1044,14 @@ impl LspClient {
                                     .get_or_insert_with(|| product.to_string());
                             }
                             let msg_type = params.get("type").and_then(|t| t.as_u64());
-                            match Self::classify_log_level(self.language, msg, msg_type) {
+                            // A server told to stop logs its own teardown,
+                            // which no answer depends on; how it ended is
+                            // its exit status.
+                            let level = match *self.shutdown.read().await {
+                                true => LogLevel::Debug,
+                                false => Self::classify_log_level(self.language, msg, msg_type),
+                            };
+                            match level {
                                 LogLevel::Error => {
                                     tracing::error!("LSP {}: {}", self.language, msg)
                                 }

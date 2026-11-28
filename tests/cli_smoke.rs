@@ -3851,6 +3851,48 @@ fn a_request_the_server_does_not_implement_names_an_alternative() {
     }
 }
 
+/// What a server logs once told to stop is its own teardown, which no answer
+/// depends on: an error it logs then stays off stderr, where it would read as
+/// the command's own failure, and shows under `-v`.
+#[cfg(unix)]
+#[test]
+fn an_error_a_server_logs_while_stopping_shows_only_under_verbose() {
+    let source = "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n";
+    let Some(dir) = reference_served_repo(&[("a.py", source, source)]) else {
+        return;
+    };
+    let repo = dir.path();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/reference_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"python": {
+        "command": "python3",
+        "args": [server, repo.join(".symora/log"), "error-on-shutdown"],
+    }}}});
+    std::fs::write(
+        repo.join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    let stderr_of = |flags: &[&str]| {
+        let out = symora()
+            .env_remove("RUST_LOG")
+            .args(flags)
+            .args(["refs", "a.py:1:5"])
+            .current_dir(repo)
+            .output()
+            .expect("symora binary should exist");
+        let json = common::parse_response(&out.stdout).expect("JSON on stdout");
+        assert!(out.status.success(), "{json}");
+        assert_eq!(json["count"], 1, "{json}");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let quiet = stderr_of(&[]);
+    assert!(!quiet.contains("teardown failed"), "{quiet}");
+    let verbose = stderr_of(&["-v"]);
+    assert!(verbose.contains("teardown failed"), "{verbose}");
+}
+
 /// Python runs `__init__` where its class is called, and its server reports
 /// those calls as references to the class alone, as this fake does: the
 /// constructor's own references and incoming calls are none. Its callers are

@@ -20,7 +20,8 @@ appended on a document-symbol request and answers it once the test creates
 the one with `.release` appended, or after 30 seconds, so that a test can act
 while one is in flight and choose when it is answered. `pyright` names the
 server as pyright does, in a log line sent before it answers initialize, and,
-like pyright, reports no workspace status.
+like pyright, reports no workspace status. `error-on-shutdown` logs an error
+before it answers shutdown, as a server whose teardown fails does.
 """
 
 import json
@@ -194,6 +195,9 @@ while True:
                 calls.setdefault(key, {"from": item(path, caller), "fromRanges": []})
                 calls[key]["fromRanges"].append(span(line, start, end))
         result = list(calls.values())
+    elif method == "shutdown" and "error-on-shutdown" in modes:
+        send({"jsonrpc": "2.0", "method": "window/logMessage",
+              "params": {"type": 1, "message": "teardown failed"}})
     elif method == "exit":
         sys.exit()
     elif "id" not in message or method is None:
