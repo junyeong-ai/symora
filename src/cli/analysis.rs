@@ -324,22 +324,27 @@ fn runs_through_its_type(language: Language, name: &str) -> bool {
 /// The constructions that run `member`, declared in `file`, where its
 /// language runs it by calling its type ([`runs_through_its_type`]): that
 /// type's references the syntax tree reads as the callee of a call. `None`
-/// for any other member, and where no type the server's tree lists holds it.
+/// for any other member, and where no type the server's tree lists holds it;
+/// the error where that tree could not be read, which leaves unknown whether
+/// one does. The type's references failing is disclosed by the constructions
+/// themselves ([`Constructions::sites`]).
 pub async fn constructions_of(
     lsp: &dyn LspService,
     file: &Path,
     member: &Symbol,
     root: &Path,
-) -> Option<Constructions> {
+) -> Result<Option<Constructions>, LspError> {
     if !runs_through_its_type(Language::from_path(file), &member.name) {
-        return None;
+        return Ok(None);
     }
     let symbols = lsp
         .find_symbols(file, FindSymbolsOptions::default().with_depth(10))
-        .await
-        .ok()?;
-    let declaring = declaring_type_of(&symbols, member.location.line, member.location.column)
-        .filter(|holder| holder.kind == SymbolKind::Class)?;
+        .await?;
+    let Some(declaring) = declaring_type_of(&symbols, member.location.line, member.location.column)
+        .filter(|holder| holder.kind == SymbolKind::Class)
+    else {
+        return Ok(None);
+    };
     let sites = match lsp
         .find_references(file, declaring.location.line, declaring.location.column)
         .await
@@ -351,15 +356,17 @@ pub async fn constructions_of(
                 column: declaring.location.column,
                 column_explicit: true,
             };
-            let declared = declared_at(lsp, name, Some(declaring.kind)).await;
-            called_among(usages_of(references.data, root, &declared))
+            declared_at(lsp, name, Some(declaring.kind))
+                .await
+                .ok()
+                .and_then(|declared| called_among(usages_of(references.data, root, &declared)))
         }
         Err(_) => None,
     };
-    Some(Constructions {
+    Ok(Some(Constructions {
         type_name: declaring.name,
         sites,
-    })
+    }))
 }
 
 /// The references the syntax tree of their files reads as the name a call
@@ -503,8 +510,12 @@ pub async fn member_reach_hint_of(
     symbol: &Symbol,
     root: &Path,
 ) -> Option<String> {
-    if let Some(constructions) = constructions_of(lsp, file, symbol, root).await {
-        return Some(constructions.hint(&symbol.name));
+    match constructions_of(lsp, file, symbol, root).await {
+        Ok(Some(constructions)) => return Some(constructions.hint(&symbol.name)),
+        Ok(None) => {}
+        // Whether the member runs through its type is unknown, so no reach
+        // of a type's is offered in its place.
+        Err(_) => return None,
     }
     let declaring = declaring_type_reach(
         lsp,
@@ -563,7 +574,7 @@ async fn declaring_type_reach(
         column: declaring.location.column,
         column_explicit: true,
     };
-    let declared = declared_at(lsp, name, Some(declaring.kind)).await;
+    let declared = declared_at(lsp, name, Some(declaring.kind)).await.ok()?;
     Some(DeclaringType {
         name: declaring.name,
         references: usages_of(references.data, root, &declared).len(),
@@ -573,18 +584,19 @@ async fn declaring_type_reach(
 /// Where what a reference query at a declaration's name answers for is
 /// declared, so its references can leave the declaration out: at that name,
 /// except for an impl, whose name is the type it implements, declared
-/// elsewhere.
+/// elsewhere. A definition that could not be read is the error, since the
+/// references would otherwise count that type's declaration as a usage.
 async fn declared_at(
     lsp: &dyn LspService,
     name: ParsedLocation,
     kind: Option<SymbolKind>,
-) -> Vec<ParsedLocation> {
+) -> Result<Vec<ParsedLocation>, LspError> {
     let mut declared = Vec::new();
     if kind == Some(SymbolKind::Impl)
-        && let Ok(found) = lsp
+        && let Some(definition) = lsp
             .goto_definition(&name.file, name.line, name.column)
-            .await
-        && let Some(definition) = found.data
+            .await?
+            .data
         && !definition.is_self
     {
         declared.push(ParsedLocation {
@@ -595,7 +607,7 @@ async fn declared_at(
         });
     }
     declared.push(name);
-    declared
+    Ok(declared)
 }
 
 impl LocationAnalysis {
@@ -604,7 +616,9 @@ impl LocationAnalysis {
     /// usage-site input does not silently answer a different question.
     ///
     /// Hard-fails on `find_references` because every caller needs the refs
-    /// list.
+    /// list, and on the reads that set needs to be the declaration's usages:
+    /// the impl's own type ([`declared_at`]) and the constructions a member
+    /// runs through ([`constructions_of`]).
     pub async fn for_anchor(
         lsp: &dyn LspService,
         anchor: Anchor,
@@ -617,7 +631,7 @@ impl LocationAnalysis {
         let declared = match anchor.is_declaration() {
             true => {
                 let kind = anchor.symbol.as_ref().map(|symbol| symbol.kind);
-                declared_at(lsp, anchor.location(), kind).await
+                declared_at(lsp, anchor.location(), kind).await?
             }
             false => Vec::new(),
         };
@@ -633,7 +647,7 @@ impl LocationAnalysis {
         };
         let usages = usages_of(references.data, root, &declared);
         let constructions = match &anchor.symbol {
-            Some(symbol) => constructions_of(lsp, &anchor.file, symbol, root).await,
+            Some(symbol) => constructions_of(lsp, &anchor.file, symbol, root).await?,
             None => None,
         };
         let declaring_type = match usages.is_empty() && constructions.is_none() {
@@ -672,10 +686,10 @@ impl LocationAnalysis {
         let references = lsp
             .find_references(&anchor.file, anchor.line, anchor.column)
             .await?;
-        let declared = declared_at(lsp, input, Some(kind)).await;
+        let declared = declared_at(lsp, input, Some(kind)).await?;
         let usages = usages_of(references.data, root, &declared);
         let constructions = match &anchor.symbol {
-            Some(symbol) => constructions_of(lsp, file, symbol, root).await,
+            Some(symbol) => constructions_of(lsp, file, symbol, root).await?,
             None => None,
         };
         Ok(Self {
@@ -942,6 +956,8 @@ mod tests {
         references: HashMap<(PathBuf, u32, u32), Vec<Location>>,
         /// The indexing state the definitions are answered under.
         indexing: Option<IndexingDegradation>,
+        /// What every definition is answered with instead, where set.
+        definition_failure: Option<fn() -> LspError>,
     }
 
     fn func(file: &str, name: &str, line: u32, name_col: u32, end_line: u32) -> Symbol {
@@ -996,6 +1012,9 @@ mod tests {
             line: u32,
             column: u32,
         ) -> Result<Indexed<Option<Definition>>, LspError> {
+            if let Some(failure) = self.definition_failure {
+                return Err(failure());
+            }
             Ok(Indexed::new(
                 self.definitions
                     .get(&(file.to_path_buf(), line, column))
@@ -1210,6 +1229,7 @@ mod tests {
             definitions,
             references: HashMap::new(),
             indexing: None,
+            definition_failure: None,
         }
     }
 
@@ -1525,6 +1545,7 @@ mod tests {
                 vec![declared, Location::point(lib.clone(), 3, 6)],
             )]),
             indexing: None,
+            definition_failure: None,
         };
 
         let analysis = LocationAnalysis::for_symbol(&stub, &lib, block, Path::new(""))
@@ -1536,6 +1557,65 @@ mod tests {
                 .await
                 .as_deref(),
             Some("No reference to `render` was found, nor to `Widget`, which declares it")
+        );
+    }
+
+    /// A read the reference set needs to be the declaration's usages failing
+    /// fails the analysis: without the definition of the type an impl
+    /// implements, that type's declaration would count as a usage, and
+    /// without the tree of a constructor's file, the calls of its class that
+    /// run it would be left out unsaid.
+    #[tokio::test]
+    async fn a_failed_read_the_usages_need_fails_the_analysis() {
+        let lib = PathBuf::from("lib.rs");
+        let block = Symbol::new(
+            "Widget".to_string(),
+            SymbolKind::Impl,
+            Location::full(lib.clone(), 3, 6, 3, 1, 7, 2),
+        );
+        let stub = AnchorStub {
+            symbols_by_file: HashMap::from([(lib.clone(), vec![block.clone()])]),
+            definitions: HashMap::new(),
+            references: HashMap::from([(
+                (lib.clone(), 3, 6),
+                vec![
+                    Location::point(lib.clone(), 1, 12),
+                    Location::point(lib.clone(), 3, 6),
+                ],
+            )]),
+            indexing: None,
+            definition_failure: Some(|| LspError::timeout("spent")),
+        };
+        let measured =
+            LocationAnalysis::for_symbol(&stub, &lib, block.clone(), Path::new("")).await;
+        assert!(
+            matches!(measured, Err(LspError::Timeout(_))),
+            "{:?}",
+            measured.map(|analysis| analysis.references)
+        );
+        let anchor = Anchor::declared(&at("lib.rs", 3, 6), &lib, block, None);
+        let analysed = LocationAnalysis::for_anchor(&stub, anchor, Path::new("")).await;
+        assert!(
+            matches!(analysed, Err(LspError::Timeout(_))),
+            "{:?}",
+            analysed.map(|analysis| analysis.references)
+        );
+
+        let module = PathBuf::from("m.py");
+        let init = func("m.py", "__init__", 2, 9, 3);
+        let stub = AnchorStub {
+            symbols_by_file: HashMap::new(),
+            definitions: HashMap::new(),
+            references: HashMap::from([((module.clone(), 2, 9), Vec::new())]),
+            indexing: None,
+            definition_failure: None,
+        };
+        let anchor = Anchor::declared(&at("m.py", 2, 9), &module, init, None);
+        let analysed = LocationAnalysis::for_anchor(&stub, anchor, Path::new("")).await;
+        assert!(
+            analysed.is_err(),
+            "{:?}",
+            analysed.map(|analysis| analysis.references)
         );
     }
 
@@ -1561,6 +1641,7 @@ mod tests {
             definitions: HashMap::new(),
             references: HashMap::from([((file.clone(), 1, 10), references)]),
             indexing: None,
+            definition_failure: None,
         };
         let anchor = || Anchor::binding(&at(path, 2, 7), &definition);
 

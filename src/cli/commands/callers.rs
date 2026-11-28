@@ -69,7 +69,14 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
     let (line, column) = (anchor.line, anchor.column);
     let constructions = match &anchor.symbol {
         Some(symbol) => constructions_of(app.lsp.as_ref(), &anchor.file, symbol, ctx.root()).await,
-        None => None,
+        None => Ok(None),
+    };
+    let constructions = match constructions {
+        Ok(constructions) => constructions,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
     };
 
     // The references callers were read off that named none.
