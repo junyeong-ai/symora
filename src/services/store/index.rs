@@ -2100,6 +2100,11 @@ mod tests {
         std::fs::write(root.join("lib.rs"), "fn snapshot_probe() {}\n").unwrap();
         let store = Store::open(root, StoreConfig::default()).await.unwrap();
         store.index(IndexOptions::default()).await.unwrap();
+        // The build's upkeep truncates the log, holding the writer's lock
+        // while it waits out readers, so the interloper below, which writes
+        // while the check's read stands still, would wait on it as it waits
+        // on that read. Work queued on the writer now runs after the upkeep.
+        store.db.call(|_conn| Ok(())).await.unwrap();
         assert_eq!(store.tree_currency().await.unwrap(), TreeCurrency::Current);
 
         let moved = serde_json::to_string(&HashMap::from([(Language::Rust, "moved")])).unwrap();
