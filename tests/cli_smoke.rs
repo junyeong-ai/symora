@@ -3271,7 +3271,7 @@ fn a_path_confines_the_changes_not_where_their_references_are_found() {
 
 /// A row whose references the budget ran out before is marked `timed_out`,
 /// and the hint gives both ways to take it: a larger budget, or less of the
-/// diff at a time.
+/// diff at a time, which the rows name as one run over their files.
 #[cfg(unix)]
 #[test]
 fn a_diff_the_budget_cut_short_names_the_budget_and_the_path() {
@@ -3306,6 +3306,11 @@ fn a_diff_the_budget_cut_short_names_the_budget_and_the_path() {
                 .as_str()
                 .is_some_and(|h| h.contains("lsp.timeout_secs = 2") && h.contains("--path")))),
         "{page}"
+    );
+    assert_eq!(
+        page["changes"]["next_commands"],
+        serde_json::json!(["symora diff-impact --path='a.py' -- 'HEAD'"]),
+        "the run that takes the row: {page}"
     );
 }
 

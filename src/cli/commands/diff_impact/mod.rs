@@ -442,6 +442,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         .count();
     let without_tests = measurable.saturating_sub(with_tests);
     let relist = callers_relist(&changes, args.call_hierarchy);
+    let rerun = budget_rerun(&changes, &args);
 
     let output = DiffImpactOutput {
         revision: args.revision,
@@ -455,7 +456,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
             without_tests,
             ratio: share(with_tests, measurable),
         },
-        changes: Section::new(changes),
+        changes: Section::new(changes).with_next_commands(rerun.into_iter().collect()),
         unmeasured_files: unmeasured
             .iter()
             .map(|file| relative_display(file, root))
@@ -465,6 +466,52 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     };
     ctx.print_narrowable(output, "narrow the diff with --path", relist.as_deref());
     Ok(())
+}
+
+/// The run that takes the rows the budget left: this analysis again,
+/// confined to the files those rows lie in, so a whole budget is spent on
+/// them alone.
+fn budget_rerun(changes: &[ChangedSymbolImpact], args: &DiffImpactArgs) -> Option<String> {
+    let timed_out = Some(CoverageReason::TimedOut.as_str());
+    let mut files: Vec<&str> = Vec::new();
+    for row in changes
+        .iter()
+        .filter(|row| row.refs_status == timed_out || row.callers_status == timed_out)
+    {
+        if !files.contains(&row.location.file.as_str()) {
+            files.push(&row.location.file);
+        }
+    }
+    if files.is_empty() {
+        return None;
+    }
+    let mode = match (args.call_hierarchy, args.callers) {
+        (true, _) => " --call-hierarchy",
+        (false, true) => " --callers",
+        (false, false) => "",
+    };
+    let staged = if args.staged { " --staged" } else { "" };
+    let max_symbols = match args.max_symbols {
+        crate::constants::defaults::DIFF_IMPACT_MAX_SYMBOLS => String::new(),
+        max => format!(" --max-symbols={max}"),
+    };
+    let paths: String = files
+        .iter()
+        .map(|file| format!(" --path={}", shell_arg(&literal_pathspec(file))))
+        .collect();
+    Some(format!(
+        "symora diff-impact{staged}{mode}{max_symbols}{paths} -- {}",
+        shell_arg(&args.revision)
+    ))
+}
+
+/// A path as a git pathspec that matches it alone: as written, unless it
+/// holds what git reads as a wildcard or magic, which `:(literal)` turns off.
+fn literal_pathspec(path: &str) -> String {
+    match path.starts_with(':') || path.contains(['*', '?', '[', '\\']) {
+        true => format!(":(literal){path}"),
+        false => path.to_string(),
+    }
 }
 
 /// How a reader lists a row's callers whole where the size target cut them:
@@ -1914,5 +1961,56 @@ mod tests {
             callers_relist(&[row(None), row(Some(Section::new(Vec::new())))], false),
             None
         );
+    }
+
+    /// Rows the budget left name one run over the files they lie in, each
+    /// once and matched as written, in the mode the diff was asked in.
+    #[test]
+    fn the_rows_the_budget_left_name_one_run_over_their_files() {
+        let row = |file: &str, refs_status: Option<&'static str>| ChangedSymbolImpact {
+            location: LocationOutput {
+                file: file.to_string(),
+                ..loc()
+            },
+            refs_status,
+            ..ChangedSymbolImpact {
+                name: Some("compute".to_string()),
+                kind: Some("function".to_string()),
+                location: loc(),
+                change_type: ChangeType::Modified,
+                refs: None,
+                test_refs: None,
+                prod_refs: None,
+                refs_status: None,
+                callers: None,
+                callers_status: None,
+                deletion: None,
+            }
+        };
+        let timed_out = Some(CoverageReason::TimedOut.as_str());
+        let rows = [
+            row("src/a.py", timed_out),
+            row("src/b.py", None),
+            row("src/a.py", timed_out),
+            row("src/[x].py", timed_out),
+        ];
+        let args = DiffImpactArgs {
+            revision: "main~2".to_string(),
+            staged: true,
+            path: None,
+            callers: true,
+            call_hierarchy: false,
+            max_symbols: crate::constants::defaults::DIFF_IMPACT_MAX_SYMBOLS,
+        };
+
+        let rerun = budget_rerun(&rows, &args).expect("rows timed out");
+
+        assert_eq!(
+            rerun,
+            "symora diff-impact --staged --callers --path='src/a.py' \
+             --path=':(literal)src/[x].py' -- 'main~2'"
+        );
+        crate::cli::assert_named_commands_parse(&rerun);
+        assert_eq!(budget_rerun(&rows[1..2], &args), None);
     }
 }
