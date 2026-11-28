@@ -635,6 +635,110 @@ fn a_budget_spent_on_a_build_answers_alike_and_the_explicit_build_finishes_it() 
     daemon.assert_serving();
 }
 
+/// A build another process runs owns the index until it publishes, and both
+/// modes read that from the store without waiting on the build's write:
+/// status answers at once that a build is running, beside the counts it has
+/// committed, and a search waits for the build within its budget, then gives
+/// the answer a budget spent on a build gives. The build is stood in for by
+/// what one holds in its publication: the index lock, the completion marker
+/// it took away, and a last transaction it has not committed — which keeps a
+/// store that writes on opening waiting past SQLite's busy timeout.
+#[test]
+#[cfg(unix)]
+fn a_build_in_its_publication_is_read_alike_in_process_and_through_a_daemon() {
+    let installing = std::thread::spawn(|| IsolatedDaemon::for_test("a_build_in_its_publication"));
+    let repository = tempfile::tempdir().unwrap();
+    let root = repository.path();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(root)
+        .status()
+        .unwrap();
+    assert!(init.success());
+    std::fs::create_dir(root.join(".symora")).unwrap();
+    std::fs::write(root.join("lib.rs"), "pub fn helper_alpha() {}\n").unwrap();
+    std::fs::write(
+        root.join(".symora/config.toml"),
+        "[lsp]\ntimeout_secs = 1\n\n[lsp.servers.rust]\ncommand = \
+         \"/nonexistent/rust-analyzer-missing\"\n",
+    )
+    .unwrap();
+    let direct = |args: &[&str]| {
+        let output = symora()
+            .args(args)
+            .args(["--format", "compact"])
+            .current_dir(root)
+            .env("SYMORA_NO_DAEMON", "1")
+            .stderr(Stdio::null())
+            .output()
+            .unwrap();
+        vec![common::parse_response(&output.stdout).unwrap()]
+    };
+    assert_eq!(
+        direct(&["search", "index", "build"])[0]["status"],
+        "completed"
+    );
+    let daemon = installing.join().unwrap();
+    daemon.start();
+
+    let _held = symora::infra::file_lock::FileLock::exclusive(&root.join(".symora/index.lock"))
+        .unwrap()
+        .expect("nothing else holds the index");
+    let publishing = rusqlite::Connection::open(root.join(".symora/store.db")).unwrap();
+    publishing
+        .execute(
+            "DELETE FROM meta WHERE key IN ('build_scope', 'build_completed_at')",
+            [],
+        )
+        .unwrap();
+    publishing
+        .execute_batch(
+            "BEGIN IMMEDIATE; INSERT INTO meta (key, value) VALUES ('build_scope', 'all');",
+        )
+        .unwrap();
+
+    let both = |args: &'static [&'static str]| {
+        std::thread::scope(|scope| {
+            let in_process = scope.spawn(|| direct(args));
+            let through_daemon = run_daemon_cli(&daemon, root, args);
+            (in_process.join().unwrap(), through_daemon)
+        })
+    };
+    let started = Instant::now();
+    let (status, daemon_status) = both(&["search", "index", "status"]);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "status waited on the build's write"
+    );
+    assert_eq!(status, daemon_status, "daemon and direct diverged");
+    let status = &status[0];
+    assert_eq!(status["is_indexing"], true, "{status}");
+    assert_eq!(status["languages"], json!([]), "{status}");
+    assert_eq!(status["last_indexed"], 0, "{status}");
+    assert_eq!(status["file_count"], 1, "{status}");
+
+    let (search, daemon_search) = both(&["search", "symbols", "helper_alpha"]);
+    assert_eq!(search, daemon_search, "daemon and direct diverged");
+    let search = &search[0];
+    assert!(
+        search["hints"][0]
+            .as_str()
+            .is_some_and(|hint| hint.contains("within this search's 1s budget")),
+        "{search}"
+    );
+    assert_eq!(
+        search["next_commands"],
+        json!(["symora search index build"]),
+        "{search}"
+    );
+    assert_eq!(
+        search["coverage_gaps"],
+        json!([{"language": "rust", "reason": "not_consulted"}]),
+        "{search}"
+    );
+    publishing.execute_batch("ROLLBACK").unwrap();
+}
+
 /// A query reads, and writes nothing into the tree it reads. Outside a work
 /// tree no search starts a build either, so every read command — searches of
 /// each kind, navigation, analysis, previews, status — leaves a plain

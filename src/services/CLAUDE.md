@@ -6,7 +6,7 @@ These services back the CLI and MCP surfaces. They abstract over LSP transports,
 
 The SQLite index at `.symora/store.db` is product reliability, not a cache. Rules:
 
-- `INIT_SCHEMA` is the authoritative shape. Bump `SCHEMA_VERSION` (and `PRAGMA user_version` in the SQL) whenever the on-disk shape changes.
+- `INIT_SCHEMA` is the authoritative shape, run on every open. Each of its statements leaves what it finds in place, so opening a store that holds the shape writes nothing and waits on no other process's write — a build's publication holds one open for longer than a command is given. What SQLite writes every time it runs (`NEW_FILE_PRAGMAS`, and `SCHEMA_STAMP`, written once the shape is complete) goes only to a file not yet stamped. Bump `SCHEMA_VERSION` (and the `user_version` in `SCHEMA_STAMP`) whenever the on-disk shape changes.
 - Schema mismatch triggers `recover_db` (rename to `.bak`, recreate). No hand-rolled `ALTER TABLE` migrations — they hide real failures behind expected duplicate-column errors.
 - Never clear the index during normal daemon idle or shutdown. The index is what makes warm starts fast.
 

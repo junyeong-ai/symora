@@ -514,23 +514,40 @@ impl Store {
         }
     }
 
+    /// A connection set up as every connection to the store is.
+    async fn connect(db: SqliteDb) -> Result<SqliteDb, StoreError> {
+        db.execute(CONNECTION_PRAGMAS).await?;
+        Ok(db)
+    }
+
+    /// Open the writer's connection, giving the file whatever of the store's
+    /// shape it lacks. Opening a store that already holds the shape writes
+    /// nothing, so it never waits on a write another process holds open — a
+    /// build's publication can hold one for longer than a whole command is
+    /// given — and a read in any process reads the store as it is.
     async fn try_open_db(db_path: &Path) -> Result<SqliteDb, StoreError> {
-        let db = SqliteDb::open(db_path).await?;
+        let db = Self::connect(SqliteDb::open(db_path).await?).await?;
 
         let version: i32 = db
             .call(|conn| conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0)))
             .await?;
 
-        if version != 0 && version != SCHEMA_VERSION {
-            return Err(StoreError::SchemaMismatch {
-                found: version,
-                expected: SCHEMA_VERSION,
-            });
-        }
-
-        db.execute(INIT_SCHEMA).await?;
+        let new_file = match version {
+            0 => true,
+            SCHEMA_VERSION => false,
+            found => {
+                return Err(StoreError::SchemaMismatch {
+                    found,
+                    expected: SCHEMA_VERSION,
+                });
+            }
+        };
+        Self::shape(&db, new_file).await?;
         db.call(|conn| {
-            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            // Deferred, so the triggers a completed build holds are found in
+            // place without taking the write lock; only a build that lacks
+            // them writes.
+            let tx = conn.transaction()?;
             if read_completed_build(&tx)?.is_some() {
                 tx.execute_batch(TEXT_INDEX_TRIGGERS)?;
             }
@@ -539,6 +556,20 @@ impl Store {
         })
         .await?;
         Ok(db)
+    }
+
+    /// Give the file the store's shape: [`INIT_SCHEMA`] on every open, and
+    /// what SQLite writes each time it runs only to a file not yet stamped
+    /// with [`SCHEMA_VERSION`].
+    async fn shape(db: &SqliteDb, new_file: bool) -> Result<(), StoreError> {
+        if new_file {
+            db.execute(NEW_FILE_PRAGMAS).await?;
+        }
+        db.execute(INIT_SCHEMA).await?;
+        if new_file {
+            db.execute(SCHEMA_STAMP).await?;
+        }
+        Ok(())
     }
 
     /// Swap in a fresh database for one this binary cannot use. Holding
@@ -590,8 +621,8 @@ impl Store {
         if db_path.exists() {
             move_database_aside(db_path, &db_path.with_extension("db.bak")).await;
         }
-        let db = SqliteDb::open(db_path).await?;
-        db.execute(INIT_SCHEMA).await?;
+        let db = Self::connect(SqliteDb::open(db_path).await?).await?;
+        Self::shape(&db, true).await?;
         Ok(db)
     }
 
@@ -2984,6 +3015,63 @@ mod tests {
             !owned_after_publishing,
             "a published build still read as one in progress"
         );
+    }
+
+    /// Opening a store writes nothing it already holds, so a write another
+    /// process holds open — here a build in its publication: the index lock
+    /// held, the marker it took away committed, the rest of its last
+    /// transaction not — keeps no reader waiting. The read answers what is
+    /// committed and that a build owns the index; a search is told the index
+    /// is being rebuilt, which it waits on, rather than that the store is
+    /// busy, which it cannot.
+    #[tokio::test]
+    async fn another_processs_publication_keeps_no_reader_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn publication_probe() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        drop(store);
+
+        let _held = FileLock::exclusive(&Store::lock_path(root))
+            .unwrap()
+            .expect("nothing else holds the index");
+        let other = rusqlite::Connection::open(Store::db_path(root)).unwrap();
+        other
+            .execute(
+                "DELETE FROM meta WHERE key IN (?1, ?2)",
+                rusqlite::params![META_BUILD_SCOPE, META_BUILD_COMPLETED_AT],
+            )
+            .unwrap();
+        other
+            .execute_batch(
+                "BEGIN IMMEDIATE; \
+                 INSERT INTO meta (key, value) VALUES ('build_scope', 'all');",
+            )
+            .unwrap();
+
+        let wait = std::time::Duration::from_secs(2);
+        let store = tokio::time::timeout(wait, Store::open(root, StoreConfig::default()))
+            .await
+            .expect("opening the store waited for another process's write")
+            .unwrap();
+        let stats = tokio::time::timeout(wait, store.stats())
+            .await
+            .expect("status waited for another process's write")
+            .unwrap();
+        assert!(stats.is_indexing, "{stats:?}");
+        assert!(stats.languages.is_empty(), "{stats:?}");
+        assert_eq!(stats.last_indexed, 0);
+        assert_eq!(stats.file_count, 1);
+        assert!(matches!(
+            store
+                .search_symbols("publication_probe", 10, None, None, &[])
+                .await,
+            Err(StoreError::Rebuilding)
+        ));
+        other.execute_batch("ROLLBACK").unwrap();
     }
 
     /// A build only marks the index whole while it still owns the epoch it

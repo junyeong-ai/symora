@@ -1,6 +1,21 @@
 pub const SCHEMA_VERSION: i32 = 7;
 
-pub const INIT_SCHEMA: &str = r#"
+/// What each connection holds for itself, a reader's as much as the writer's.
+/// None of it writes the file, so setting it up never waits on another
+/// connection's write.
+pub const CONNECTION_PRAGMAS: &str = r#"
+PRAGMA synchronous = NORMAL;
+PRAGMA foreign_keys = ON;
+PRAGMA cache_size = -16384;
+PRAGMA temp_store = MEMORY;
+PRAGMA mmap_size = 134217728;
+"#;
+
+/// What a file is given before [`INIT_SCHEMA`] only while it does not yet
+/// carry [`SCHEMA_VERSION`]. SQLite writes the database header each time this
+/// runs — a write transaction, which waits behind any other connection's —
+/// and a file that already holds the shape has nothing to gain from it.
+pub const NEW_FILE_PRAGMAS: &str = r#"
 -- Incremental auto-vacuum, set before the file is a WAL database and before
 -- it holds a table, which are the only moments SQLite lets it be chosen. It
 -- is what allows a rebuild to hand the pages it freed back to the filesystem
@@ -9,13 +24,17 @@ pub const INIT_SCHEMA: &str = r#"
 -- Incremental rather than FULL so the relocation is one step after a build
 -- rather than work charged to every commit during one.
 PRAGMA auto_vacuum = INCREMENTAL;
+"#;
+
+/// Stamped on a new file once [`INIT_SCHEMA`] has given it the shape, so a
+/// run cut off before then leaves a file the next open still treats as new.
+pub const SCHEMA_STAMP: &str = "PRAGMA user_version = 7;";
+
+/// The store's shape, run on every open. Each statement leaves in place what
+/// it finds there, so on a file that holds the shape it writes nothing and
+/// waits on no other connection's write.
+pub const INIT_SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA foreign_keys = ON;
-PRAGMA cache_size = -16384;
-PRAGMA temp_store = MEMORY;
-PRAGMA mmap_size = 134217728;
-PRAGMA user_version = 7;
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
