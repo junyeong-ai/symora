@@ -189,8 +189,7 @@ async fn goto_locations(
                 // Each target is decoded from the wire encoding here, where the
                 // client (and so the encoding) is in scope.
                 let mut conv = PositionConverter::new(client.position_encoding().await);
-                let named = parse_location_response(&result)
-                    .unwrap_or_default()
+                let named = parse_location_response(result)?
                     .into_iter()
                     .map(|loc| {
                         let decoded = convert_location(&loc, &mut conv);
@@ -257,7 +256,7 @@ pub(super) async fn find_implementations(
                         )
                     })?;
 
-                let locs = parse_location_response(&result).unwrap_or_default();
+                let locs = parse_location_response(result)?;
                 // Post-flight null-gap: an empty implementation result from a
                 // server that doesn't advertise the provider is unsupported, not
                 // "no implementations".

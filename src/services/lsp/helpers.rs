@@ -305,39 +305,30 @@ pub(super) fn find_first_file(root: &Path, language: Language) -> Option<PathBuf
     files.into_iter().next()
 }
 
-pub(super) fn parse_location_response(result: &serde_json::Value) -> Option<Vec<LspLocation>> {
+/// A definition-shaped answer — `Location`, `Location[]`, `LocationLink[]`
+/// or `null` — read as the locations it names, none for `null`. An answer of
+/// no such shape is the server's protocol failure, as an undecodable answer
+/// to any other request is, never an answer that names nothing.
+pub(super) fn parse_location_response(
+    result: serde_json::Value,
+) -> Result<Vec<LspLocation>, LspError> {
     use crate::infra::lsp::protocol::LocationLink;
+    use serde_json::{Value, from_value};
 
-    if result.is_null() {
-        return None;
-    }
-
-    if let Some(arr) = result.as_array() {
-        if arr.is_empty() {
-            return None;
+    let link = |value: &Value| value.get("targetUri").is_some();
+    let read = match &result {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(items) if items.first().is_some_and(link) => {
+            from_value::<Vec<LocationLink>>(result)
+                .map(|links| links.iter().map(LocationLink::to_location).collect())
         }
-        // Check first element to determine format
-        if arr[0].get("targetUri").is_some() {
-            // LocationLink[] format (rust-analyzer, clangd)
-            if let Ok(links) = serde_json::from_value::<Vec<LocationLink>>(result.clone()) {
-                return Some(links.into_iter().map(|l| l.to_location()).collect());
-            }
+        Value::Array(_) => from_value::<Vec<LspLocation>>(result),
+        single if link(single) => {
+            from_value::<LocationLink>(result).map(|link| vec![link.to_location()])
         }
-        // Standard Location[] format
-        serde_json::from_value::<Vec<LspLocation>>(result.clone())
-            .ok()
-            .filter(|locs| !locs.is_empty())
-    } else {
-        // Single object
-        if result.get("targetUri").is_some()
-            && let Ok(link) = serde_json::from_value::<LocationLink>(result.clone())
-        {
-            return Some(vec![link.to_location()]);
-        }
-        serde_json::from_value::<LspLocation>(result.clone())
-            .ok()
-            .map(|l| vec![l])
-    }
+        _ => from_value::<LspLocation>(result).map(|location| vec![location]),
+    };
+    read.map_err(|error| LspError::Protocol(error.to_string()))
 }
 
 pub(super) fn create_file_level_symbol(file: &Path) -> Symbol {
@@ -434,6 +425,64 @@ pub(super) fn select_best_definition<'a>(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// Each shape a definition request may be answered with names its
+    /// locations, `null` none; an answer of no such shape fails as the
+    /// server's protocol failure, since read as none it would say the symbol
+    /// has no definition.
+    #[test]
+    fn a_location_answer_of_no_location_shape_is_a_protocol_failure() {
+        use serde_json::json;
+        let range =
+            json!({"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 9}});
+        let origin =
+            json!({"start": {"line": 5, "character": 11}, "end": {"line": 5, "character": 16}});
+        let location = json!({"uri": "file:///a.py", "range": range});
+        let link = json!({
+            "targetUri": "file:///a.py",
+            "targetRange": {"start": {"line": 0, "character": 0}, "end": {"line": 2, "character": 0}},
+            "targetSelectionRange": range,
+            "originSelectionRange": origin,
+        });
+        let read = |answer: serde_json::Value| {
+            parse_location_response(answer).map(|locations| {
+                locations
+                    .into_iter()
+                    .map(|l| {
+                        (
+                            l.uri,
+                            l.range.start.line,
+                            l.range.start.character,
+                            l.origin.is_some(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let named = vec![("file:///a.py".to_string(), 1, 4, false)];
+        let linked = vec![("file:///a.py".to_string(), 1, 4, true)];
+        assert_eq!(read(json!(null)).unwrap(), []);
+        assert_eq!(read(json!([])).unwrap(), []);
+        assert_eq!(read(location.clone()).unwrap(), named);
+        assert_eq!(read(json!([location])).unwrap(), named);
+        assert_eq!(read(link.clone()).unwrap(), linked);
+        assert_eq!(read(json!([link])).unwrap(), linked);
+
+        for malformed in [
+            json!([{"targetUri": "file:///a.py"}]),
+            json!({"targetUri": "file:///a.py"}),
+            json!([{"range": range}]),
+            json!([1]),
+            json!("file:///a.py"),
+            json!(true),
+        ] {
+            assert!(
+                matches!(read(malformed.clone()), Err(LspError::Protocol(_))),
+                "{malformed} read as {:?}",
+                read(malformed.clone())
+            );
+        }
+    }
 
     #[test]
     fn edit_response_keeps_the_request_baseline_after_an_overlay_refresh() {
