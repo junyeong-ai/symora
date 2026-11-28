@@ -1069,11 +1069,12 @@ impl LspClient {
     /// does not answer within the config's `shutdown_wait`, or does not exit
     /// within its `exit_wait` of the exit notification (less where a deadline
     /// the caller runs under ends sooner), is killed with its group, and what
-    /// it started in a session of its own outlives it.
+    /// it started in a session of its own outlives it. Its input closes after
+    /// `exit` once a write still on it ends, within the same `exit_wait`: a
+    /// write the server has stopped reading ends only with the server.
     pub async fn shutdown(&self) -> Result<(), LspError> {
         *self.shutdown.write().await = true;
 
-        // Stage 1: Send LSP shutdown request
         let shutdown_result = timeout(self.config.shutdown_wait, async {
             self.request::<()>("shutdown", None).await?;
             self.notify("exit", None).await
@@ -1081,20 +1082,25 @@ impl LspClient {
         .await;
         let acknowledged = matches!(shutdown_result, Ok(Ok(())));
 
-        // Close stdin to signal EOF
-        if let Ok(mut stdin) = self.stdin.try_lock() {
-            stdin.take();
-        } else if let Some(child) = self.process.lock().await.as_mut() {
+        let exit_by =
+            tokio::time::Instant::now() + crate::infra::deadline::remaining(self.config.exit_wait);
+        let mut process = self.process.lock().await.take();
+        if !acknowledged && let Some(child) = process.as_mut() {
             child.start_kill();
         }
-
-        // Stage 2 & 3: Wait for process exit, then force kill
-        if let Some(mut child) = self.process.lock().await.take() {
-            if !acknowledged {
-                child.start_kill();
+        match tokio::time::timeout_at(exit_by, self.stdin.lock()).await {
+            Ok(mut stdin) => {
+                stdin.take();
             }
-            let remaining = crate::infra::deadline::remaining(self.config.exit_wait);
-            match timeout(remaining, child.wait()).await {
+            Err(_) => {
+                if let Some(child) = process.as_mut() {
+                    child.start_kill();
+                }
+            }
+        }
+
+        if let Some(mut child) = process {
+            match tokio::time::timeout_at(exit_by, child.wait()).await {
                 Ok(Ok(status)) => {
                     tracing::debug!("{} language server exited: {:?}", self.language, status);
                 }
