@@ -323,6 +323,78 @@ fn zero_idle_timeout_allows_start_and_project_request() {
     assert_eq!(json_ok(exe, home.path(), "stop")["stopped"], true);
 }
 
+/// A project whose index the daemon cannot read is reported with the failure
+/// its own `search index status` gives, never as an index holding nothing,
+/// and the totals the other projects add up to say they leave it out; once it
+/// is unloaded, they no longer do.
+#[test]
+fn status_reports_an_unreadable_index_as_its_failure() {
+    let home = tempfile::tempdir().unwrap();
+    let exe = home.path().join("symora");
+    copy_binary(&exe);
+    let _cleanup = Daemons {
+        home: home.path().to_path_buf(),
+        binaries: vec![exe.clone()],
+    };
+    let built = home.path().join("built");
+    let unreadable = home.path().join("unreadable");
+    for root in [&built, &unreadable] {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("main.rs"), "fn needle() {}\n").unwrap();
+    }
+    // A directory where the database file belongs: the store exists, and no
+    // one can open it.
+    std::fs::create_dir_all(unreadable.join(".symora/store.db")).unwrap();
+    let run = |root: &Path, args: &[&str]| -> serde_json::Value {
+        let out = project_command(&exe, home.path(), args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let build = run(&built, &["search", "index", "build"]);
+    assert_eq!(build["symbol_count"], 1, "{build}");
+    let failure = run(&unreadable, &["search", "index", "status"]);
+    assert!(failure["error"]["code"].is_string(), "{failure}");
+
+    let store_of = |status: &serde_json::Value, root: &Path| {
+        let root = root.canonicalize().unwrap();
+        status["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| Path::new(row["project"].as_str().unwrap()) == root)
+            .map(|row| row["store"].clone())
+            .unwrap_or_else(|| panic!("{} is not in {status}", root.display()))
+    };
+    let status = json_ok(&exe, home.path(), "status");
+    assert_eq!(
+        store_of(&status, &built),
+        serde_json::json!({"symbols": 1, "files": 1, "content_lines": 1}),
+        "{status}"
+    );
+    assert_eq!(
+        store_of(&status, &unreadable),
+        serde_json::json!({"error": failure["error"]}),
+        "{status}"
+    );
+    assert_eq!(
+        status["store_totals"],
+        serde_json::json!({"incomplete": true, "symbols": 1, "files": 1}),
+        "{status}"
+    );
+
+    let unloaded = run(&unreadable, &["daemon", "restart", "--project"]);
+    assert_eq!(unloaded["restarted"], true, "{unloaded}");
+    let status = json_ok(&exe, home.path(), "status");
+    assert_eq!(status["active_projects"], 1, "{status}");
+    assert_eq!(
+        status["store_totals"],
+        serde_json::json!({"symbols": 1, "files": 1}),
+        "{status}"
+    );
+}
+
 /// A daemon outlives the command that starts it, so it keeps none of that
 /// command's descriptors beyond stdio: a pipe the command held without
 /// close-on-exec, handed down by its own caller here, reaches its end once

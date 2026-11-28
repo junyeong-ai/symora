@@ -36,30 +36,44 @@ pub(super) async fn handle_status(
 
     let mut total_symbols = 0u64;
     let mut total_files = 0u64;
+    // A project whose counts could not be read adds none to the totals,
+    // which are then a lower bound.
+    let mut incomplete = false;
 
     let mut active = Vec::with_capacity(contexts.len());
     for (path, ctx, request_count) in &contexts {
-        let stats = match ctx.store.index_status().await {
-            Ok(s) => s,
+        let store = match ctx.store.index_status().await {
+            Ok(stats) => {
+                total_symbols += stats.symbol_count as u64;
+                total_files += stats.file_count as u64;
+                serde_json::json!({
+                    "symbols": stats.symbol_count,
+                    "files": stats.file_count,
+                    "content_lines": stats.content_line_count,
+                })
+            }
+            // In the form a store request's failure crosses the wire, so the
+            // client reports it as it reports that request's.
             Err(e) => {
                 tracing::warn!("Failed to get store stats for {}: {}", path.display(), e);
-                Default::default()
+                incomplete = true;
+                serde_json::json!({ "error": RpcError::from(e) })
             }
         };
-
-        total_symbols += stats.symbol_count as u64;
-        total_files += stats.file_count as u64;
 
         active.push(serde_json::json!({
             "project": path.display().to_string(),
             "requests": request_count,
-            "store": {
-                "symbols": stats.symbol_count,
-                "files": stats.file_count,
-                "content_lines": stats.content_line_count,
-            }
+            "store": store,
         }));
     }
+
+    let mut store_totals = serde_json::Map::new();
+    if incomplete {
+        store_totals.insert("incomplete".to_string(), true.into());
+    }
+    store_totals.insert("symbols".to_string(), total_symbols.into());
+    store_totals.insert("files".to_string(), total_files.into());
 
     Ok(serde_json::json!({
         "running": true,
@@ -68,10 +82,7 @@ pub(super) async fn handle_status(
         "socket_path": config.socket_path.display().to_string(),
         "active_projects": active.len(),
         "projects": active,
-        "store_totals": {
-            "symbols": total_symbols,
-            "files": total_files,
-        }
+        "store_totals": store_totals,
     }))
 }
 

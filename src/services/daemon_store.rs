@@ -168,6 +168,16 @@ fn store_error(error: LspError) -> StoreError {
     }
 }
 
+/// A store failure a daemon reports inside an answer rather than as one —
+/// `daemon status`'s, for a project whose counts it could not read — read
+/// back as the store error it was, as a store request's is.
+pub(crate) fn reported_store_error(error: crate::daemon::protocol::RpcError) -> StoreError {
+    store_error(LspError::ServerError {
+        code: error.code,
+        message: error.message,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

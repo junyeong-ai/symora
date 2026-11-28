@@ -86,6 +86,8 @@ A symbol search reads the index only once it has had its build: every route that
 
 `index_size_bytes` is the database's page count times page size, including committed WAL pages. It belongs to status, not an individual build. A conflicting build or lock is transient contention; retry after it releases.
 
+`daemon status` gives each project the daemon holds its index counts as `store` (`symbols`, `files`, `content_lines`), read as `search index status` reads them, so a project with no index has zeros. Where they could not be read, `store` holds that failure as `error` instead, with the code, message and hint `search index status` gives it, and `store_totals`, the sum of the counts read, is `incomplete`.
+
 ## Errors and optional fields
 
 Failures use `{ "error": { "code", "message", "hint" } }` on stdout and a nonzero CLI exit. `hint` is optional. Omit unavailable optional fields instead of filling them with empty strings or fabricated zeroes.

@@ -540,6 +540,8 @@ daemon은 자신을 띄운 명령의 프로젝트가 아니라 설치본의 디�
 symora daemon start | stop | restart | status
 ```
 
+`daemon status`는 daemon이 맡은 프로젝트마다 인덱스 수를 `store`로 보여 줍니다. 인덱스를 읽을 수 없는 프로젝트의 `store`에는 수 대신 그 실패가 `error`로 — `search index status`가 내는 것과 같은 code·message·hint로 — 실리고, 읽은 수만 더한 `store_totals`에는 `incomplete: true`가 붙습니다.
+
 ---
 
 ## 명령어 참조

@@ -57,6 +57,25 @@ fn answer_unaddressable(command: DaemonCommand, reason: &Unaddressable, ctx: &Ou
     }
 }
 
+/// A daemon sends the failure that kept a project's index counts from being
+/// read as a store request's failure crosses the wire; it is reported with the
+/// code, message and hint `search index status` gives the same failure.
+fn report_store_failures(status: &mut serde_json::Value) -> Result<(), LspError> {
+    let projects = status
+        .get_mut("projects")
+        .and_then(serde_json::Value::as_array_mut);
+    for error in projects
+        .into_iter()
+        .flatten()
+        .filter_map(|project| project.pointer_mut("/store/error"))
+    {
+        let sent = serde_json::from_value(error.take())?;
+        let failure = crate::services::daemon_store::reported_store_error(sent);
+        *error = serde_json::to_value(OutputError::from(failure))?;
+    }
+    Ok(())
+}
+
 #[derive(Args, Debug)]
 pub struct DaemonArgs {
     #[command(subcommand)]
@@ -180,9 +199,10 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
 
         DaemonCommand::Status => {
             match client.status().await {
-                Ok(status) => {
-                    ctx.print_success(status);
-                }
+                Ok(mut status) => match report_store_failures(&mut status) {
+                    Ok(()) => ctx.print_success(status),
+                    Err(e) => ctx.print_error(OutputError::from(e)),
+                },
                 // Only a connect failure accepted by `proves_no_listener`
                 // proves absence. Other failures leave the question open;
                 // a definitive "not running" would be invented from them.

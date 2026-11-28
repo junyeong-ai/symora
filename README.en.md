@@ -540,6 +540,8 @@ The daemon runs in its installation's directory (`~/.symora`), not in the projec
 symora daemon start | stop | restart | status
 ```
 
+`daemon status` lists each project the daemon holds with its index counts as `store`. Where a project's index cannot be read, its `store` carries that failure as `error` instead of counts, with the code, message and hint `search index status` gives it, and `store_totals`, the sum of the counts read, is marked `incomplete`.
+
 ---
 
 ## Command reference
