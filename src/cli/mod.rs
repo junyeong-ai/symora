@@ -18,7 +18,7 @@ pub use call_graph::{CallGraphWalk, Direction, WalkConfig};
 pub use errors::{ErrorCode, OutputError};
 pub use file_symbols::{
     FileSymbols, SymbolBackend, declarations_of, declared_addressing, declared_at,
-    declared_at_line, declared_in, read_by_grammar,
+    declared_at_line, declared_in, names_one, read_by_grammar,
 };
 pub use input_error::{CliInputError, resolve_project_file};
 pub use location::{LocationArg, ParsedLocation};

@@ -2726,7 +2726,7 @@ fn a_deletion_takes_none_of_the_caps_room() {
         [
             "gone \"deleted\"",
             "keep \"modified\"",
-            "new_name \"modified\"",
+            "new_name \"added\"",
             "old_name \"deleted\""
         ],
         "b.py, after the file the cap filled, is not read: {full}"
@@ -4216,6 +4216,107 @@ fn removed_lines_no_grammar_reads_are_unmeasured() {
     );
 }
 
+/// A declaration's change type is whether its identity is declared in the
+/// base and in the current revision, never the shape of the hunks that
+/// wrote or removed it. A function moved and given a parameter, which git
+/// writes as an addition and removes in another hunk, is one row, modified
+/// where it now stands; so is one moved inside a renamed file, which git
+/// writes as a pure addition and a pure deletion. One renamed in place is
+/// its old name deleted and its new one added.
+#[cfg(unix)]
+#[test]
+fn a_change_type_is_whether_each_revision_declares_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let compare = "def compare(one, other):\n    left = one\n    right = other\n    \
+                   return left == right\n\n\n";
+    let alpha = "def alpha():\n    a = 1\n    b = 2\n    return a + b\n";
+    let beta = "def beta():\n    return 2\n";
+    std::fs::write(
+        repo.join("m.py"),
+        format!(
+            "def first():\n    return 1\n\n\n{compare}def plan_diff(one, other):\n    \
+             return [one, other]\n\n\ndef set_aside_drawn(drawn, paths):\n    return drawn\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(repo.join("old.py"), format!("{alpha}\n\n{beta}")).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(
+        repo.join("m.py"),
+        format!(
+            "def first():\n    return 1\n\n\ndef plan_diff(one, other, *, paths=()):\n    \
+             return [one, other, paths]\n\n\n{compare}def set_aside_records(drawn, paths):\n    \
+             return drawn\n"
+        ),
+    )
+    .unwrap();
+    git(repo, &["mv", "old.py", "new.py"]);
+    std::fs::write(repo.join("new.py"), format!("{beta}\n\n{alpha}")).unwrap();
+
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
+    let rows: Vec<String> = page["changes"]["items"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|c| {
+            format!(
+                "{} {} {}:{}",
+                c["name"], c["change_type"], c["file"], c["line"]
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            r#""set_aside_drawn" "deleted" "m.py":15"#,
+            r#""plan_diff" "modified" "m.py":5"#,
+            r#""set_aside_records" "added" "m.py":15"#,
+            r#""beta" "modified" "new.py":1"#,
+        ],
+        "{page}"
+    );
+    assert!(page["hints"].is_null(), "{page}");
+}
+
+/// Where the grammar read no base version of a file, whether the base
+/// declared a declaration whose name the diff wrote is unknown: its change
+/// type is read from the lines that wrote it, and a hint says so.
+#[cfg(unix)]
+#[test]
+fn a_change_type_the_base_was_not_read_for_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let body = "    a = 1\n    b = 2\n    c = 3\n    return a + b + c\n";
+    std::fs::write(repo.join("was.txt"), format!("def b():\n{body}")).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    git(repo, &["mv", "was.txt", "now.py"]);
+    std::fs::write(repo.join("now.py"), format!("def renamed():\n{body}")).unwrap();
+
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
+    assert_eq!(
+        named_rows(&page),
+        [("renamed".to_string(), "modified".to_string())],
+        "{page}"
+    );
+    assert!(
+        page["hints"].as_array().expect("hints").iter().any(|hint| {
+            hint.as_str().is_some_and(|hint| {
+                hint.contains("Whether the base revision declared renamed (now.py:1) is unknown")
+            })
+        }),
+        "{page}"
+    );
+}
+
 /// Lines replaced in place can remove a declaration, as a rename does, or
 /// keep it, as a signature edit does; only the one the file no longer
 /// declares is reported deleted, read from the base's version. A same-named
@@ -4611,7 +4712,7 @@ fn a_types_header_is_its_own_whatever_else_the_hunk_changes() {
             vec![
                 ("run", "deleted"),
                 ("Service", "modified"),
-                ("call", "modified"),
+                ("call", "added"),
             ],
         ),
         (
@@ -4902,7 +5003,8 @@ fn removed_lines_belong_to_what_held_them_in_the_base() {
 /// The grammar's range for a Java member opens on its annotations, so a
 /// removed annotation lay at the head of the member it annotated: that
 /// member now begins right after the deletion point, and the member ending
-/// at the point is left alone.
+/// at the point is left alone; a field renamed there is not modified but
+/// added, its old name deleted.
 #[test]
 fn an_annotation_removed_from_a_member_modifies_that_member() {
     let dir = tempfile::tempdir().unwrap();
@@ -4930,7 +5032,7 @@ fn an_annotation_removed_from_a_member_modifies_that_member() {
         (
             "    private Orders orders;\n    @Autowired\n",
             "    private Orders pending;\n",
-            vec!["payments", "pending"],
+            vec!["payments"],
         ),
     ] {
         std::fs::write(

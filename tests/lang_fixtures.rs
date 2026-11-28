@@ -628,7 +628,7 @@ fn an_empty_reference_set_says_what_kind_of_empty_it_is() {
 /// changed line among them belongs to the function, which is what callers
 /// and tests name and what `diff-impact` counts references for; a function
 /// renamed with its parameters is the old name deleted and the new one
-/// changed.
+/// added.
 #[test]
 #[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
 fn diff_impact_hands_a_changed_local_to_its_function() {
@@ -685,7 +685,7 @@ fn diff_impact_hands_a_changed_local_to_its_function() {
         [
             r#""old_name" "deleted""#,
             r#""compute" "modified""#,
-            r#""new_name" "modified""#
+            r#""new_name" "added""#
         ],
         "{page}"
     );

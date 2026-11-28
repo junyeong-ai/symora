@@ -299,7 +299,7 @@ fn lacks_line_declaration(tree: &[Symbol], declarations: &[Symbol], line: u32) -
 /// names neither `a` nor `b`. A name that ends where another begins shares
 /// no character with it: the analyzer's name of a Dart type, and the
 /// primary constructor the grammar places at the `(` or `<` after it.
-fn names_one(served: &Symbol, declaration: &Symbol, declarations: &[Symbol]) -> bool {
+pub fn names_one(served: &Symbol, declaration: &Symbol, declarations: &[Symbol]) -> bool {
     let named = name_span(served);
     let placed = |symbol: &Symbol| (symbol.location.line, symbol.location.column);
     share_a_character(named, name_span(declaration))

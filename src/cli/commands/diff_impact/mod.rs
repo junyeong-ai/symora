@@ -18,7 +18,7 @@ use crate::cli::response::{
     ReferenceCount, Section, share,
 };
 use crate::cli::utils::{members_at_deletion, members_at_line, shell_arg};
-use crate::cli::{FileSymbols, SymbolBackend, declarations_of, declared_in};
+use crate::cli::{FileSymbols, SymbolBackend, declarations_of, declared_in, names_one};
 use crate::constants::defaults::REFERENCE_COUNT_CONCURRENCY;
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
@@ -197,11 +197,18 @@ pub struct ChangedSymbolImpact {
     pub callers: Option<Section<CallHierarchyOutput>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// What the diff did to a declaration, read from whether its identity — its
+/// name path and kind, as the grammar compiled into symora reads both
+/// versions of its file, the base's under the path it had there — is
+/// declared in the base and in the current revision ([`Sides`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeType {
+    /// Declared in the current revision and not in the base.
     Added,
+    /// Declared in both, wherever the diff moved it: its lines changed.
     Modified,
+    /// Declared in the base and not in the current revision.
     Deleted,
 }
 
@@ -508,25 +515,172 @@ fn displayed(files: &BTreeSet<PathBuf>, root: &Path) -> String {
         .join(", ")
 }
 
-/// Symbol-level change type for a live hunk. An Added HUNK only makes the SYMBOL
-/// Added when the symbol's declaration line falls inside the added range;
-/// otherwise the symbol pre-existed and merely received inserted body lines, so
-/// it was Modified. (With `git diff --unified=0`, an in-body insertion is an
-/// Added hunk, `old_count==0`, whose lines sit inside a pre-existing symbol.)
-/// Modified/Deleted hunks pass through. This mirrors the deletion path's
-/// body-line reclassification, keeping addition and deletion symmetric.
-fn symbol_change_type(
-    hunk_type: &ChangeType,
-    decl_line: u32,
-    hunk_start: u32,
-    hunk_count: u32,
-) -> ChangeType {
-    let decl_in_added_range = decl_line >= hunk_start && decl_line < hunk_start + hunk_count.max(1);
-    if matches!(hunk_type, ChangeType::Added) && !decl_in_added_range {
-        ChangeType::Modified
-    } else {
-        hunk_type.clone()
+/// What a file's two versions say about the declarations its diff wrote:
+/// whether the base revision held each one's identity.
+enum Sides<'a> {
+    /// The diff removed none of the file's lines, so every declaration the
+    /// base held still stands, and one whose name the diff wrote is new.
+    NoneRemoved,
+    /// The grammar read both versions.
+    Compared {
+        /// The current version's declarations.
+        after: &'a [Symbol],
+        /// Where those the diff added are named, `(line, column)`.
+        added: HashSet<(u32, u32)>,
+    },
+    /// A version the diff removed lines from could not be read, so whether
+    /// it held a declaration whose name the diff wrote is not known.
+    Unread,
+}
+
+impl Sides<'_> {
+    /// A changed declaration's change type, and whether the base was
+    /// checked for its identity. One whose name stands on a line the diff
+    /// did not write stood there in the base, so it was modified. One whose
+    /// name it wrote was added where the base did not hold it, and modified
+    /// where it did, moved or edited in place. Where the grammar does not
+    /// read that declaration on both sides, only the lines that wrote it
+    /// are known: lines that replaced others, which reads as modified, or
+    /// lines added beside them, which reads as added.
+    fn change_type(&self, symbol: &Symbol, writing: &[&DiffHunk]) -> (ChangeType, bool) {
+        let line = symbol.location.line;
+        let Some(wrote) = writing
+            .iter()
+            .find(|hunk| (hunk.start_line..hunk.start_line + hunk.line_count).contains(&line))
+        else {
+            return (ChangeType::Modified, true);
+        };
+        let counterpart = match self {
+            Self::NoneRemoved => return (ChangeType::Added, true),
+            Self::Compared { after, added } => counterpart(symbol, after).map(|declared| {
+                added.contains(&(declared.location.line, declared.location.column))
+            }),
+            Self::Unread => None,
+        };
+        match counterpart {
+            Some(true) => (ChangeType::Added, true),
+            Some(false) => (ChangeType::Modified, true),
+            None if wrote.old_count == 0 => (ChangeType::Added, false),
+            None => (ChangeType::Modified, false),
+        }
     }
+}
+
+/// The grammar's declaration a changed symbol is, among the current
+/// version's: the one it is, where the grammar answered, or the one a
+/// language server's symbol names ([`names_one`]).
+fn counterpart<'a>(symbol: &Symbol, after: &'a [Symbol]) -> Option<&'a Symbol> {
+    let at = (symbol.location.line, symbol.location.column);
+    after
+        .iter()
+        .find(|declared| (declared.location.line, declared.location.column) == at)
+        .or_else(|| {
+            after
+                .iter()
+                .find(|declared| names_one(symbol, declared, after))
+        })
+}
+
+/// The declarations a file's diff removed and added, by identity: a
+/// declaration on the lines it removed was deleted where the current version
+/// declares fewer of its identity than the base, and one on the lines it
+/// wrote was added where it declares more. Where same-identity declarations
+/// outnumber those added or removed (overloads; same-named Go methods, whose
+/// receiver the grammar does not record), one edited in place is declared on
+/// both sides of its hunk, so those that are not are the ones added or
+/// removed; past them, the first in file order are.
+struct Compared<'b, 'h> {
+    /// The base's declarations removed, each with the hunk that removed it,
+    /// in file order.
+    deleted: Vec<(&'h DiffHunk, &'b Symbol)>,
+    /// Where the current declarations added are named, `(line, column)`.
+    added: HashSet<(u32, u32)>,
+}
+
+fn compare<'b, 'h>(
+    before: &'b [Symbol],
+    after: &[Symbol],
+    removing: &[&'h DiffHunk],
+    writing: &[&'h DiffHunk],
+) -> Compared<'b, 'h> {
+    let base = counts(before.iter().map(identity));
+    let current = counts(after.iter().map(identity));
+    let removed_lines = |hunk: &DiffHunk| (hunk.old_start, hunk.old_count);
+    let written_lines = |hunk: &DiffHunk| (hunk.start_line, hunk.line_count);
+    let removed = chosen(
+        before,
+        removing,
+        removed_lines,
+        surplus(&base, &current),
+        |hunk, symbol| declares(after, written_lines(hunk), symbol),
+    );
+    let written = chosen(
+        after,
+        writing,
+        written_lines,
+        surplus(&current, &base),
+        |hunk, symbol| declares(before, removed_lines(hunk), symbol),
+    );
+    Compared {
+        deleted: removed,
+        added: written
+            .into_iter()
+            .map(|(_, symbol)| (symbol.location.line, symbol.location.column))
+            .collect(),
+    }
+}
+
+/// Of the declarations `symbols` names on each hunk's `lines`, those an
+/// identity's `surplus` counts: first those the other side of their hunk
+/// does not declare again (`in_place`), then the rest, each in file order.
+fn chosen<'s, 'h>(
+    symbols: &'s [Symbol],
+    hunks: &[&'h DiffHunk],
+    lines: impl Fn(&DiffHunk) -> (u32, u32),
+    mut surplus: HashMap<Identity, usize>,
+    in_place: impl Fn(&DiffHunk, &Symbol) -> bool,
+) -> Vec<(&'h DiffHunk, &'s Symbol)> {
+    let candidates: Vec<(&DiffHunk, &Symbol)> = hunks
+        .iter()
+        .flat_map(|&hunk| declared_on(symbols, lines(hunk)).map(move |symbol| (hunk, symbol)))
+        .collect();
+    let mut picked = vec![false; candidates.len()];
+    for again in [false, true] {
+        for (i, (hunk, symbol)) in candidates.iter().enumerate() {
+            if in_place(hunk, symbol) != again {
+                continue;
+            }
+            if let Some(n) = surplus.get_mut(&identity(symbol))
+                && *n > 0
+            {
+                *n -= 1;
+                picked[i] = true;
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .zip(picked)
+        .filter_map(|(candidate, picked)| picked.then_some(candidate))
+        .collect()
+}
+
+/// Whether `symbols` declare `symbol`'s identity on `lines`.
+fn declares(symbols: &[Symbol], lines: (u32, u32), symbol: &Symbol) -> bool {
+    declared_on(symbols, lines).any(|declared| identity(declared) == identity(symbol))
+}
+
+/// How many more of each identity `of` holds than `over`.
+fn surplus(
+    of: &HashMap<Identity, usize>,
+    over: &HashMap<Identity, usize>,
+) -> HashMap<Identity, usize> {
+    of.iter()
+        .filter_map(|(id, &n)| {
+            let held = over.get(id).copied().unwrap_or(0);
+            (n > held).then(|| (id.clone(), n - held))
+        })
+        .collect()
 }
 
 /// The changed symbols a diff's hunks were assigned to, those whose
@@ -571,6 +725,9 @@ struct Plan {
     planning: Option<PathBuf>,
     /// The files the cap left work undone in.
     unfinished: Vec<PathBuf>,
+    /// The rows whose change type the base could not be checked for
+    /// ([`Sides::change_type`]), each `name (file:line)`.
+    unchecked: Vec<String>,
 }
 
 impl Plan {
@@ -667,8 +824,19 @@ async fn analyze_hunks(
         answers,
         unmeasured,
         unfinished,
+        unchecked,
         ..
     } = plan_hunks(app, hunks, preimage_ref, max_symbols).await;
+    let mut hints = Vec::new();
+    if !unchecked.is_empty() {
+        hints.push(format!(
+            "Whether the base revision declared {} is unknown: the grammar compiled into symora \
+             did not read them in both versions of their file, so each change_type says only \
+             whether the lines that wrote the declaration replaced removed lines (modified) or \
+             not (added).",
+            name_some(&unchecked)
+        ));
+    }
     let answers = &answers;
     let mut measured: Vec<Measured> = futures::stream::iter(rows)
         .map(|row| async move {
@@ -710,7 +878,6 @@ async fn analyze_hunks(
     let declarations = declarations_of(app, referencing).await;
     let root = app.output.root();
     let limit = app.config().lsp.calls_limit;
-    let mut hints = Vec::new();
     for row in &mut measured {
         if let (Some(constructions), Some(name)) = (&row.constructions, &row.impact.name) {
             hints.push(format!(
@@ -783,6 +950,7 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
         settled: 0,
         planning: None,
         unfinished: Vec::new(),
+        unchecked: Vec::new(),
     };
     // Kept apart from `analysis` until every file is read: a file's
     // declarations are borrowed from here while its rows join the plan.
@@ -842,12 +1010,24 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
         // Removed lines are read from the base's version of the file, never the
         // current tree, and by the built-in grammar alone.
         let removing: Vec<&DiffHunk> = hunks.iter().filter(|h| h.old_count > 0).copied().collect();
+        let writing: Vec<&DiffHunk> = hunks.iter().filter(|h| h.line_count > 0).copied().collect();
         let preimage = removing
             .first()
             .map(|hunk| read_preimage(root, preimage_ref, &hunk.old_file));
-        match &preimage {
-            None => {}
-            Some(Preimage::Unparsed) => analysis.unmeasured.push(file.clone()),
+        // The current version as the same grammar reads it: nothing where the
+        // diff deleted the file.
+        let after: Option<&[Symbol]> = match &on_disk {
+            _ if !file_exists => Some(&[]),
+            Some(now) => Some(now.members.as_slice()),
+            None => None,
+        };
+        let mut modified_by_removal: Vec<&Symbol> = Vec::new();
+        let sides = match &preimage {
+            None => Sides::NoneRemoved,
+            Some(Preimage::Unparsed) => {
+                analysis.unmeasured.push(file.clone());
+                Sides::Unread
+            }
             Some(Preimage::Unavailable) => {
                 for hunk in &removing {
                     analysis.settle(unresolved_deletion(
@@ -856,177 +1036,87 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                         root,
                     ));
                 }
+                Sides::Unread
             }
-            Some(Preimage::Parsed(before)) => {
-                let before = before.as_slice();
-
-                // A pure deletion removed every declaration in its range from
-                // where it stood.
-                let mut deleted: Vec<Identity> = Vec::new();
-                let mut modified_by_removal: Vec<&Symbol> = Vec::new();
-                for hunk in removing
-                    .iter()
-                    .filter(|h| matches!(h.change_type, ChangeType::Deleted))
-                {
-                    let declared: Vec<&Symbol> = declared_in_removed(before, hunk).collect();
-                    for symbol in &declared {
-                        deleted.push(identity(symbol));
-                        analysis.settle(deleted_row(symbol, &hunk.old_file, root));
-                    }
-                    let enclosing: Vec<&Symbol> = current_symbols
-                        .map(|current| {
-                            removed_lines_owners(before, current, headers_now, hunk, &declared)
-                        })
-                        .unwrap_or_default();
-                    if enclosing.is_empty() && declared.is_empty() {
-                        analysis.settle(unresolved_deletion(
-                            DeletionResolution::NoSymbolInRange,
-                            hunk,
-                            root,
-                        ));
-                    }
-                    modified_by_removal.extend(enclosing);
+            Some(Preimage::Parsed(before)) => match after {
+                // Neither a removed declaration nor a written one can be
+                // checked against a version nothing read.
+                None => {
+                    analysis.unmeasured.push(file.clone());
+                    Sides::Unread
                 }
-
-                // Lines replaced in place may hold a declaration the change
-                // kept (an edited signature) or one it removed (a rename). It
-                // was removed when the file now declares fewer of its identity
-                // than before, counting both versions with the same grammar,
-                // and a pure deletion has not already accounted for it. When
-                // more replaced declarations share such an identity than were
-                // removed (overloads; same-named Go methods, whose receiver the
-                // grammar does not record), a declaration edited in place is
-                // declared again in the lines that replaced it, so those that
-                // are not are the removed ones; past them, the first in file
-                // order are reported.
-                let replacing: Vec<&DiffHunk> = removing
-                    .iter()
-                    .filter(|h| matches!(h.change_type, ChangeType::Modified))
-                    .copied()
-                    .collect();
-                if !replacing.is_empty() {
-                    match &on_disk {
-                        None => analysis.unmeasured.push(file.clone()),
-                        Some(now) => {
-                            let after = &now.members;
-                            let mut removed = counts(before.iter().map(identity));
-                            for id in after.iter().map(identity).chain(deleted) {
-                                if let Some(n) = removed.get_mut(&id) {
-                                    *n = n.saturating_sub(1);
-                                }
-                            }
-                            let replaced: Vec<(&DiffHunk, &Symbol)> = replacing
-                                .iter()
-                                .flat_map(|&hunk| {
-                                    declared_in_removed(before, hunk)
-                                        .map(move |symbol| (hunk, symbol))
-                                })
-                                .collect();
-                            let declared_again = |hunk: &DiffHunk, symbol: &Symbol| {
-                                let end = hunk.start_line.saturating_add(hunk.line_count);
-                                after.iter().any(|kept| {
-                                    (hunk.start_line..end).contains(&kept.location.line)
-                                        && identity(kept) == identity(symbol)
-                                })
-                            };
-                            let mut chosen = vec![false; replaced.len()];
-                            for again in [false, true] {
-                                for (i, (hunk, symbol)) in replaced.iter().enumerate() {
-                                    if declared_again(hunk, symbol) != again {
-                                        continue;
-                                    }
-                                    if let Some(n) = removed.get_mut(&identity(symbol))
-                                        && *n > 0
-                                    {
-                                        *n -= 1;
-                                        chosen[i] = true;
-                                    }
-                                }
-                            }
-                            for ((hunk, symbol), chosen) in replaced.into_iter().zip(chosen) {
-                                if chosen {
-                                    analysis.settle(deleted_row(symbol, &hunk.old_file, root));
-                                }
-                            }
+                Some(after) => {
+                    let before = before.as_slice();
+                    let Compared { deleted, added } = compare(before, after, &removing, &writing);
+                    for hunk in &removing {
+                        for (_, symbol) in deleted.iter().filter(|(of, _)| std::ptr::eq(*of, *hunk))
+                        {
+                            analysis.settle(deleted_row(symbol, &hunk.old_file, root));
                         }
-                    }
-                }
-                if let Some(current) = current_symbols {
-                    for hunk in &replacing {
+                        // The lines of a declaration the hunk removed are that
+                        // declaration's, wherever it now stands; the others
+                        // belong to what held them.
                         let declared: Vec<&Symbol> = declared_in_removed(before, hunk).collect();
-                        modified_by_removal.extend(removed_lines_owners(
-                            before,
-                            current,
-                            headers_now,
-                            hunk,
-                            &declared,
-                        ));
-                    }
-                }
-                if let Some((answer, _)) = declarations {
-                    for sym in modified_by_removal {
-                        if !seen.insert((sym.location.line, sym.location.column)) {
-                            continue;
+                        let enclosing: Vec<&Symbol> = current_symbols
+                            .map(|current| {
+                                removed_lines_owners(before, current, headers_now, hunk, &declared)
+                            })
+                            .unwrap_or_default();
+                        if hunk.line_count == 0 && enclosing.is_empty() && declared.is_empty() {
+                            analysis.settle(unresolved_deletion(
+                                DeletionResolution::NoSymbolInRange,
+                                hunk,
+                                root,
+                            ));
                         }
-                        if !analysis.measure(Row::Live {
-                            answer,
-                            file: file.clone(),
-                            symbol: sym.clone(),
-                            change_type: ChangeType::Modified,
-                        }) {
-                            break;
-                        }
+                        modified_by_removal.extend(enclosing);
                     }
+                    Sides::Compared { after, added }
                 }
-            }
-        }
+            },
+        };
 
-        // Added/Modified hunks need the current tree.
-        let live_hunks: Vec<&DiffHunk> = hunks
-            .iter()
-            .filter(|h| !matches!(h.change_type, ChangeType::Deleted))
-            .copied()
-            .collect();
-        if live_hunks.is_empty() {
-            continue;
-        }
         let Some((answer, symbols)) = declarations else {
-            // Added/Modified hunks exist but no current symbols. If the file is
-            // present, find_symbols errored — disclose it as an unmeasured file
-            // (a lower bound) instead of silently dropping its changes.
-            if file_exists {
+            // Lines were written but no current symbols were read. If the
+            // file is present, find_symbols errored — disclose it as an
+            // unmeasured file (a lower bound) instead of silently dropping
+            // its changes.
+            if file_exists && !writing.is_empty() {
                 analysis.unmeasured.push(file.clone());
             }
             continue;
         };
-
-        for hunk in live_hunks {
-            let removed_a_declaration = match &preimage {
-                Some(Preimage::Parsed(before)) => {
-                    declared_in_removed(before, hunk).next().is_some()
-                }
-                _ => false,
-            };
-            for sym in added_lines_owners(symbols, headers_now, hunk, removed_a_declaration) {
-                if !seen.insert((sym.location.line, sym.location.column)) {
-                    continue;
-                }
-
-                let change_type = symbol_change_type(
-                    &hunk.change_type,
-                    sym.location.line,
-                    hunk.start_line,
-                    hunk.line_count,
-                );
-
-                if !analysis.measure(Row::Live {
-                    answer,
-                    file: file.clone(),
-                    symbol: sym.clone(),
-                    change_type,
-                }) {
-                    break;
-                }
+        let owners = modified_by_removal
+            .into_iter()
+            .chain(writing.iter().flat_map(|&hunk| {
+                let removed_a_declaration = match &preimage {
+                    Some(Preimage::Parsed(before)) => {
+                        declared_in_removed(before, hunk).next().is_some()
+                    }
+                    _ => false,
+                };
+                added_lines_owners(symbols, headers_now, hunk, removed_a_declaration)
+            }));
+        for sym in owners {
+            if !seen.insert((sym.location.line, sym.location.column)) {
+                continue;
+            }
+            let (change_type, checked) = sides.change_type(sym, &writing);
+            if !analysis.measure(Row::Live {
+                answer,
+                file: file.clone(),
+                symbol: sym.clone(),
+                change_type,
+            }) {
+                break;
+            }
+            if !checked {
+                analysis.unchecked.push(format!(
+                    "{} ({}:{})",
+                    sym.name,
+                    relative_display(file, root),
+                    sym.location.line
+                ));
             }
         }
     }
@@ -1262,18 +1352,30 @@ fn declared_in_removed<'a>(
     before: &'a [Symbol],
     hunk: &DiffHunk,
 ) -> impl Iterator<Item = &'a Symbol> {
-    let lines = hunk.old_start..hunk.old_start.saturating_add(hunk.old_count);
-    before
+    declared_on(before, (hunk.old_start, hunk.old_count))
+}
+
+/// The declarations named on `count` lines from `start`.
+fn declared_on(symbols: &[Symbol], (start, count): (u32, u32)) -> impl Iterator<Item = &Symbol> {
+    let lines = start..start.saturating_add(count);
+    symbols
         .iter()
         .filter(move |symbol| lines.contains(&symbol.location.line))
 }
 
-/// What tells a declaration apart from the others in its file, as far as
-/// whether a change removed it goes. Overloads share one.
-type Identity = (Option<String>, String, SymbolKind);
+/// What tells a declaration apart from the others in its file, as the
+/// grammar reads both versions of it: its name path and its kind. Overloads
+/// share one.
+type Identity = (String, SymbolKind);
 
 fn identity(symbol: &Symbol) -> Identity {
-    (symbol.container.clone(), symbol.name.clone(), symbol.kind)
+    (
+        symbol
+            .name_path
+            .clone()
+            .unwrap_or_else(|| symbol.name.clone()),
+        symbol.kind,
+    )
 }
 
 fn counts(identities: impl Iterator<Item = Identity>) -> HashMap<Identity, usize> {
@@ -1394,7 +1496,6 @@ mod tests {
             line_count: 2,
             old_start: 2,
             old_count: 0,
-            change_type: ChangeType::Added,
         };
         let owners: Vec<&str> = added_lines_owners(&symbols, &headers, &hunk, false)
             .iter()
@@ -1403,27 +1504,80 @@ mod tests {
         assert_eq!(owners, ["Idle"]);
     }
 
-    /// An Added HUNK only makes the SYMBOL Added when its declaration is inside
-    /// the added range; an in-body insertion into a pre-existing symbol is
-    /// Modified — symmetric with the deletion path's body-line reclassification.
+    /// A declaration's change type is whether its identity is declared on
+    /// each side of the diff, whatever shape of hunk wrote or removed it: a
+    /// function moved by an addition and a deletion is one declaration,
+    /// modified; one renamed in place is the old name deleted and the new
+    /// one added; one whose name line no hunk wrote was modified. A symbol
+    /// the grammar has no counterpart for is read from the lines that wrote
+    /// it, and says so.
     #[test]
-    fn symbol_change_type_reclassifies_in_body_insertion() {
-        // New function: declaration (line 5) inside the added range [5, 9).
-        assert!(matches!(
-            symbol_change_type(&ChangeType::Added, 5, 5, 4),
-            ChangeType::Added
-        ));
-        // In-body insertion: enclosing symbol declared at line 1, added range
-        // [3, 4) — declaration outside, so Modified, not Added.
-        assert!(matches!(
-            symbol_change_type(&ChangeType::Added, 1, 3, 1),
-            ChangeType::Modified
-        ));
-        // Modified/Deleted hunks pass through unchanged.
-        assert!(matches!(
-            symbol_change_type(&ChangeType::Modified, 1, 3, 1),
-            ChangeType::Modified
-        ));
+    fn a_change_type_is_read_from_the_identities_each_side_declares() {
+        let path = PathBuf::from("m.py");
+        let read = |content: &str| {
+            SymbolExtractor::new().extract_members(&path, content, Language::Python)
+        };
+        let before = read(
+            "def keep():\n    return 1\n\n\ndef moved():\n    return 2\n\n\n\
+             def old_name():\n    return 3\n",
+        );
+        let after = read(
+            "def moved():\n    return 2\n\n\ndef keep():\n    return 10\n\n\n\
+             def new_name():\n    return 3\n",
+        );
+        let hunk = |old_start, old_count, start_line, line_count| DiffHunk {
+            file: path.clone(),
+            old_file: path.clone(),
+            start_line,
+            line_count,
+            old_start,
+            old_count,
+        };
+        let hunks = [
+            hunk(0, 0, 1, 4),
+            hunk(2, 1, 6, 1),
+            hunk(5, 4, 8, 0),
+            hunk(9, 1, 9, 1),
+        ];
+        let removing: Vec<&DiffHunk> = hunks.iter().filter(|h| h.old_count > 0).collect();
+        let writing: Vec<&DiffHunk> = hunks.iter().filter(|h| h.line_count > 0).collect();
+
+        let Compared { deleted, added } = compare(&before, &after, &removing, &writing);
+        let deleted: Vec<&str> = deleted.iter().map(|(_, s)| s.name.as_str()).collect();
+        assert_eq!(deleted, ["old_name"]);
+        let sides = Sides::Compared {
+            after: &after,
+            added,
+        };
+        let typed: Vec<(&str, ChangeType, bool)> = after
+            .iter()
+            .map(|symbol| {
+                let (change_type, checked) = sides.change_type(symbol, &writing);
+                (symbol.name.as_str(), change_type, checked)
+            })
+            .collect();
+        assert_eq!(
+            typed,
+            [
+                ("moved", ChangeType::Modified, true),
+                ("keep", ChangeType::Modified, true),
+                ("new_name", ChangeType::Added, true),
+            ]
+        );
+
+        let unread = Symbol::new(
+            "LIMIT".to_string(),
+            SymbolKind::Constant,
+            Location::point(path.clone(), 3, 1),
+        );
+        assert_eq!(
+            sides.change_type(&unread, &writing),
+            (ChangeType::Added, false)
+        );
+        assert_eq!(
+            Sides::Unread.change_type(&after[2], &writing),
+            (ChangeType::Modified, false)
+        );
     }
 
     // The Deleted-row JSON contract: never a live neighbour's identity, never
@@ -1479,7 +1633,6 @@ mod tests {
             line_count: 0,
             old_start: 7,
             old_count: 2,
-            change_type: ChangeType::Deleted,
         };
         for resolution in [
             DeletionResolution::NoSymbolInRange,

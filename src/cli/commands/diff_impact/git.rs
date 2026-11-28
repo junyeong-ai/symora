@@ -10,8 +10,6 @@ use anyhow::{Context, Result};
 use crate::cli::errors::{ErrorCode, OutputError};
 use crate::cli::utils::shell_arg;
 
-use super::ChangeType;
-
 pub(super) struct DiffHunk {
     pub(super) file: PathBuf,
     /// The path the pre-image names the file by: `file`, unless the diff
@@ -25,7 +23,6 @@ pub(super) struct DiffHunk {
     /// (the deleted symbol no longer exists in the current tree).
     pub(super) old_start: u32,
     pub(super) old_count: u32,
-    pub(super) change_type: ChangeType,
 }
 
 /// What the working tree is measured against.
@@ -621,14 +618,6 @@ fn parse_hunk_header(header: &str, file: PathBuf) -> Option<DiffHunk> {
     let (old_start, old_count) = parse_range(old_range)?;
     let (new_start, new_count) = parse_range(new_range)?;
 
-    let change_type = if old_count == 0 {
-        ChangeType::Added
-    } else if new_count == 0 {
-        ChangeType::Deleted
-    } else {
-        ChangeType::Modified
-    };
-
     // Both coordinate systems are carried verbatim. Added/Modified resolve
     // against the new (current) tree via start_line/line_count; Deleted
     // resolves against the pre-image via old_start/old_count — never anchored
@@ -641,7 +630,6 @@ fn parse_hunk_header(header: &str, file: PathBuf) -> Option<DiffHunk> {
         line_count: new_count,
         old_start,
         old_count,
-        change_type,
     })
 }
 
@@ -877,7 +865,7 @@ mod tests {
         let hunk = hunk.expect("should parse valid hunk header");
         assert_eq!(hunk.start_line, 12);
         assert_eq!(hunk.line_count, 7);
-        assert!(matches!(hunk.change_type, ChangeType::Modified));
+        assert_eq!(hunk.old_count, 5);
         assert_eq!(hunk.file, dummy_file());
     }
 
@@ -887,7 +875,7 @@ mod tests {
         let hunk = hunk.expect("should parse single-line hunk");
         assert_eq!(hunk.start_line, 1);
         assert_eq!(hunk.line_count, 1);
-        assert!(matches!(hunk.change_type, ChangeType::Modified));
+        assert_eq!(hunk.old_count, 1);
     }
 
     #[test]
@@ -896,7 +884,7 @@ mod tests {
         let hunk = hunk.expect("should parse hunk with trailing context");
         assert_eq!(hunk.start_line, 150);
         assert_eq!(hunk.line_count, 30);
-        assert!(matches!(hunk.change_type, ChangeType::Modified));
+        assert_eq!(hunk.old_count, 20);
     }
 
     #[test]
@@ -906,7 +894,7 @@ mod tests {
         let hunk = hunk.expect("should parse addition hunk");
         assert_eq!(hunk.start_line, 6);
         assert_eq!(hunk.line_count, 3);
-        assert!(matches!(hunk.change_type, ChangeType::Added));
+        assert_eq!(hunk.old_count, 0);
     }
 
     #[test]
@@ -916,7 +904,6 @@ mod tests {
         // current-tree line.
         let hunk = parse_hunk_header("@@ -10,4 +9,0 @@", dummy_file());
         let hunk = hunk.expect("should parse deletion hunk");
-        assert!(matches!(hunk.change_type, ChangeType::Deleted));
         assert_eq!(hunk.old_start, 10);
         assert_eq!(hunk.old_count, 4);
         // New coords are passed through verbatim (unused for deletions), not
@@ -929,7 +916,6 @@ mod tests {
     fn parse_hunk_header_deletion_at_file_start() {
         let hunk = parse_hunk_header("@@ -1,2 +0,0 @@", dummy_file());
         let hunk = hunk.expect("should parse deletion at line 0");
-        assert!(matches!(hunk.change_type, ChangeType::Deleted));
         assert_eq!(hunk.old_start, 1);
         assert_eq!(hunk.old_count, 2);
         assert_eq!(hunk.start_line, 0);
@@ -973,7 +959,7 @@ diff --git a/src/main.rs b/src/main.rs
         assert_eq!(hunks[0].file, root.join("src/main.rs"));
         assert_eq!(hunks[0].start_line, 10);
         assert_eq!(hunks[0].line_count, 5);
-        assert!(matches!(hunks[0].change_type, ChangeType::Modified));
+        assert_eq!(hunks[0].old_count, 3);
     }
 
     #[test]
@@ -1023,13 +1009,13 @@ diff --git a/src/bar.rs b/src/bar.rs
         assert_eq!(hunks[0].file, root.join("src/foo.rs"));
         assert_eq!(hunks[0].start_line, 1);
         assert_eq!(hunks[0].line_count, 5);
-        assert!(matches!(hunks[0].change_type, ChangeType::Added));
+        assert_eq!(hunks[0].old_count, 0);
 
         // Second file, first hunk: modification
         assert_eq!(hunks[1].file, root.join("src/bar.rs"));
         assert_eq!(hunks[1].start_line, 10);
         assert_eq!(hunks[1].line_count, 3);
-        assert!(matches!(hunks[1].change_type, ChangeType::Modified));
+        assert_eq!(hunks[1].old_count, 2);
 
         // Second file, second hunk: deletion — old coords locate the deleted
         // symbol in the pre-image; new coords pass through verbatim.
@@ -1038,7 +1024,6 @@ diff --git a/src/bar.rs b/src/bar.rs
         assert_eq!(hunks[2].old_count, 5);
         assert_eq!(hunks[2].start_line, 31);
         assert_eq!(hunks[2].line_count, 0);
-        assert!(matches!(hunks[2].change_type, ChangeType::Deleted));
     }
 
     #[test]
@@ -1075,7 +1060,6 @@ diff --git a/src/old.rs b/src/old.rs
         assert_eq!(hunks[0].file, root.join("src/old.rs"));
         assert_eq!(hunks[0].old_start, 1);
         assert_eq!(hunks[0].old_count, 10);
-        assert!(matches!(hunks[0].change_type, ChangeType::Deleted));
     }
 
     #[test]

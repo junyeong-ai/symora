@@ -24,7 +24,7 @@ Resolve a symbol-level command's location through `commands::common::anchor_of`,
 
 `LocationAnalysis` owns project-local references excluding the resolved declaration. Refs, context, and impact project from that same set. Per-position test classification belongs to `TestScope`; whole-file classification is for file summaries and ranking. Outside-project declarations still receive this project's inbound references and the matching disclosure.
 
-Incoming/outgoing traversals share `call_graph::walk`, including deterministic frontier order, visited sets, depth/fan-out limits, and failed-hop markers. `diff-impact` assigns changed lines through `symbol_nav::members_at_line`, and reads deleted declarations from the base revision.
+Incoming/outgoing traversals share `call_graph::walk`, including deterministic frontier order, visited sets, depth/fan-out limits, and failed-hop markers. `diff-impact` assigns changed lines through `symbol_nav::members_at_line`, reads deleted declarations from the base revision, and types each row by whether the grammar's reading of each revision declares its identity, never by hunk shape.
 
 ## Mutations and execution
 
