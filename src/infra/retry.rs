@@ -33,7 +33,10 @@ impl RetryConfig {
     }
 }
 
-/// Execute an async operation with retry and exponential backoff
+/// Execute an async operation with retry and exponential backoff. A failure
+/// is tried again only while the budget the work runs under
+/// ([`deadline`](crate::infra::deadline)) outlasts the wait before the next
+/// attempt: past it, as after a timeout, the attempt could only fail again.
 pub async fn with_retry<F, T, Fut>(config: &RetryConfig, mut op: F) -> Result<T, LspError>
 where
     F: FnMut() -> Fut,
@@ -55,8 +58,12 @@ where
 
         match op().await {
             Ok(result) => return Ok(result),
-            Err(e) if e.is_recoverable() && attempt + 1 < config.max_attempts => {
-                tracing::warn!(
+            Err(e)
+                if e.is_recoverable()
+                    && attempt + 1 < config.max_attempts
+                    && outlasts(config.delay_for_attempt(attempt + 1)) =>
+            {
+                tracing::debug!(
                     "Operation failed (attempt {}/{}): {}",
                     attempt + 1,
                     config.max_attempts,
@@ -69,6 +76,11 @@ where
     }
 
     Err(last_error.unwrap_or_else(|| LspError::Protocol("No retry attempts configured".into())))
+}
+
+/// Whether the budget in force, if any, lasts past `delay` from now.
+fn outlasts(delay: Duration) -> bool {
+    crate::infra::deadline::current().is_none_or(|end| tokio::time::Instant::now() + delay < end)
 }
 
 #[cfg(test)]
@@ -110,6 +122,32 @@ mod tests {
 
         assert_eq!(result.unwrap(), 42);
         assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    /// A budget that runs out before the next attempt could start ends the
+    /// retries with the failure in hand; one that lasts allows them.
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_is_retried_only_while_the_budget_outlasts_the_wait() {
+        let config = RetryConfig::default();
+        for (budget, attempts) in [(Duration::from_millis(50), 1), (Duration::from_secs(5), 3)] {
+            let counter = Arc::new(AtomicU32::new(0));
+            let result = crate::infra::deadline::scope(
+                budget,
+                with_retry(&config, || {
+                    let counter = Arc::clone(&counter);
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        Err::<i32, _>(LspError::ServerError {
+                            code: crate::infra::lsp::protocol::error_codes::CONTENT_MODIFIED,
+                            message: "content modified".to_string(),
+                        })
+                    }
+                }),
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(counter.load(Ordering::SeqCst), attempts, "{budget:?}");
+        }
     }
 
     #[tokio::test]
