@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::LocationOutput;
+use super::{LocationOutput, Section};
 use crate::models::symbol::Symbol;
 
 /// Symbol output for find symbol commands.
@@ -44,8 +44,11 @@ pub struct SymbolOutput {
     pub body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_omitted: Option<super::BodyOmission>,
+    /// The declarations nested in this one, to the depth asked for, as the
+    /// shared list: the size fitter cuts it, keeping its `count`, before it
+    /// drops this declaration from its own list.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub children: Option<Vec<SymbolOutput>>,
+    pub children: Option<Section<SymbolOutput>>,
 }
 
 /// The source a symbol row carries beside its location. A body is the whole
@@ -86,7 +89,7 @@ impl SymbolOutput {
                     paths.push(format!("{path}/body"));
                 }
                 if let Some(children) = &item.children {
-                    collect(children, &format!("{path}/children"), paths);
+                    collect(&children.items, &format!("{path}/children/items"), paths);
                 }
             }
         }
@@ -131,13 +134,13 @@ impl SymbolOutput {
             children: if symbol.children.is_empty() {
                 None
             } else {
-                Some(
+                Some(Section::new(
                     symbol
                         .children
                         .iter()
                         .map(|s| Self::project(s, root, signature_only))
                         .collect(),
-                )
+                ))
             },
         }
     }
@@ -151,7 +154,7 @@ impl SymbolOutput {
         self.body = None;
         self.children = self
             .children
-            .map(|children| children.into_iter().map(Self::without_body).collect());
+            .map(|children| children.map_items(Self::without_body));
         self
     }
 

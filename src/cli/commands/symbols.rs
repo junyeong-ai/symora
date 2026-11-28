@@ -231,12 +231,9 @@ fn with_reference_counts(
         }
         item.refs_status = count.status_within(within);
     }
-    item.children = item.children.map(|children| {
-        children
-            .into_iter()
-            .map(|child| with_reference_counts(child, counts, within))
-            .collect()
-    });
+    item.children = item
+        .children
+        .map(|children| children.map_items(|child| with_reference_counts(child, counts, within)));
     item
 }
 
@@ -247,7 +244,11 @@ fn unreferenced_hint(items: &[SymbolOutput]) -> Option<String> {
         items
             .iter()
             .map(|item| {
-                usize::from(item.refs == Some(0)) + item.children.as_deref().map_or(0, zeros)
+                usize::from(item.refs == Some(0))
+                    + item
+                        .children
+                        .as_ref()
+                        .map_or(0, |children| zeros(&children.items))
             })
             .sum()
     }

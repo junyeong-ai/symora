@@ -734,22 +734,40 @@ pub enum Cap {
 
 impl Cap {
     pub fn hint(&self, showing: usize, count: usize) -> String {
+        let cut = Self::cut(showing, count);
         match self {
-            Self::Option(option) => format!(
-                "{option} cut this list at {showing} of {count}; pass {option} {count} to list \
-                 them all"
-            ),
+            Self::Option(option) => {
+                format!("{option} {cut} pass {option} {count} to list them all")
+            }
             Self::Config(key) => {
                 let (section, name) = key
                     .split_once('.')
                     .expect("a configuration key is section.key");
                 format!(
-                    "{key} cut this list at {showing} of {count}; raise {name} under \
-                     [{section}] in .symora/config.toml to list them all"
+                    "{key} {cut} raise {name} under [{section}] in .symora/config.toml to list \
+                     them all"
                 )
             }
-            Self::Fixed(remedy) => format!("This list stops at {showing} of {count}; {remedy}"),
+            Self::Fixed(remedy) => format!("{} {remedy}", Self::stop(showing, count)),
         }
+    }
+
+    /// Whether `hint` is the hint a cap gave a list showing `showing` of
+    /// `count`. Its remedy lists the rest by raising the cap, which no
+    /// longer holds once the size fitter cuts that list: raising the cap
+    /// asks for more of what the fitter cut. The fitter drops it there, and
+    /// its own hint says what cut the list instead.
+    pub fn gave(hint: &str, showing: usize, count: usize) -> bool {
+        hint.contains(&format!(" {}", Self::cut(showing, count)))
+            || hint.starts_with(&Self::stop(showing, count))
+    }
+
+    fn cut(showing: usize, count: usize) -> String {
+        format!("cut this list at {showing} of {count};")
+    }
+
+    fn stop(showing: usize, count: usize) -> String {
+        format!("This list stops at {showing} of {count};")
     }
 }
 
@@ -1363,6 +1381,27 @@ mod tests {
 
         let whole = with_cap(Section::new(vec![1, 2]), Cap::Option("--limit"));
         assert!(whole.hints.is_empty());
+    }
+
+    /// The size fitter recognizes the hint each cap gave the list it cuts,
+    /// and only that list's: another list's cap and other advice stay.
+    #[test]
+    fn a_caps_hint_is_known_by_the_list_it_cut() {
+        for cap in [
+            Cap::Option("--limit"),
+            Cap::Config("lsp.calls_limit"),
+            Cap::Fixed("every declaration: symora symbols -- a.rs".to_string()),
+        ] {
+            let hint = cap.hint(2, 7);
+            assert!(Cap::gave(&hint, 2, 7), "{hint}");
+            assert!(!Cap::gave(&hint, 2, 70), "{hint}");
+            assert!(!Cap::gave(&hint, 12, 7), "{hint}");
+        }
+        assert!(!Cap::gave(
+            "Response exceeded output.max_response_chars (20000)",
+            2,
+            7
+        ));
     }
 
     fn rerun(query: &str) -> SymbolRerun<'_> {

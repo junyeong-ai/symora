@@ -301,7 +301,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(with_extra(
             section_output_schema(
                 "Symbols defined in the file: name, name_path?, kind, file, line, column (the \
-                 name), end_line?/end_column? (where the declaration ends), children?",
+                 name), end_line?/end_column? (where the declaration ends), children? (the \
+                 declarations nested in it, a list of the same shape: count, showing, \
+                 truncated?, items)",
             ),
             &[(
                 "backend",

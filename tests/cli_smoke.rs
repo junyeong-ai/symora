@@ -3261,6 +3261,89 @@ fn a_response_past_its_size_target_cuts_callers_before_rows() {
     assert!(sized(&page), "{page}");
 }
 
+/// A declaration's nested symbols are the shared list too, so a `symbols`
+/// response past `output.max_response_chars` cuts a large class's members,
+/// keeping their count, before it drops the declarations after the class.
+/// A list the fitter cuts no longer carries the `--limit` remedy, which
+/// raising the limit would not make true, but the fitter's hint.
+#[cfg(unix)]
+#[test]
+fn a_symbols_response_past_its_size_target_cuts_members_before_declarations() {
+    let methods: String = (0..60)
+        .map(|n| format!("    def method_{n:02}(self):\n        return {n}\n\n"))
+        .collect();
+    let functions = |prefix: &str, count: usize| {
+        (0..count)
+            .map(|n| format!("def {prefix}_{n:02}():\n    return {n}\n\n\n"))
+            .collect::<String>()
+    };
+    let source = format!(
+        "{}class Big:\n{methods}\n{}",
+        functions("before", 5),
+        functions("after", 30)
+    );
+    let Some(dir) = reference_served_repo(&[("big.py", &source, &source)]) else {
+        return;
+    };
+    let repo = dir.path();
+    let config = std::fs::read_to_string(repo.join(".symora/config.toml")).unwrap();
+    let list = |ceiling: usize, args: &[&str]| {
+        std::fs::write(
+            repo.join(".symora/config.toml"),
+            format!("{config}\n[output]\nmax_response_chars = {ceiling}\n"),
+        )
+        .unwrap();
+        let page = json_ok(repo, &[&["symbols", "big.py"][..], args].concat());
+        let chars = serde_json::to_string(&page).unwrap().chars().count();
+        (page, chars)
+    };
+    let hints = |page: &serde_json::Value| -> Vec<String> {
+        page["hints"]
+            .as_array()
+            .map(|hints| {
+                hints
+                    .iter()
+                    .map(|hint| hint.as_str().unwrap().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (whole, whole_chars) = list(0, &["--depth", "1"]);
+    let (_, top_chars) = list(0, &["--depth", "0"]);
+    assert_eq!(whole["count"], 36, "{whole}");
+    assert_eq!(whole["items"][5]["children"]["showing"], 60, "{whole}");
+
+    let ceiling = (whole_chars + top_chars) / 2;
+    let (page, chars) = list(ceiling, &["--depth", "1"]);
+    assert!(chars <= ceiling, "{chars} > {ceiling}: {page}");
+    assert_eq!(page["showing"], 36, "every declaration stays: {page}");
+    let members = &page["items"][5]["children"];
+    assert_eq!(page["items"][5]["name"], "Big", "{page}");
+    assert_eq!(members["count"], 60, "{page}");
+    assert_eq!(members["truncated"], true, "{page}");
+    assert!(members["showing"].as_u64().unwrap() < 60, "{page}");
+    assert!(
+        hints(&page)
+            .iter()
+            .any(|hint| hint.contains("max_response_chars")),
+        "{page}"
+    );
+
+    let (page, chars) = list(top_chars / 2, &["--depth", "1", "--limit", "20"]);
+    assert!(chars <= top_chars / 2, "{page}");
+    assert_eq!(page["count"], 36, "{page}");
+    assert!(page["showing"].as_u64().unwrap() < 20, "{page}");
+    let said = hints(&page);
+    assert!(
+        said.iter().any(|hint| hint.contains("max_response_chars")),
+        "{page}"
+    );
+    assert!(
+        !said.iter().any(|hint| hint.contains("pass --limit")),
+        "raising --limit lists no more of what the fitter cut: {page}"
+    );
+}
+
 /// `--call-hierarchy` asks the server's call hierarchy for every changed
 /// symbol instead, the class's included: this fake, as pyright does, names
 /// the calls alone, so the function passed as a value from `keep` is no

@@ -284,7 +284,7 @@ fn pyright_resolves_across_package_boundaries() {
         .iter()
         .find(|item| item["name"] == "Circle")
         .expect("Circle signature");
-    let perimeter = circle["children"]
+    let perimeter = circle["children"]["items"]
         .as_array()
         .expect("Circle members")
         .iter()
@@ -320,7 +320,7 @@ fn pyright_resolves_across_package_boundaries() {
     fn declarations(items: &Value, out: &mut Vec<String>) {
         for item in items.as_array().into_iter().flatten() {
             out.push(item["name_path"].as_str().unwrap_or_default().to_string());
-            declarations(&item["children"], out);
+            declarations(&item["children"]["items"], out);
         }
     }
     let mut listed = Vec::new();
@@ -373,7 +373,7 @@ fn pyright_resolves_across_package_boundaries() {
                         | "impl"
                 )
             );
-            flatten(&item["children"], internal || !holds_members, out);
+            flatten(&item["children"]["items"], internal || !holds_members, out);
         }
     }
 
@@ -1225,7 +1225,7 @@ fn an_impl_block_reads_as_an_impl_from_rust_analyzer_and_the_grammar() {
                 item["kind"].as_str().unwrap_or_default().to_string(),
                 item["line"].as_u64().unwrap_or_default(),
             ));
-            rows(&item["children"], out);
+            rows(&item["children"]["items"], out);
         }
     }
     fn impls(rows: &[(String, String, u64)]) -> Vec<u64> {

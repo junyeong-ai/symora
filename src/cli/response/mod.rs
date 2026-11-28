@@ -218,6 +218,24 @@ impl<T> Section<T> {
         self
     }
 
+    /// The same list with each item mapped, its counts and qualifiers kept.
+    pub fn map_items<U>(self, map: impl FnMut(T) -> U) -> Section<U> {
+        Section {
+            count: self.count,
+            showing: self.showing,
+            truncated: self.truncated,
+            stale: self.stale,
+            incomplete: self.incomplete,
+            hints: self.hints,
+            next_commands: self.next_commands,
+            bodies_included: self.bodies_included,
+            indexing: self.indexing,
+            coverage_gaps: self.coverage_gaps,
+            error: self.error,
+            items: self.items.into_iter().map(map).collect(),
+        }
+    }
+
     fn with_total_count(items: Vec<T>, count: Option<usize>) -> Self {
         let showing = items.len();
         let count = count.map_or(showing, |c| c.max(showing));
@@ -418,15 +436,33 @@ pub fn fit_to_char_budget(
 
     let mut dropped = false;
     for candidate in &candidates {
-        let original = match value
+        let Some(node) = value
             .pointer_mut(&candidate.path)
             .and_then(serde_json::Value::as_object_mut)
-            .and_then(|node| node.get("items"))
-            .and_then(serde_json::Value::as_array)
-        {
+        else {
+            continue;
+        };
+        let original = match node.get("items").and_then(serde_json::Value::as_array) {
             Some(items) => items.clone(),
             None => continue,
         };
+        // Every list taken here is cut, which a cap's remedy cannot undo.
+        let count = node
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default() as usize;
+        if let Some(hints) = node
+            .get_mut("hints")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            hints.retain(|hint| {
+                hint.as_str()
+                    .is_none_or(|hint| !disclosure::Cap::gave(hint, original.len(), count))
+            });
+            if hints.is_empty() {
+                node.shift_remove("hints");
+            }
+        }
 
         // Binary-search the largest kept count in [0, len) that fits —
         // serialized length is monotonic in kept items, and keeping all
@@ -1151,6 +1187,49 @@ mod tests {
                 .iter()
                 .any(|h| h.as_str().unwrap().contains("output.max_response_chars")),
             "the hint lands on the largest list: {value}"
+        );
+    }
+
+    /// A list the fitter cuts no longer carries its cap's remedy, which
+    /// raising the cap would not make true; a list it leaves whole keeps it,
+    /// as does every other hint.
+    #[test]
+    fn fit_drops_the_cap_hint_of_a_list_it_cuts() {
+        let items: Vec<String> = (0..20)
+            .map(|i| format!("item-{i:02}-{}", "x".repeat(40)))
+            .collect();
+        let capped = disclosure::with_cap(
+            Section::with_total(items, 50).with_hints(vec!["own".to_string()]),
+            disclosure::Cap::Option("--limit"),
+        );
+        let hints = |value: &serde_json::Value| -> Vec<String> {
+            value["hints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|hint| hint.as_str().unwrap().to_string())
+                .collect()
+        };
+        let whole = serde_json::to_value(&capped).unwrap();
+        assert!(
+            hints(&whole)
+                .iter()
+                .any(|hint| hint.contains("pass --limit 50"))
+        );
+
+        let mut cut = whole.clone();
+        assert!(fit_to_char_budget(
+            &mut cut,
+            600,
+            NARROW_THE_QUERY,
+            &compact_chars
+        ));
+        let said = hints(&cut);
+        assert_eq!(said[0], "own", "{cut}");
+        assert!(!said.iter().any(|hint| hint.contains("--limit")), "{cut}");
+        assert!(
+            said.iter().any(|hint| hint.contains("max_response_chars")),
+            "{cut}"
         );
     }
 
