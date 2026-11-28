@@ -567,8 +567,10 @@ impl DaemonClient {
         // caller after a malformed response that was never sent. It is not
         // `NotConnected` either: the request may have reached this peer, so
         // all it proves is that this peer stopped answering, and a replacement
-        // may already be serving the socket.
-        if read == 0 {
+        // may already be serving the socket. An answer is one line, so one the
+        // stream ended inside of was cut off by the same closing, and what
+        // came of it is no answer to decode.
+        if read == 0 || !line.ends_with('\n') {
             return Err(LspError::ConnectionLost(method.to_string()));
         }
 
@@ -1121,6 +1123,49 @@ mod tests {
             matches!(&gone.2, Err(LspError::DaemonReplaced(_))),
             "{:?}",
             gone.2
+        );
+        daemon.await.unwrap();
+    }
+
+    /// An answer the daemon closed the connection inside of — its process
+    /// exiting partway through the write — is the connection lost, never a
+    /// payload that failed to decode, which reads as the server's answer
+    /// about the file.
+    #[tokio::test]
+    async fn an_answer_cut_off_by_the_daemon_closing_is_a_lost_connection() {
+        let runtime = tempfile::tempdir().unwrap();
+        let client = client(runtime.path(), Path::new("/work/tree"));
+        let listener = tokio::net::UnixListener::bind(&client.config.socket_path).unwrap();
+        let daemon = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(reader).read_line(&mut line).await.unwrap();
+                let request: Request = serde_json::from_str(&line).unwrap();
+                let result = match request.method.as_str() {
+                    methods::PING => serde_json::json!({
+                        "pong": true,
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "build": crate::daemon::protocol::BUILD_ID,
+                    }),
+                    _ => serde_json::json!({"symbols": ["x".repeat(64)]}),
+                };
+                let json = serde_json::to_string(&Response::success(request.id, result)).unwrap();
+                match request.method.as_str() {
+                    methods::PING => writer.write_all(format!("{json}\n").as_bytes()).await,
+                    _ => writer.write_all(&json.as_bytes()[..json.len() / 2]).await,
+                }
+                .unwrap();
+            }
+        });
+
+        let answer = client
+            .find_symbols(Path::new("/work/tree/a.py"), false, 1)
+            .await;
+        assert!(
+            matches!(&answer, Err(LspError::ConnectionLost(method)) if method == methods::FIND_SYMBOLS),
+            "{answer:?}"
         );
         daemon.await.unwrap();
     }
