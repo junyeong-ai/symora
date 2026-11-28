@@ -16,6 +16,7 @@ use crate::cli::utils::{find_named_at_position, find_symbol_at_position, shell_a
 use crate::cli::{LocationArg, OutputError};
 
 use super::common::{anchor_of, lsp_error_at};
+use crate::error::LspError;
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
 use crate::models::symbol::Symbol;
 use crate::services::TestScope;
@@ -467,12 +468,11 @@ async fn fetch_calls(
                 Cap::Config("lsp.calls_limit"),
             )
         }
-        Err(e) => Section::error(format_call_hierarchy_error(
-            &e.to_string(),
-            file,
-            line,
-            column,
-        )),
+        Err(e) => Section::error(section_error(e, || {
+            let anchor = shell_arg(&format!("{}:{line}:{column}", file.display()));
+            OutputError::unsupported("Call hierarchy is not supported at this position")
+                .with_hint(format!("Use `symora refs -- {anchor}` for usages."))
+        })),
     }
 }
 
@@ -539,34 +539,26 @@ async fn fetch_types(
             }
             Section::new(items).with_indexing(answer.indexing)
         }
-        Err(e) => Section::error(format_type_error(&e.to_string(), file, line, column)),
+        Err(e) => Section::error(section_error(e, || {
+            OutputError::unsupported("Type definition lookup is not supported at this position")
+                .with_hint(format!(
+                    "Use `symora hover -- {}` or inspect the target body in this context output \
+                     instead.",
+                    shell_arg(&format!("{}:{line}:{column}", file.display())),
+                ))
+        })),
     }
 }
 
-fn format_call_hierarchy_error(error: &str, file: &Path, line: u32, column: u32) -> OutputError {
-    if is_unsupported_lsp_feature(error) {
-        let anchor = shell_arg(&format!("{}:{line}:{column}", file.display()));
-        OutputError::unsupported("Call hierarchy is not supported at this position")
-            .with_hint(format!("Use `symora refs -- {anchor}` for usages.",))
-    } else {
-        OutputError::internal(error.to_string())
+/// A section's failure, mapped by its type as the same failure is for a
+/// command's error, so a spent budget reads `timeout` with its hint; where
+/// the server lacks the section's capability, the section's own refusal
+/// built by `unsupported`, which names what answers instead.
+fn section_error(error: LspError, unsupported: impl FnOnce() -> OutputError) -> OutputError {
+    match error.is_unsupported() {
+        true => unsupported(),
+        false => error.into(),
     }
-}
-
-fn format_type_error(error: &str, file: &Path, line: u32, column: u32) -> OutputError {
-    if is_unsupported_lsp_feature(error) {
-        OutputError::unsupported("Type definition lookup is not supported at this position")
-            .with_hint(format!(
-                "Use `symora hover -- {}` or inspect the target body in this context output instead.",
-                shell_arg(&format!("{}:{line}:{column}", file.display())),
-            ))
-    } else {
-        OutputError::internal(error.to_string())
-    }
-}
-
-fn is_unsupported_lsp_feature(error: &str) -> bool {
-    error.contains("does not support") || error.contains("no handler for request")
 }
 
 /// The distinct tests that exercise the target: for each reference the scope
@@ -583,7 +575,9 @@ fn is_unsupported_lsp_feature(error: &str) -> bool {
 /// the same callable resolved again adds no entry, and each entry keeps the
 /// first reference that reached it. `count` is what that set held before the
 /// emission cap, so a capped list says so rather than presenting its head as
-/// the whole.
+/// the whole. A test file whose declarations cannot be read leaves its tests
+/// unknown, so the section is that read's failure rather than a list
+/// without them.
 async fn fetch_tests(
     lsp: &dyn LspService,
     test_refs: &[&crate::models::symbol::Location],
@@ -593,11 +587,13 @@ async fn fetch_tests(
     let mut symbols_by_file: HashMap<PathBuf, Vec<Symbol>> = HashMap::new();
     for r in test_refs {
         if !symbols_by_file.contains_key(&r.file) {
-            let symbols = lsp
+            match lsp
                 .find_symbols(&r.file, FindSymbolsOptions::default().with_depth(10))
                 .await
-                .unwrap_or_default();
-            symbols_by_file.insert(r.file.clone(), symbols);
+            {
+                Ok(symbols) => symbols_by_file.insert(r.file.clone(), symbols),
+                Err(error) => return Section::error(error),
+            };
         }
     }
     let mut items: Vec<TestOutput> = callables_holding(test_refs.iter().copied(), |file| {
@@ -729,12 +725,21 @@ mod tests {
     }
 
     /// Body-lookup stub: serves canned per-file `documentSymbol` trees
-    /// with bodies. Every other `LspService` method is unreachable from
-    /// `apply_section_bodies` and panics loudly if that ever changes.
+    /// with bodies, and type definitions. `failure`, where set, answers the
+    /// call hierarchy, type definitions and a file it has no tree for, as
+    /// a section's reads fail. Every other `LspService` method is unreachable
+    /// from the sections and panics loudly if that ever changes.
     struct BodyLookupStub {
         symbols_by_file: HashMap<PathBuf, Vec<Symbol>>,
         type_definitions: Vec<Location>,
         symbol_requests: std::sync::Mutex<Vec<PathBuf>>,
+        failure: Option<fn() -> LspError>,
+    }
+
+    impl BodyLookupStub {
+        fn failed(&self) -> LspError {
+            (self.failure.expect("a failure to answer with"))()
+        }
     }
 
     fn body_symbol(name: &str, file: &Path, line: u32, end_line: u32, body: &str) -> Symbol {
@@ -757,10 +762,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(file.to_path_buf());
-            self.symbols_by_file
-                .get(file)
-                .cloned()
-                .ok_or_else(|| LspError::server_error_friendly(-1, "no symbols".to_string()))
+            match (self.symbols_by_file.get(file), self.failure) {
+                (Some(symbols), _) => Ok(symbols.clone()),
+                (None, Some(_)) => Err(self.failed()),
+                (None, None) => Err(LspError::server_error_friendly(
+                    -1,
+                    "no symbols".to_string(),
+                )),
+            }
         }
 
         async fn workspace_symbols(
@@ -792,7 +801,10 @@ mod tests {
             _line: u32,
             _column: u32,
         ) -> Result<Indexed<Vec<Location>>, LspError> {
-            Ok(Indexed::complete(self.type_definitions.clone()))
+            match self.failure {
+                Some(_) => Err(self.failed()),
+                None => Ok(Indexed::complete(self.type_definitions.clone())),
+            }
         }
         async fn find_implementations(
             &self,
@@ -839,7 +851,7 @@ mod tests {
             _line: u32,
             _column: u32,
         ) -> Result<crate::models::lsp::Indexed<Vec<CallHierarchyItem>>, LspError> {
-            unreachable!()
+            Err(self.failed())
         }
         async fn outgoing_calls(
             &self,
@@ -847,7 +859,7 @@ mod tests {
             _line: u32,
             _column: u32,
         ) -> Result<crate::models::lsp::Indexed<Vec<CallHierarchyItem>>, LspError> {
-            unreachable!()
+            Err(self.failed())
         }
         async fn code_actions(
             &self,
@@ -911,7 +923,98 @@ mod tests {
                 .collect(),
             type_definitions: Vec::new(),
             symbol_requests: std::sync::Mutex::new(Vec::new()),
+            failure: None,
         }
+    }
+
+    /// A section whose read failed carries that failure mapped by its type,
+    /// as the command's own error would be: a spent budget is `timeout`,
+    /// naming `lsp.timeout_secs`, and a lost daemon `lsp_unavailable`. Only a
+    /// capability the server lacks reads as the section's own refusal, with
+    /// what answers instead.
+    #[tokio::test]
+    async fn a_failed_section_reads_as_its_failure_is_typed() {
+        use crate::cli::ErrorCode;
+
+        let file = Path::new("/repo/src/a.rs");
+        let root = Path::new("/repo");
+        let failing = |failure: fn() -> LspError| BodyLookupStub {
+            failure: Some(failure),
+            ..stub_with(Vec::new())
+        };
+
+        let spent = failing(|| LspError::timeout("LSP work exceeded its shared time budget"));
+        let lost = failing(|| LspError::ConnectionLost("incoming_calls".into()));
+        for (stub, code) in [
+            (&spent, ErrorCode::Timeout),
+            (&lost, ErrorCode::LspUnavailable),
+        ] {
+            let sections = [
+                fetch_calls(stub, file, 3, 4, root, 8, true).await.error,
+                fetch_calls(stub, file, 3, 4, root, 8, false).await.error,
+                fetch_types(stub, file, 3, 4, root).await.error,
+            ];
+            for error in sections {
+                let error = error.expect("the failure is the section's error");
+                assert_eq!(error.code, code, "{error:?}");
+                assert!(error.hint.is_some(), "{error:?}");
+            }
+        }
+        let error = fetch_types(&spent, file, 3, 4, root).await.error.unwrap();
+        assert!(
+            error.hint.as_deref().unwrap().contains("lsp.timeout_secs"),
+            "{error:?}"
+        );
+
+        let unsupported = failing(|| {
+            LspError::feature_not_supported(Language::Python, "pyright", "call hierarchy", "")
+        });
+        let callers = fetch_calls(&unsupported, file, 3, 4, root, 8, true)
+            .await
+            .error
+            .unwrap();
+        assert_eq!(callers.code, ErrorCode::Unsupported);
+        assert!(callers.hint.unwrap().contains("symora refs"));
+        let types = fetch_types(&unsupported, file, 3, 4, root)
+            .await
+            .error
+            .unwrap();
+        assert_eq!(types.code, ErrorCode::Unsupported);
+        assert!(types.hint.unwrap().contains("symora hover"));
+    }
+
+    /// The tests a test file's declarations would name are unknown where
+    /// that file cannot be read, so the section is the read's failure rather
+    /// than a list missing them.
+    #[tokio::test]
+    async fn a_test_file_that_cannot_be_read_fails_the_tests_section() {
+        use crate::cli::ErrorCode;
+
+        let read = Path::new("/repo/tests/read.rs");
+        let unread = Path::new("/repo/tests/unread.rs");
+        let stub = BodyLookupStub {
+            failure: Some(|| LspError::timeout("LSP work exceeded its shared time budget")),
+            ..stub_with(vec![(
+                "/repo/tests/read.rs",
+                vec![body_symbol("reads", read, 1, 5, "fn reads() {}")],
+            )])
+        };
+        let references = [
+            Location::point(read.to_path_buf(), 2, 5),
+            Location::point(unread.to_path_buf(), 2, 5),
+        ];
+        let references: Vec<&Location> = references.iter().collect();
+
+        let section = fetch_tests(&stub, &references, Path::new("/repo"), 10).await;
+        assert!(section.items.is_empty(), "{:?}", section.items);
+        assert_eq!(
+            section.error.map(|error| error.code),
+            Some(ErrorCode::Timeout)
+        );
+
+        let section = fetch_tests(&stub, &references[..1], Path::new("/repo"), 10).await;
+        assert!(section.error.is_none());
+        assert_eq!(section.count, 1);
     }
 
     #[tokio::test]
