@@ -3537,8 +3537,13 @@ fn callers_without_call_hierarchy_name_none_for_a_type() {
                 .is_some_and(|hint| hint.starts_with("1 of the 2 references")))),
         "the import names no caller, and the answer says so: {function}"
     );
+    // The target the line resolved to is echoed, as `refs` echoes it.
+    assert_eq!(function["target"]["name"], "target", "{function}");
+    assert_eq!(function["target"]["line"], 5, "{function}");
+    assert_eq!(function["target"]["column"], 5, "{function}");
 
     let class = callers_at("shapes.py:1");
+    assert_eq!(class["target"]["name"], "Shape", "{class}");
     assert_eq!(class["callers_status"], "not_callable", "{class}");
     assert_eq!(class["count"], 0, "{class}");
     assert!(

@@ -390,15 +390,24 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 "Incoming calls: name, kind, file, line, column (the caller's declaration), \
                  call_site { file, line, column }",
             ),
-            &[(
-                "callers_status",
-                "string",
-                "Present only when callers were derived from references — because the \
-                 server lacks call hierarchy, or a Python constructor's constructions, which \
-                 the server reports as references to its class, joined its list — \
-                 reference-based, not verified call edges; not_callable, with no items, for \
-                 a type or value whose server lacks call hierarchy",
-            )],
+            &[
+                (
+                    "target",
+                    "object",
+                    "The symbol the position resolved to: { name, kind, file, line, column, \
+                     anchor_status? }, as find_references echoes it; anchor_status is present \
+                     only when the position did not resolve to a listed symbol",
+                ),
+                (
+                    "callers_status",
+                    "string",
+                    "Present only when callers were derived from references — because the \
+                     server lacks call hierarchy, or a Python constructor's constructions, \
+                     which the server reports as references to its class, joined its list — \
+                     reference-based, not verified call edges; not_callable, with no items, \
+                     for a type or value whose server lacks call hierarchy",
+                ),
+            ],
         )),
         ToolDefinition::read_only(
             "find_callees",

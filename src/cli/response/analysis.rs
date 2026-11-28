@@ -8,6 +8,7 @@ use serde::Serialize;
 use super::disclosure::CoverageReason;
 use super::{LocationOutput, Section};
 use crate::cli::LocationAnalysis;
+use crate::cli::analysis::Anchor;
 use crate::error::LspError;
 use crate::models::symbol::Symbol;
 use crate::services::test_scope::TestScope;
@@ -90,7 +91,13 @@ impl TargetOutput {
     /// the reference at its declaration writes it, where there is one; any
     /// other placeholder by its position, `symbol@line:col`.
     pub fn from_analysis(analysis: &LocationAnalysis, root: &Path) -> Self {
-        let anchor = analysis.anchor();
+        Self::from_anchor(analysis.anchor(), analysis.binding_name(), root)
+    }
+
+    /// The symbol `anchor` resolved to, or the placeholder at it, as
+    /// [`Self::from_analysis`] gives one; `binding_name` is what a binding is
+    /// written as at its declaration, where that is known.
+    pub fn from_anchor(anchor: &Anchor, binding_name: Option<&str>, root: &Path) -> Self {
         if let Some(symbol) = &anchor.symbol {
             return Self::from_symbol(symbol, root);
         }
@@ -99,8 +106,7 @@ impl TargetOutput {
             .strip_prefix(root)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| anchor.file.display().to_string());
-        let name = analysis
-            .binding_name()
+        let name = binding_name
             .map(str::to_string)
             .unwrap_or_else(|| format!("symbol@{}:{}", anchor.line, anchor.column));
         Self {

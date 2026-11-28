@@ -11,7 +11,9 @@ use crate::cli::analysis::{DerivedCallers, callers_from_references, construction
 use crate::cli::declarations_of;
 use crate::cli::python_members::{Qualifier, qualifier};
 use crate::cli::response::disclosure::{Cap, OutsideCallables, with_cap};
-use crate::cli::response::{CallHierarchyOutput, NOT_CALLABLE, REFERENCES_DERIVED, Section};
+use crate::cli::response::{
+    CallHierarchyOutput, NOT_CALLABLE, REFERENCES_DERIVED, Section, TargetOutput,
+};
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Location, Symbol};
@@ -40,8 +42,12 @@ pub struct CallersArgs {
 /// method or constructor, whose references name no caller. On the exact
 /// call-hierarchy path the field is omitted, leaving the bare `Section`
 /// contract untouched.
+///
+/// `target` echoes what the position resolved to, as `refs`, `impact` and
+/// `context` do, from the same anchor.
 #[derive(Debug, Serialize)]
 struct CallersOutput {
+    target: TargetOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     callers_status: Option<&'static str>,
     #[serde(flatten)]
@@ -101,6 +107,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
                     let mut hints = vec![not_callable_hint(symbol, &at)];
                     hints.extend(anchor.inbound_hints(ctx.root(), "callers"));
                     ctx.print_success(CallersOutput {
+                        target: TargetOutput::from_anchor(&anchor, None, ctx.root()),
                         section: Section::with_total(Vec::new(), 0).with_hints(hints),
                         callers_status: Some(NOT_CALLABLE),
                     });
@@ -165,6 +172,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
         .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
         .collect();
     ctx.print_success(CallersOutput {
+        target: TargetOutput::from_anchor(&anchor, None, ctx.root()),
         section: with_cap(
             Section::with_total(items, total)
                 .with_hints(hints)
@@ -267,9 +275,33 @@ mod tests {
         }
     }
 
+    fn target() -> TargetOutput {
+        TargetOutput::new(
+            "process".to_string(),
+            "function".to_string(),
+            "a.py".to_string(),
+            1,
+            5,
+        )
+    }
+
+    /// The echoed target leads, ahead of the list's qualifiers and items.
+    #[test]
+    fn the_target_leads_the_answer() {
+        let output = CallersOutput {
+            target: target(),
+            section: Section::with_total(Vec::<CallHierarchyOutput>::new(), 0),
+            callers_status: None,
+        };
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["target"]["name"], "process");
+        assert_eq!(value.as_object().unwrap().keys().next().unwrap(), "target");
+    }
+
     #[test]
     fn exact_call_hierarchy_omits_callers_status() {
         let output = CallersOutput {
+            target: target(),
             section: Section::with_total(Vec::<CallHierarchyOutput>::new(), 0),
             callers_status: None,
         };
@@ -281,6 +313,7 @@ mod tests {
     #[test]
     fn references_derived_fallback_marks_callers_status() {
         let output = CallersOutput {
+            target: target(),
             section: Section::with_total(Vec::<CallHierarchyOutput>::new(), 0),
             callers_status: Some(REFERENCES_DERIVED),
         };
