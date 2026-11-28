@@ -7,10 +7,10 @@ use futures::StreamExt;
 
 use crate::app::App;
 use crate::cli::commands::common::parse_symbol_kind;
-use crate::cli::response::disclosure::{Cap, CoverageReason, LowerBound, with_cap};
+use crate::cli::response::disclosure::{Cap, CoverageReason, LowerBound, RowFailure, with_cap};
 use crate::cli::response::{ReferenceCount, Section, SymbolOutput, SymbolSource};
 use crate::cli::utils::shell_arg;
-use crate::cli::{FileSymbols, OutputError, resolve_project_file};
+use crate::cli::{FileSymbols, OutputContext, OutputError, resolve_project_file};
 use crate::constants::defaults::REFERENCE_COUNT_CONCURRENCY;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Symbol, SymbolFilter, SymbolKind};
@@ -162,11 +162,18 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
 
             let mut hints: Vec<String> = member.into_iter().map(|q| q.hint).collect();
             hints.extend(unreferenced_hint(&items));
-            if counts
-                .iter()
-                .flat_map(HashMap::values)
-                .any(|count| matches!(count, ReferenceCount::Missing(CoverageReason::TimedOut)))
-            {
+            if let Some(counts) = &counts {
+                hints.extend(uncounted_hints(listed, counts, ctx));
+            }
+            if counts.iter().flat_map(HashMap::values).any(|count| {
+                matches!(
+                    count,
+                    ReferenceCount::Missing {
+                        reason: CoverageReason::TimedOut,
+                        ..
+                    }
+                )
+            }) {
                 hints.push(
                     LowerBound::AnalysisTimedOut {
                         secs: app.config().lsp.timeout_secs,
@@ -233,6 +240,36 @@ async fn count_references(
         .buffered(REFERENCE_COUNT_CONCURRENCY)
         .collect()
         .await
+}
+
+/// What left each listed declaration without a count, where that is a
+/// failure to name.
+fn uncounted_hints(
+    listed: &[Symbol],
+    counts: &ReferenceCounts,
+    ctx: &OutputContext,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+    countable(listed, &mut targets);
+    let rows = targets.into_iter().filter_map(|symbol| {
+        let location = &symbol.location;
+        match counts.get(&(location.line, location.column)) {
+            Some(ReferenceCount::Missing {
+                failure: Some(failure),
+                ..
+            }) => Some((
+                format!(
+                    "{} ({}:{})",
+                    symbol.name,
+                    ctx.relative_path(&location.file),
+                    location.line
+                ),
+                failure,
+            )),
+            _ => None,
+        }
+    });
+    RowFailure::hints("references were counted", rows)
 }
 
 /// `within` is the reason the file's workspace member qualifies a count

@@ -103,20 +103,26 @@ impl OutputError {
 
 impl From<LspError> for OutputError {
     fn from(err: LspError) -> Self {
+        Self::from(&err)
+    }
+}
+
+impl From<&LspError> for OutputError {
+    fn from(err: &LspError) -> Self {
         let message = err.to_string();
         match err {
             LspError::ServerNotInstalled { install_hint, .. } => {
-                Self::new(ErrorCode::ServerNotInstalled, message).with_hint(install_hint)
+                Self::new(ErrorCode::ServerNotInstalled, message).with_hint(install_hint.clone())
             }
             LspError::UnsupportedLanguage(_) => {
                 Self::new(ErrorCode::LanguageNotConfigured, message)
                     .with_hint("Run 'symora doctor' to see supported languages.")
             }
             LspError::FeatureNotSupported { suggestion, .. } => {
-                Self::new(ErrorCode::Unsupported, message).with_hint(suggestion)
+                Self::new(ErrorCode::Unsupported, message).with_hint(suggestion.clone())
             }
             LspError::ServerTerminated { established, .. } => {
-                Self::new(ErrorCode::LspUnavailable, message).with_hint(match established {
+                Self::new(ErrorCode::LspUnavailable, message).with_hint(match *established {
                     true => "The session dropped — retry; the next request starts a new server."
                         .to_string(),
                     false => "The server never answered initialize, so restarting repeats it — \
@@ -168,7 +174,7 @@ impl From<LspError> for OutputError {
                 "This command has no answer that derives from the tree alone. Drop --deterministic \
                  to let a language server answer it.",
             ),
-            LspError::ServerError { code, message: m } => classify_server_error(code, &m, message),
+            LspError::ServerError { code, message: m } => classify_server_error(*code, m, message),
             LspError::Protocol(_) => Self::new(ErrorCode::Internal, message),
             LspError::UnsupportedEdit(_) => Self::new(ErrorCode::Unsupported, message),
             LspError::Io(_) => Self::new(ErrorCode::Io, message),

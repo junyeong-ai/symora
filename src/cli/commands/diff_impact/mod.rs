@@ -11,7 +11,7 @@ use crate::cli::analysis::{Constructions, DerivedCallers, callers_from_reference
 use crate::cli::errors::OutputError;
 use crate::cli::python_members::{MemberGap, PythonMembers};
 use crate::cli::response::disclosure::{
-    Cap, CoverageReason, DIFF_IN_PARTS, LowerBound, name_some, with_cap,
+    Cap, CoverageReason, DIFF_IN_PARTS, LowerBound, RowFailure, name_some, with_cap,
 };
 use crate::cli::response::{
     CallHierarchyOutput, INDEXING_DEGRADED, LocationOutput, NOT_CALLABLE, REFERENCES_DERIVED,
@@ -975,6 +975,21 @@ struct Measured {
     derive_from: Option<Vec<Location>>,
     /// Where it runs, for a constructor run by calling its type.
     constructions: Option<Constructions>,
+    /// What left the row without its count, where a hint names it.
+    refs_failure: Option<RowFailure>,
+    /// What left the row without its callers, apart from a count it lacks.
+    callers_failure: Option<RowFailure>,
+}
+
+impl Measured {
+    /// How a hint names the row.
+    fn label(&self) -> Option<String> {
+        let location = &self.impact.location;
+        self.impact
+            .name
+            .as_ref()
+            .map(|name| format!("{name} ({}:{})", location.file, location.line))
+    }
 }
 
 /// The diff's changed symbols, their live rows measured with a bounded
@@ -1019,6 +1034,8 @@ async fn analyze_hunks(
                     named: Vec::new(),
                     derive_from: None,
                     constructions: None,
+                    refs_failure: None,
+                    callers_failure: None,
                 },
                 Row::Live {
                     answer,
@@ -1064,7 +1081,7 @@ async fn analyze_hunks(
             continue;
         };
         match callers_from_references(&references, |file| {
-            declarations.get(file).and_then(|read| read.as_deref())
+            declarations.get(file).and_then(|read| read.as_deref().ok())
         }) {
             Some(DerivedCallers {
                 callers: derived,
@@ -1094,9 +1111,34 @@ async fn analyze_hunks(
             }
             // A referencing file no reader could read leaves its
             // references' callers unknown.
-            None => row.impact.callers_status = Some(CoverageReason::Unavailable.as_str()),
+            None => {
+                row.impact.callers_status = Some(CoverageReason::Unavailable.as_str());
+                row.callers_failure = references.iter().find_map(|reference| {
+                    match declarations.get(&reference.file) {
+                        Some(Err(error)) => Some(RowFailure::Unread {
+                            file: relative_display(&reference.file, root),
+                            message: error.to_string(),
+                        }),
+                        _ => None,
+                    }
+                });
+            }
         }
     }
+    let failed = |failure: fn(&Measured) -> Option<&RowFailure>| {
+        measured
+            .iter()
+            .filter_map(move |row| row.label().zip(failure(row)))
+            .collect::<Vec<_>>()
+    };
+    hints.extend(RowFailure::hints(
+        "references were counted",
+        failed(|row| row.refs_failure.as_ref()),
+    ));
+    hints.extend(RowFailure::hints(
+        "callers were listed",
+        failed(|row| row.callers_failure.as_ref()),
+    ));
     HunkAnalysis {
         changes: measured.into_iter().map(|row| row.impact).collect(),
         unmeasured,
@@ -1350,6 +1392,7 @@ async fn analyze_symbol_impact(
     let root = app.output.root();
     let outcome = answer.references_of(lsp, file, sym, root).await;
     let count = ReferenceCount::of(&outcome, app.test_scope());
+    let mut callers_failure = None;
 
     let constructions = match &outcome {
         Ok(Some(analysis)) => analysis.constructions().cloned(),
@@ -1399,17 +1442,21 @@ async fn analyze_symbol_impact(
                     )),
                     calls.indexing.map(|_| INDEXING_DEGRADED),
                 ),
-                Err(error) => (None, Some(CoverageReason::of(&error).as_str())),
+                Err(error) => {
+                    callers_failure = RowFailure::of(&error);
+                    (None, Some(CoverageReason::of(&error).as_str()))
+                }
             }
         }
         (Some(_), _) => (None, Some(CoverageReason::Unavailable.as_str())),
     };
 
-    let (refs, test_refs, prod_refs) = match count {
+    let refs_status = count.status();
+    let (refs, test_refs, prod_refs, refs_failure) = match count {
         ReferenceCount::Measured {
             total, test, prod, ..
-        } => (Some(total), Some(test), Some(prod)),
-        ReferenceCount::Missing(_) => (None, None, None),
+        } => (Some(total), Some(test), Some(prod), None),
+        ReferenceCount::Missing { failure, .. } => (None, None, None, failure),
     };
     Measured {
         impact: ChangedSymbolImpact {
@@ -1420,7 +1467,7 @@ async fn analyze_symbol_impact(
             refs,
             test_refs,
             prod_refs,
-            refs_status: count.status(),
+            refs_status,
             callers,
             callers_status,
             deletion: None,
@@ -1428,6 +1475,8 @@ async fn analyze_symbol_impact(
         named,
         derive_from,
         constructions,
+        refs_failure,
+        callers_failure,
     }
 }
 

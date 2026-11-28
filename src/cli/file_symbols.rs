@@ -117,19 +117,18 @@ impl FileSymbols {
 }
 
 /// Each file's declarations ([`declared_in`]), read once and a bounded
-/// number at a time; `None` for a file nothing could read. What
+/// number at a time, or why nothing could read them. What
 /// [`callers_from_references`](crate::cli::analysis::callers_from_references)
 /// reads the callables holding references off.
 pub async fn declarations_of(
     app: &App,
     files: impl IntoIterator<Item = PathBuf>,
-) -> HashMap<PathBuf, Option<Vec<Symbol>>> {
+) -> HashMap<PathBuf, Result<Vec<Symbol>, LspError>> {
     let files: BTreeSet<PathBuf> = files.into_iter().collect();
     futures::stream::iter(files)
         .map(|file| async move {
             let read = declared_in(app, &file, FindSymbolsOptions::default().with_depth(10))
                 .await
-                .ok()
                 .map(|read| read.symbols);
             (file, read)
         })

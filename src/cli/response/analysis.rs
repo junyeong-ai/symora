@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::disclosure::CoverageReason;
+use super::disclosure::{CoverageReason, RowFailure};
 use super::{LocationOutput, PositionOutput, Section};
 use crate::cli::LocationAnalysis;
 use crate::cli::analysis::Anchor;
@@ -171,7 +171,12 @@ pub enum ReferenceCount {
         prod: usize,
         degraded: bool,
     },
-    Missing(CoverageReason),
+    /// None was taken, for `reason`, which `failure` names where the answer
+    /// must.
+    Missing {
+        reason: CoverageReason,
+        failure: Option<RowFailure>,
+    },
 }
 
 impl ReferenceCount {
@@ -192,8 +197,14 @@ impl ReferenceCount {
                     degraded: analysis.indexing().is_some(),
                 }
             }
-            Ok(None) => Self::Missing(CoverageReason::Unavailable),
-            Err(error) => Self::Missing(CoverageReason::of(error)),
+            Ok(None) => Self::Missing {
+                reason: CoverageReason::Unavailable,
+                failure: Some(RowFailure::Unplaced),
+            },
+            Err(error) => Self::Missing {
+                reason: CoverageReason::of(error),
+                failure: RowFailure::of(error),
+            },
         }
     }
 
@@ -201,7 +212,7 @@ impl ReferenceCount {
     pub fn status(&self) -> Option<&'static str> {
         match self {
             Self::Measured { degraded, .. } => degraded.then_some(INDEXING_DEGRADED),
-            Self::Missing(reason) => Some(reason.as_str()),
+            Self::Missing { reason, .. } => Some(reason.as_str()),
         }
     }
 
@@ -378,7 +389,11 @@ mod tests {
         assert_eq!(measured(true).status_within(None), Some(INDEXING_DEGRADED));
         assert_eq!(measured(false).status_within(None), None);
         assert_eq!(
-            ReferenceCount::Missing(CoverageReason::TimedOut).status_within(shadowed),
+            ReferenceCount::Missing {
+                reason: CoverageReason::TimedOut,
+                failure: None,
+            }
+            .status_within(shadowed),
             Some("timed_out")
         );
     }

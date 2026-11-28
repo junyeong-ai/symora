@@ -147,7 +147,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
                 let declarations =
                     declarations_of(app, sites.iter().map(|site| site.file.clone())).await;
                 callers_from_references(sites, |file| {
-                    declarations.get(file).and_then(|read| read.as_deref())
+                    declarations.get(file).and_then(|read| read.as_deref().ok())
                 })
             }
             None => None,

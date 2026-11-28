@@ -22,6 +22,8 @@ while one is in flight and choose when it is answered. `pyright` names the
 server as pyright does, in a log line sent before it answers initialize, and,
 like pyright, reports no workspace status. `error-on-shutdown` logs an error
 before it answers shutdown, as a server whose teardown fails does.
+`failed-references` and `failed-incoming-calls` answer those requests with
+an internal error.
 """
 
 import json
@@ -172,6 +174,11 @@ while True:
                 time.sleep(0.01)
         result = document_symbols(path_of(params["textDocument"]["uri"]))
     elif method == "textDocument/references" and "unanswered-references" in modes:
+        continue
+    elif (method == "textDocument/references" and "failed-references" in modes) or (
+            method == "callHierarchy/incomingCalls" and "failed-incoming-calls" in modes):
+        send({"jsonrpc": "2.0", "id": message["id"],
+              "error": {"code": -32603, "message": f"{method} failed"}})
         continue
     elif method == "textDocument/references":
         name = name_at(path_of(params["textDocument"]["uri"]), params["position"])

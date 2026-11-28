@@ -1269,6 +1269,85 @@ pub fn index_holes_bound(
     }]
 }
 
+/// What left a row without its reference count or its callers, named in a
+/// hint beside the row's status. A spent budget is not one: the timed-out
+/// hint names it with the budget and the narrower run. Nor is a server the
+/// run chose not to consult, where nothing failed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RowFailure {
+    /// The language server reads no position as the declaration, so nothing
+    /// was asked about it.
+    Unplaced,
+    /// A query failed, in the words and with the remedy the same failure has
+    /// as a command's error.
+    Query {
+        message: String,
+        hint: Option<String>,
+    },
+    /// A file holding one of the references, whose callables the callers are
+    /// read off, could not be read.
+    Unread { file: String, message: String },
+}
+
+impl RowFailure {
+    /// The failure `error` is, where the answer names it.
+    pub fn of(error: &LspError) -> Option<Self> {
+        match error {
+            LspError::Timeout(timed_out) if timed_out.unread.is_none() => None,
+            LspError::ServerNotConsulted => None,
+            error => {
+                let mapped = crate::cli::OutputError::from(error);
+                Some(Self::Query {
+                    message: mapped.message,
+                    hint: mapped.hint,
+                })
+            }
+        }
+    }
+
+    /// One hint per failure, naming the rows it left without what `missing`
+    /// says (`references were counted`, `callers were listed`).
+    pub fn hints<'a>(
+        missing: &str,
+        rows: impl IntoIterator<Item = (String, &'a RowFailure)>,
+    ) -> Vec<String> {
+        let mut by_failure: std::collections::BTreeMap<&RowFailure, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (row, failure) in rows {
+            by_failure.entry(failure).or_default().push(row);
+        }
+        by_failure
+            .into_iter()
+            .map(|(failure, rows)| failure.hint(missing, &name_some(&rows)))
+            .collect()
+    }
+
+    fn hint(&self, missing: &str, rows: &str) -> String {
+        match self {
+            Self::Unplaced => format!(
+                "No {missing} for {rows}: the language server's symbols lack these \
+                 declarations, and no definition it names at their positions is one of them, \
+                 so nothing could be asked about them."
+            ),
+            Self::Query { message, hint } => {
+                let failed = format!(
+                    "No {missing} for {rows}: {}.",
+                    message.trim_end_matches('.')
+                );
+                match hint {
+                    Some(hint) => format!("{failed} {hint}"),
+                    None => failed,
+                }
+            }
+            Self::Unread { file, message } => format!(
+                "No {missing} for {rows}: {file}, which holds one of their references, could \
+                 not be read: {}.",
+                message.trim_end_matches('.')
+            ),
+        }
+    }
+}
+
 /// Whether a rebuild can clear the hole this path left in the index.
 ///
 /// Asked of the tree, because the tree is what decides it, and asked the way
@@ -1372,6 +1451,61 @@ pub fn relative_paths(ctx: &OutputContext, paths: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failure is named once for the rows it left; a spent budget and a
+    /// server the run chose not to consult are not failures to name, while a
+    /// server that stopped reading keeps the restart its error gives.
+    #[test]
+    fn a_row_failure_is_named_once_for_the_rows_it_left() {
+        assert_eq!(RowFailure::of(&LspError::timeout("spent")), None);
+        assert_eq!(RowFailure::of(&LspError::ServerNotConsulted), None);
+        let stuck = LspError::Timeout(crate::error::TimedOut {
+            message: "spent".into(),
+            unread: Some(crate::error::UnreadInput {
+                language: Language::Python,
+                secs: 61,
+            }),
+        });
+        assert!(matches!(
+            RowFailure::of(&stuck),
+            Some(RowFailure::Query { hint: Some(hint), .. }) if hint.contains("daemon restart --project")
+        ));
+
+        let failed = RowFailure::of(&LspError::ServerError {
+            code: -32603,
+            message: "boom".into(),
+        })
+        .unwrap();
+        let rows = [
+            ("one (a.py:1)".to_string(), &failed),
+            ("two (a.py:5)".to_string(), &RowFailure::Unplaced),
+            ("three (a.py:9)".to_string(), &failed),
+        ];
+        assert_eq!(
+            RowFailure::hints("references were counted", rows),
+            [
+                "No references were counted for two (a.py:5): the language server's symbols \
+                 lack these declarations, and no definition it names at their positions is \
+                 one of them, so nothing could be asked about them.",
+                "No references were counted for one (a.py:1), three (a.py:9): Server error \
+                 [-32603]: boom.",
+            ]
+        );
+        let unread = RowFailure::Unread {
+            file: "b.py".into(),
+            message: "Server not installed: x.".into(),
+        };
+        assert_eq!(
+            RowFailure::hints(
+                "callers were listed",
+                [("one (a.py:1)".to_string(), &unread)]
+            ),
+            [
+                "No callers were listed for one (a.py:1): b.py, which holds one of their \
+              references, could not be read: Server not installed: x."
+            ]
+        );
+    }
 
     /// A list cut short of its count says what cut it and how to see the
     /// rest, after its own advice; one shown whole says nothing.

@@ -3314,6 +3314,83 @@ fn a_diff_the_budget_cut_short_names_the_budget_and_the_path() {
     );
 }
 
+/// A row a query failed for says so, in a hint naming the failure and the
+/// rows it left: a count `symbols --refs` and `diff-impact` lack, and on
+/// `diff-impact --call-hierarchy` the callers of a row whose count was taken.
+#[cfg(unix)]
+#[test]
+fn a_row_a_query_failed_for_names_the_failure() {
+    let calls = "\n\ndef two():\n    return one()\n";
+    let Some(dir) = reference_served_repo(&[(
+        "a.py",
+        &format!("def one():\n    return 1\n{calls}"),
+        &format!("def one():\n    return 2\n{calls}"),
+    )]) else {
+        return;
+    };
+    let repo = dir.path();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/reference_server.py");
+    let configure = |mode: &str| {
+        let config = serde_json::json!({"lsp": {"servers": {"python": {
+            "command": "python3",
+            "args": [server, repo.join(".symora/log"), mode],
+        }}}});
+        std::fs::write(
+            repo.join(".symora/config.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+    };
+    let names = |hints: &serde_json::Value, expected: &str| {
+        hints
+            .as_array()
+            .is_some_and(|hints| hints.iter().any(|hint| hint == expected))
+    };
+
+    configure("failed-references");
+    let listing = json_ok(repo, &["symbols", "a.py", "--refs"]);
+    assert_eq!(
+        listing["items"][0]["refs_status"], "unavailable",
+        "{listing}"
+    );
+    assert!(
+        names(
+            &listing["hints"],
+            "No references were counted for one (a.py:1), two (a.py:5): Server error \
+             [-32603]: textDocument/references failed."
+        ),
+        "{listing}"
+    );
+    let page = diff_impact_in_process(repo, &[]);
+    assert_eq!(
+        page["changes"]["items"][0]["refs_status"], "unavailable",
+        "{page}"
+    );
+    assert!(
+        names(
+            &page["hints"],
+            "No references were counted for one (a.py:1): Server error [-32603]: \
+             textDocument/references failed."
+        ),
+        "{page}"
+    );
+
+    configure("failed-incoming-calls");
+    let page = diff_impact_in_process(repo, &["--call-hierarchy"]);
+    let row = &page["changes"]["items"][0];
+    assert_eq!(row["refs"], 1, "{page}");
+    assert_eq!(row["callers_status"], "unavailable", "{page}");
+    assert!(
+        names(
+            &page["hints"],
+            "No callers were listed for one (a.py:1): Server error [-32603]: \
+             callHierarchy/incomingCalls failed."
+        ),
+        "{page}"
+    );
+}
+
 /// The rows are the shared list, so a response past `output.max_response_chars`
 /// is cut to fit like any other: a row's callers, the detail one `callers`
 /// query lists again, before the rows, which take their counts with them. The
