@@ -577,7 +577,8 @@ fn section_error(error: LspError, unsupported: impl FnOnce() -> OutputError) -> 
 /// emission cap, so a capped list says so rather than presenting its head as
 /// the whole. A test file whose declarations cannot be read leaves its tests
 /// unknown, so the section is that read's failure rather than a list
-/// without them.
+/// without them. Each test is given at its own declaration, the reference
+/// it makes nested as its `call_site`, as a caller is.
 async fn fetch_tests(
     lsp: &dyn LspService,
     test_refs: &[&crate::models::symbol::Location],
@@ -603,7 +604,8 @@ async fn fetch_tests(
     .into_iter()
     .map(|(test, reference)| TestOutput {
         name: test.name_path.clone().unwrap_or_else(|| test.name.clone()),
-        location: LocationOutput::from_location(reference, root),
+        location: LocationOutput::from_location(&test.location, root),
+        call_site: LocationOutput::from_location(reference, root),
     })
     .collect();
 

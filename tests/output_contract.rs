@@ -660,7 +660,8 @@ fn type_info_output_with_body() {
 fn test_output_basic() {
     let out = TestOutput {
         name: "test_process".to_string(),
-        location: sample_location(80, 4),
+        location: sample_location(78, 4),
+        call_site: sample_location(80, 9),
     };
     assert_json_snapshot!(out);
 }

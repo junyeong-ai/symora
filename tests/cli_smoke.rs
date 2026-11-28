@@ -3376,8 +3376,9 @@ fn call_hierarchy_asks_the_server_for_every_changed_symbol() {
     );
 }
 
-/// `context --tests` names each test that references the target once, at
-/// the first reference it holds, the innermost callable holding it; a
+/// `context --tests` names each test that references the target once, the
+/// innermost callable holding it, at its own declaration with the first
+/// reference it holds as its `call_site`, as a caller is given; a
 /// test-file reference outside every callable, an import, names none.
 #[cfg(unix)]
 #[test]
@@ -3401,18 +3402,34 @@ fn context_names_each_test_holding_a_reference_once() {
         .output()
         .expect("symora binary should exist");
     let page: serde_json::Value = common::parse_response(&out.stdout).unwrap();
-    let named: Vec<(&str, u64)> = page["tests"]["items"]
+    let named: Vec<(&str, u64, u64, u64, u64)> = page["tests"]["items"]
         .as_array()
         .unwrap_or_else(|| panic!("{page}"))
         .iter()
         .map(|test| {
+            assert_eq!(test["file"], "test_shapes.py", "{page}");
+            assert_eq!(test["call_site"]["file"], "test_shapes.py", "{page}");
+            let at = |position: &serde_json::Value| {
+                (
+                    position["line"].as_u64().unwrap(),
+                    position["column"].as_u64().unwrap(),
+                )
+            };
+            let ((line, column), (call_line, call_column)) = (at(test), at(&test["call_site"]));
             (
                 test["name"].as_str().unwrap(),
-                test["line"].as_u64().unwrap(),
+                line,
+                column,
+                call_line,
+                call_column,
             )
         })
         .collect();
-    assert_eq!(named, [("test_twice", 6), ("test_once", 10)], "{page}");
+    assert_eq!(
+        named,
+        [("test_twice", 5, 9, 6, 16), ("test_once", 9, 5, 10, 12)],
+        "{page}"
+    );
     assert_eq!(page["tests"]["count"], 2, "{page}");
 }
 

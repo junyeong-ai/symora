@@ -240,11 +240,14 @@ pub struct RefOutput {
     pub incomplete: bool,
 }
 
+/// A test that exercises a target, as a caller is given: at the test's own
+/// declaration, with the reference it makes there as its `call_site`.
 #[derive(Debug, Serialize)]
 pub struct TestOutput {
     pub name: String,
     #[serde(flatten)]
     pub location: LocationOutput,
+    pub call_site: LocationOutput,
 }
 
 #[derive(Debug, Serialize)]

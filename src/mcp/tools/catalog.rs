@@ -658,7 +658,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             (
                 "tests",
                 "object",
-                "Related tests as a list (items of name, file, line, column)",
+                "Related tests as a list (items of name, file, line, column at the test's own \
+                 declaration, and call_site { file, line, column }, the reference it makes)",
             ),
         ])),
         ToolDefinition::read_only(
