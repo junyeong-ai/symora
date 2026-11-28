@@ -302,6 +302,10 @@ pub enum LowerBound {
         /// the same budget on fewer rows.
         narrowing: Option<&'static str>,
     },
+    /// The command's language-server budget (`lsp.timeout_secs`, in seconds)
+    /// ran out on a hop of a call-graph walk, so `failed_hops` marks hops
+    /// that hold nothing because no answer came, not because there is none.
+    WalkTimedOut { secs: u64 },
     /// A language server answered these languages for the whole workspace and
     /// the answer was confined to the requested paths afterwards, so matches
     /// inside them that a capped answer held back are not counted.
@@ -366,6 +370,12 @@ impl LowerBound {
                  [lsp] in .symora/config.toml{} to take them",
                 narrowing.map_or(String::new(), |narrowing| format!(", or {narrowing},"))
             ),
+            Self::WalkTimedOut { secs } => format!(
+                "The language-server budget (lsp.timeout_secs = {secs}) ran out before every \
+                 hop of the call graph was answered, so the hops failed_hops marks hold none and \
+                 the counts are a lower bound; raise timeout_secs under [lsp] in \
+                 .symora/config.toml to walk them"
+            ),
             Self::LiveAnswerNarrowed {
                 languages,
                 indexable,
@@ -420,7 +430,8 @@ impl LowerBound {
             | Self::IndexPageCapped
             | Self::LiveFileNotDescribed
             | Self::AnalysisCapped { .. }
-            | Self::AnalysisTimedOut { .. } => None,
+            | Self::AnalysisTimedOut { .. }
+            | Self::WalkTimedOut { .. } => None,
         }
     }
 }

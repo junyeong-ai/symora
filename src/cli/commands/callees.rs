@@ -244,7 +244,8 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
         .collect();
 
     let member = qualifier(app, &anchor.file);
-    let mut hints: Vec<String> = member.iter().map(|q| q.hint.clone()).collect();
+    let mut hints = Vec::from_iter(walk.timed_out_hint(app.config().lsp.timeout_secs));
+    hints.extend(member.iter().map(|q| q.hint.clone()));
     hints.extend(anchor.anchor_hints(ctx.root(), "callees"));
 
     ctx.print_success(CalleesReachOutput {
@@ -390,7 +391,8 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         }
     };
 
-    let mut hints: Vec<String> = members.iter().map(|q| q.hint.clone()).collect();
+    let mut hints = Vec::from_iter(walk.timed_out_hint(app.config().lsp.timeout_secs));
+    hints.extend(members.iter().map(|q| q.hint.clone()));
     hints.extend(anchor.verdict_hints(
         "from-position",
         ctx.root(),

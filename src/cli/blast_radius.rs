@@ -34,6 +34,10 @@ pub struct BlastRadius {
     /// treated as an empty caller set.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub failed_hops: bool,
+    /// At least one failed hop failed because the command's budget ran out;
+    /// the response's hints say so, naming `lsp.timeout_secs`.
+    #[serde(skip)]
+    pub hops_timed_out: bool,
     /// True when the walk's own bounds or failures leave the counts a lower
     /// bound: `max_depth_reached`, `callers_truncated` or `failed_hops`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -148,6 +152,7 @@ pub async fn compute(
         callers_truncated: walk.truncated,
         indexing: walk.indexing,
         failed_hops: walk.failed_hops,
+        hops_timed_out: walk.hops_timed_out,
         incomplete: walk.is_lower_bound(),
         dynamic_dispatch,
         callers_by_depth: buckets,
@@ -244,6 +249,7 @@ mod tests {
             outgoing: HashMap::new(),
             implementations,
             errors: std::collections::HashSet::new(),
+            timeouts: std::collections::HashSet::new(),
         };
         let matcher = TestScope::default();
         tokio_test::block_on(compute(

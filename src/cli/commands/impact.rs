@@ -7,6 +7,7 @@ use crate::cli::analysis::LocationAnalysis;
 use crate::cli::blast_radius::{self, BlastRadius, DispatchStatus};
 use crate::cli::call_graph::WalkConfig;
 use crate::cli::python_members::{Qualifier, qualifier};
+use crate::cli::response::disclosure::LowerBound;
 use crate::cli::response::{
     AffectedFileOutput, ImpactOutput, RefOutput, TargetOutput, TestCoverageOutput,
 };
@@ -112,10 +113,21 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
             );
 
             let member = qualifier(app, &analysis.anchor.file);
+            // A caller graph the budget cut short leads: its counts are a
+            // lower bound for a reason a larger budget, not a retry, settles.
+            let walk_timed_out = blast_radius
+                .as_ref()
+                .filter(|radius| radius.hops_timed_out)
+                .map(|_| {
+                    LowerBound::WalkTimedOut {
+                        secs: app.config().lsp.timeout_secs,
+                    }
+                    .hint()
+                });
             let response = ImpactOutput {
-                hints: member
-                    .iter()
-                    .map(|q| q.hint.clone())
+                hints: walk_timed_out
+                    .into_iter()
+                    .chain(member.iter().map(|q| q.hint.clone()))
                     .chain(analysis.member_reach_hint())
                     .chain(analysis.anchor().outside_project_hint(root, "references"))
                     .collect(),
@@ -241,6 +253,7 @@ mod tests {
             callers_truncated: false,
             indexing: None,
             failed_hops: false,
+            hops_timed_out: false,
             incomplete: max_depth_reached,
             dynamic_dispatch: dispatch.map(|status| DynamicDispatch {
                 status,

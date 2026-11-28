@@ -728,6 +728,7 @@ fn impact_output_full() {
             callers_truncated: false,
             indexing: None,
             failed_hops: false,
+            hops_timed_out: false,
             incomplete: false,
             dynamic_dispatch: None,
             callers_by_depth: vec![
@@ -871,6 +872,7 @@ fn blast_radius_max_depth_reached_serializes() {
         callers_truncated: true,
         indexing: Some(symora::models::lsp::IndexingDegradation::TimedOut),
         failed_hops: false,
+        hops_timed_out: false,
         incomplete: true,
         dynamic_dispatch: None,
         callers_by_depth: vec![

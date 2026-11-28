@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use futures::future::join_all;
 
 use crate::constants::defaults::{CALL_GRAPH_MAX_NEIGHBORS_PER_NODE, IMPACT_DEFAULT_DEPTH};
+use crate::error::LspError;
 use crate::models::lsp::{CallHierarchyItem, IndexingDegradation};
 use crate::services::lsp::LspService;
 
@@ -83,6 +84,9 @@ pub struct CallGraphWalk {
     /// "no path" verdict or count derived from it — is therefore a lower bound,
     /// never an exhaustive negative.
     pub failed_hops: bool,
+    /// At least one of those failed because the command's `lsp.timeout_secs`
+    /// budget ran out, which a larger budget, not a retry alone, reaches.
+    pub hops_timed_out: bool,
 }
 
 impl CallGraphWalk {
@@ -90,6 +94,13 @@ impl CallGraphWalk {
     /// of what the server holds.
     pub fn is_lower_bound(&self) -> bool {
         self.max_depth_reached || self.truncated || self.failed_hops
+    }
+
+    /// The hint a walk the command's budget cut short carries, naming
+    /// `lsp.timeout_secs`, whose value is `secs`.
+    pub fn timed_out_hint(&self, secs: u64) -> Option<String> {
+        self.hops_timed_out
+            .then(|| crate::cli::response::disclosure::LowerBound::WalkTimedOut { secs }.hint())
     }
 
     /// Depth actually reached (number of levels traversed).
@@ -152,6 +163,7 @@ pub async fn walk(
     let mut max_depth_reached = false;
     let mut truncated = false;
     let mut failed_hops = false;
+    let mut hops_timed_out = false;
     // Aggregates the computation-time snapshot of every hop: if ANY hop ran
     // under degraded indexing the whole walk is a lower bound, and quiescence
     // landing mid-walk must not strip that.
@@ -186,8 +198,9 @@ pub async fn walk(
                 // it is NOT a genuine empty neighbour set — flag it so a derived
                 // verdict or count degrades to a lower bound rather than an
                 // exhaustive "no path".
-                Err(_) => {
+                Err(error) => {
                     failed_hops = true;
+                    hops_timed_out |= matches!(error, LspError::Timeout(_));
                     Vec::new()
                 }
             };
@@ -236,6 +249,7 @@ pub async fn walk(
         truncated,
         indexing,
         failed_hops,
+        hops_timed_out,
     }
 }
 
@@ -269,6 +283,21 @@ pub(crate) mod test_support {
         /// Positions whose `incoming_calls`/`outgoing_calls` return an error,
         /// to exercise the swallowed-hop `failed_hops` lower-bound marker.
         pub errors: HashSet<(u32, u32)>,
+        /// Positions whose hop the command's budget ran out on.
+        pub timeouts: HashSet<(u32, u32)>,
+    }
+
+    impl CallGraphStub {
+        fn hop_failure(&self, line: u32, column: u32) -> Option<LspError> {
+            if self.timeouts.contains(&(line, column)) {
+                return Some(LspError::timeout(
+                    "LSP work exceeded its shared time budget",
+                ));
+            }
+            self.errors
+                .contains(&(line, column))
+                .then(|| LspError::server_error_friendly(-32000, "stub hop error".to_string()))
+        }
     }
 
     impl CallGraphStub {
@@ -281,6 +310,7 @@ pub(crate) mod test_support {
                 outgoing: map,
                 implementations: Ok(vec![]),
                 errors: HashSet::new(),
+                timeouts: HashSet::new(),
             }
         }
     }
@@ -303,11 +333,8 @@ pub(crate) mod test_support {
             line: u32,
             column: u32,
         ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
-            if self.errors.contains(&(line, column)) {
-                return Err(LspError::server_error_friendly(
-                    -32000,
-                    "stub hop error".to_string(),
-                ));
+            if let Some(failure) = self.hop_failure(line, column) {
+                return Err(failure);
             }
             Ok(Indexed::complete(
                 self.incoming
@@ -323,11 +350,8 @@ pub(crate) mod test_support {
             line: u32,
             column: u32,
         ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
-            if self.errors.contains(&(line, column)) {
-                return Err(LspError::server_error_friendly(
-                    -32000,
-                    "stub hop error".to_string(),
-                ));
+            if let Some(failure) = self.hop_failure(line, column) {
+                return Err(failure);
             }
             Ok(Indexed::complete(
                 self.outgoing
@@ -488,6 +512,36 @@ mod tests {
         assert!(!clean_walk.failed_hops);
     }
 
+    /// A hop the command's budget ran out on is told apart from one that
+    /// failed otherwise, so the walk can say which a larger budget reaches:
+    /// its hint names `lsp.timeout_secs`, and the other failure has none.
+    #[test]
+    fn a_hop_the_budget_ran_out_on_is_named_as_such() {
+        let cfg = WalkConfig {
+            max_depth: 3,
+            ..Default::default()
+        };
+        let walked = |timed_out: bool| {
+            let mut outgoing = HashMap::new();
+            outgoing.insert((10, 5), vec![node(20)]);
+            let mut stub = CallGraphStub::outgoing(outgoing);
+            match timed_out {
+                true => stub.timeouts.insert((20, 1)),
+                false => stub.errors.insert((20, 1)),
+            };
+            tokio_test::block_on(walk(&stub, anchor(), Direction::Outgoing, &cfg))
+        };
+
+        let spent = walked(true);
+        assert!(spent.failed_hops && spent.hops_timed_out);
+        let hint = spent.timed_out_hint(7).expect("a spent budget is named");
+        assert!(hint.contains("lsp.timeout_secs = 7"), "{hint}");
+
+        let failed = walked(false);
+        assert!(failed.failed_hops && !failed.hops_timed_out);
+        assert!(failed.timed_out_hint(7).is_none());
+    }
+
     #[test]
     fn direction_selects_the_hop_method() {
         // The same key resolves through outgoing_calls under Outgoing; the
@@ -503,6 +557,7 @@ mod tests {
             outgoing,
             implementations: Ok(vec![]),
             errors: std::collections::HashSet::new(),
+            timeouts: std::collections::HashSet::new(),
         };
         let out = tokio_test::block_on(walk(
             &stub,
