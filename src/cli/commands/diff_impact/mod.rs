@@ -441,6 +441,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         .filter(|c| c.test_refs.is_some_and(|t| t > 0))
         .count();
     let without_tests = measurable.saturating_sub(with_tests);
+    let relist = callers_relist(&changes, args.call_hierarchy);
 
     let output = DiffImpactOutput {
         revision: args.revision,
@@ -462,8 +463,32 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         incomplete: capped,
         hints,
     };
-    ctx.print_narrowable(output, "narrow the diff with --path");
+    ctx.print_narrowable(output, "narrow the diff with --path", relist.as_deref());
     Ok(())
+}
+
+/// How a reader lists a row's callers whole where the size target cut them:
+/// `callers` reading them as the row's were, off the references unless the
+/// call hierarchy was asked, at the row's own position. Absent where no row
+/// lists a caller, so no callers list can be cut.
+fn callers_relist(changes: &[ChangedSymbolImpact], call_hierarchy: bool) -> Option<String> {
+    let source = match call_hierarchy {
+        true => "",
+        false => " --from-references",
+    };
+    changes
+        .iter()
+        .any(|row| {
+            row.callers
+                .as_ref()
+                .is_some_and(|callers| !callers.items.is_empty())
+        })
+        .then(|| {
+            format!(
+                "list a row's cut callers whole, at its file:line:column, with symora \
+                 callers{source} -- <location>"
+            )
+        })
 }
 
 /// Whether a file holds documentation or configuration (Markdown, MDX,
@@ -1842,5 +1867,52 @@ mod tests {
         assert_eq!(v["callers"]["truncated"], true, "{v}");
         assert_eq!(v["callers"]["items"][0]["name"], "use", "{v}");
         assert_eq!(v["callers"]["items"][0]["call_site"]["line"], 10, "{v}");
+    }
+
+    /// A row's cut callers are listed whole by `callers` read as the row's
+    /// were, at the row; with no caller listed, no list can be cut.
+    #[test]
+    fn a_rows_cut_callers_are_listed_whole_by_callers_read_as_the_rows_were() {
+        let row = |callers: Option<Section<CallHierarchyOutput>>| ChangedSymbolImpact {
+            name: Some("compute".to_string()),
+            kind: Some("function".to_string()),
+            location: loc(),
+            change_type: ChangeType::Modified,
+            refs: Some(3),
+            test_refs: Some(0),
+            prod_refs: Some(3),
+            refs_status: None,
+            callers,
+            callers_status: None,
+            deletion: None,
+        };
+        let caller = || CallHierarchyOutput {
+            name: "use".to_string(),
+            kind: "function".to_string(),
+            location: loc(),
+            call_site: None,
+            body: None,
+            body_omitted: None,
+        };
+        let listed = [row(None), row(Some(Section::new(vec![caller()])))];
+
+        let derived = callers_relist(&listed, false).expect("a caller is listed");
+        let hierarchy = callers_relist(&listed, true).expect("a caller is listed");
+
+        assert!(
+            derived.ends_with("with symora callers --from-references -- <location>"),
+            "{derived}"
+        );
+        assert!(
+            hierarchy.ends_with("with symora callers -- <location>"),
+            "{hierarchy}"
+        );
+        for relist in [&derived, &hierarchy] {
+            crate::cli::assert_named_commands_parse(relist);
+        }
+        assert_eq!(
+            callers_relist(&[row(None), row(Some(Section::new(Vec::new())))], false),
+            None
+        );
     }
 }

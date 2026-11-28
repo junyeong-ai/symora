@@ -41,7 +41,7 @@ Lists carry `count`, `showing`, and `items`. These markers qualify the answer; e
 
 | Marker | Meaning and next action |
 |---|---|
-| `truncated` | Found items were omitted; the hint names the cap that cut the list and how to list the rest. Narrow the query or follow it. |
+| `truncated` | Found items were omitted; the hint names the cap that cut the list and how to list the rest, and where the response size limit cut a row's own list (a `diff-impact` row's callers, a `symbols` row's children), the hint names the command that lists it whole at the row. Narrow the query or follow it. |
 | `incomplete` / `unread_paths` | Counts are lower bounds within the consulted sources; inspect the cause. |
 | `coverage_gaps` | Named languages were not fully searched; use the indicated source or remedy. On an answer about one Python declaration, `member_shadowed` means the server's interpreter installs the declaration's uv workspace member from another checkout or as a copy in its site-packages, so every import of it resolves to that copy, and `member_unresolved` that symora handed the server no interpreter, so where it resolves is unknown: cross-file references, callers, callees and edit sets are short, retrying does not change that, and renames and reference-checked edits are refused. Run the hint's remedy (the tree's own environment, `uv sync`), then `daemon restart --project`; `doctor python` lists the members in `member_gaps`. |
 | `stale` / currency hints | The index is a snapshot; refresh before current enumeration. New files can require refresh even without stale returned rows. |

@@ -3311,7 +3311,9 @@ fn a_diff_the_budget_cut_short_names_the_budget_and_the_path() {
 
 /// The rows are the shared list, so a response past `output.max_response_chars`
 /// is cut to fit like any other: a row's callers, the detail one `callers`
-/// query lists again, before the rows, which take their counts with them.
+/// query lists again, before the rows, which take their counts with them. The
+/// size hint names that query at a row's position, which, run, lists every
+/// caller.
 #[cfg(unix)]
 #[test]
 fn a_response_past_its_size_target_cuts_callers_before_rows() {
@@ -3388,6 +3390,31 @@ fn a_response_past_its_size_target_cuts_callers_before_rows() {
         "{page}"
     );
     assert!(sized(&page), "{page}");
+    assert!(
+        page["changes"]["hints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hint| hint
+                .as_str()
+                .unwrap()
+                .ends_with("symora callers --from-references -- <location>")),
+        "{page}"
+    );
+    assert!(!page.to_string().contains("next_commands"), "{page}");
+    let cut = rows
+        .iter()
+        .find(|row| row["callers"]["truncated"] == true)
+        .unwrap();
+    let at = format!(
+        "{}:{}:{}",
+        cut["file"].as_str().unwrap(),
+        cut["line"],
+        cut["column"]
+    );
+    let listed = json_ok(repo, &["callers", "--from-references", "--", &at]);
+    assert_eq!(listed["count"], 6, "{listed}");
+    assert_eq!(listed["items"].as_array().unwrap().len(), 6, "{listed}");
 
     let ceiling = rows_chars / 2;
     let (page, chars) = analyse(ceiling, &[]);

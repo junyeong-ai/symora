@@ -905,7 +905,7 @@ async fn publish(
         .filter(|(_, row)| row.body.is_some())
         .map(|(index, _)| format!("/items/{index}/body"))
         .collect();
-    app.output.print_source(section, &body_paths);
+    app.output.print_source(section, &body_paths, None);
 }
 
 /// Read each row's source from its file's declarations, as `symbols <file>

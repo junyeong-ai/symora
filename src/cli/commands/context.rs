@@ -158,7 +158,7 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
             }
         }
     }
-    ctx.print_source(response, &body_paths);
+    ctx.print_source(response, &body_paths, None);
     Ok(())
 }
 

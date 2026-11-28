@@ -363,14 +363,18 @@ pub const NARROW_THE_QUERY: &str = "narrow the query";
 /// lists nested alike the largest first. A list inside an item is that item's
 /// detail — `diff-impact`'s callers of a changed symbol — which a command
 /// asked about the item can list again, while an item dropped from its list
-/// takes its own identity and counts with it. `showing` shrinks with the
-/// items, `truncated` is set, and one disclosure hint naming
-/// `output.max_response_chars` and `narrowing`, how the reader asks for less
-/// ([`NARROW_THE_QUERY`] unless the command says otherwise), lands on the
-/// largest list before measuring, so its own length is budgeted. `count`
-/// and per-item shape are never touched, and the value is never sliced:
-/// when even zero items stays over the ceiling, the reduced-but-whole JSON
-/// is emitted as-is.
+/// takes its own identity and counts with it. Emptying the largest lists
+/// first cuts as few lists as the ceiling allows, so the fewest need asking
+/// again. `showing` shrinks with the items, `truncated` is set, and one
+/// disclosure hint lands on the largest list before measuring, so its own
+/// length is budgeted: it names `output.max_response_chars`; `narrowing`, how
+/// the reader asks for less ([`NARROW_THE_QUERY`] unless the command says
+/// otherwise); and last, where the command gives one, `relist`, how a reader
+/// lists an item's cut list whole from the item's own fields, once for every
+/// such list rather than a command beside each that would repeat what the
+/// item states. `count` and per-item shape are never touched, and the value
+/// is never sliced: when even zero items stays over the ceiling, the
+/// reduced-but-whole JSON is emitted as-is.
 ///
 /// `measure` must serialize exactly the string the caller will emit —
 /// the measurement counts emitted characters, not an estimate. Returns true
@@ -392,6 +396,7 @@ pub fn fit_to_char_budget(
     value: &mut serde_json::Value,
     max_chars: usize,
     narrowing: &str,
+    relist: Option<&str>,
     measure: &dyn Fn(&serde_json::Value) -> usize,
 ) -> bool {
     if measure(value) <= max_chars {
@@ -422,8 +427,11 @@ pub fn fit_to_char_budget(
         .pointer_mut(&largest)
         .and_then(serde_json::Value::as_object_mut)
     {
+        let relist = relist
+            .map(|relist| format!("; {relist}"))
+            .unwrap_or_default();
         let hint = format!(
-            "Response exceeded output.max_response_chars ({max_chars}); items were dropped to fit — {narrowing} or raise the ceiling in .symora/config.toml"
+            "Response exceeded output.max_response_chars ({max_chars}), so the lists marked truncated were cut to fit: {narrowing} or raise the ceiling in .symora/config.toml{relist}"
         );
         if let Some(hints) = node
             .entry("hints")
@@ -913,6 +921,7 @@ mod tests {
             &mut value,
             500,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
 
@@ -952,6 +961,7 @@ mod tests {
             &mut value,
             600,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
 
@@ -976,6 +986,7 @@ mod tests {
             &mut value,
             120,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
 
@@ -1006,7 +1017,7 @@ mod tests {
 
         for budget in 100..600 {
             let mut fitted = value.clone();
-            if !fit_to_char_budget(&mut fitted, budget, NARROW_THE_QUERY, &compact_chars) {
+            if !fit_to_char_budget(&mut fitted, budget, NARROW_THE_QUERY, None, &compact_chars) {
                 continue;
             }
             if compact_chars(&fitted) > budget {
@@ -1034,6 +1045,7 @@ mod tests {
             &mut value,
             10_000,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
         assert_eq!(value, before);
@@ -1051,6 +1063,7 @@ mod tests {
             &mut coverage,
             10,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
         assert_eq!(coverage, before);
@@ -1062,6 +1075,7 @@ mod tests {
             &mut no_showing,
             10,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
         assert_eq!(no_showing, before);
@@ -1090,6 +1104,7 @@ mod tests {
             &mut value,
             550,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
 
@@ -1122,6 +1137,7 @@ mod tests {
             &mut value,
             450,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
 
@@ -1163,6 +1179,7 @@ mod tests {
             &mut value,
             budget,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
 
@@ -1187,6 +1204,63 @@ mod tests {
                 .iter()
                 .any(|h| h.as_str().unwrap().contains("output.max_response_chars")),
             "the hint lands on the largest list: {value}"
+        );
+    }
+
+    /// Where the command says how a cut item's list is listed whole, the size
+    /// hint says it once, beside the narrowing, and no list carries a command
+    /// of its own; without one the hint names the narrowing alone.
+    #[test]
+    fn the_size_hint_says_once_how_to_list_a_cut_list_whole() {
+        let value = || {
+            let rows: Vec<serde_json::Value> = (0..6)
+                .map(|row| {
+                    let callers: Vec<serde_json::Value> = (0..8)
+                        .map(|caller| serde_json::json!({ "name": format!("caller_{row}_{caller}") }))
+                        .collect();
+                    serde_json::json!({
+                        "name": format!("changed_{row}"),
+                        "callers": { "count": 8, "showing": 8, "items": callers },
+                    })
+                })
+                .collect();
+            serde_json::json!({ "changes": { "count": 6, "showing": 6, "items": rows } })
+        };
+        let relist = "list a row's cut callers whole, at its file:line:column, with symora callers -- <location>";
+        let hint =
+            |value: &serde_json::Value| value["changes"]["hints"][0].as_str().unwrap().to_string();
+
+        let mut named = value();
+        assert!(fit_to_char_budget(
+            &mut named,
+            900,
+            NARROW_THE_QUERY,
+            Some(relist),
+            &compact_chars
+        ));
+        assert!(compact_chars(&named) <= 900, "{named}");
+        assert!(
+            hint(&named).ends_with(&format!(
+                "raise the ceiling in .symora/config.toml; {relist}"
+            )),
+            "{named}"
+        );
+        crate::cli::assert_named_commands_parse(&hint(&named));
+        assert!(!named.to_string().contains("next_commands"), "{named}");
+
+        let mut unnamed = value();
+        assert!(fit_to_char_budget(
+            &mut unnamed,
+            900,
+            NARROW_THE_QUERY,
+            None,
+            &compact_chars
+        ));
+        assert!(
+            hint(&unnamed).ends_with(
+                "were cut to fit: narrow the query or raise the ceiling in .symora/config.toml"
+            ),
+            "{unnamed}"
         );
     }
 
@@ -1222,6 +1296,7 @@ mod tests {
             &mut cut,
             600,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
         let said = hints(&cut);
@@ -1262,6 +1337,7 @@ mod tests {
             &mut value,
             800,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
         let section = &value["callees"];
@@ -1276,6 +1352,7 @@ mod tests {
             &mut value,
             50,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
         assert!(value["callees"]["items"].as_array().unwrap().is_empty());
@@ -1288,6 +1365,7 @@ mod tests {
             &mut value,
             800,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
         assert!(value["callees"]["showing"].as_u64().unwrap() < 4);
@@ -1306,6 +1384,7 @@ mod tests {
             &mut value,
             5,
             NARROW_THE_QUERY,
+            None,
             &compact_chars
         ));
 

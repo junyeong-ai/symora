@@ -129,6 +129,7 @@ fn section_fitted_to_char_budget() {
         &mut value,
         300,
         NARROW_THE_QUERY,
+        None,
         &|v: &serde_json::Value| {
             serde_json::to_string(v)
                 .map(|s| s.chars().count())
@@ -160,6 +161,7 @@ fn fitter_preserves_config_errors_while_trimming_section_items() {
         &mut value,
         200,
         NARROW_THE_QUERY,
+        None,
         &|v: &serde_json::Value| {
             serde_json::to_string(v)
                 .map(|s| s.chars().count())

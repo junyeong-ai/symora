@@ -178,21 +178,30 @@ impl OutputContext {
     }
 
     pub fn print_success<T: Serialize>(&self, data: T) {
-        self.print_response(data, &[], NARROW_THE_QUERY);
+        self.print_response(data, &[], NARROW_THE_QUERY, None);
     }
 
-    pub fn print_source<T: Serialize>(&self, data: T, body_paths: &[String]) {
-        self.print_response(data, body_paths, NARROW_THE_QUERY);
+    /// `print_success` for a response that carries source bodies at
+    /// `body_paths`, and items whose own lists `relist` says how to list
+    /// whole where the size target cuts them.
+    pub fn print_source<T: Serialize>(&self, data: T, body_paths: &[String], relist: Option<&str>) {
+        self.print_response(data, body_paths, NARROW_THE_QUERY, relist);
     }
 
     /// `print_success` for a response its reader narrows by other means than
     /// its query, which `narrowing` names for the size-limit hint: a
     /// `diff-impact` narrows to fewer files with `--path`.
-    pub fn print_narrowable<T: Serialize>(&self, data: T, narrowing: &str) {
-        self.print_response(data, &[], narrowing);
+    pub fn print_narrowable<T: Serialize>(&self, data: T, narrowing: &str, relist: Option<&str>) {
+        self.print_response(data, &[], narrowing, relist);
     }
 
-    fn print_response<T: Serialize>(&self, data: T, body_paths: &[String], narrowing: &str) {
+    fn print_response<T: Serialize>(
+        &self,
+        data: T,
+        body_paths: &[String],
+        narrowing: &str,
+        relist: Option<&str>,
+    ) {
         if self.options.quiet {
             return;
         }
@@ -225,6 +234,7 @@ impl OutputContext {
                 &mut response,
                 self.max_response_chars,
                 narrowing,
+                relist,
                 &measure,
             ) {
                 tracing::debug!("response fitted to output.max_response_chars");

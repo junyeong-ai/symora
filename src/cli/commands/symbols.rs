@@ -9,6 +9,7 @@ use crate::app::App;
 use crate::cli::commands::common::parse_symbol_kind;
 use crate::cli::response::disclosure::{Cap, CoverageReason, LowerBound, with_cap};
 use crate::cli::response::{ReferenceCount, Section, SymbolOutput, SymbolSource};
+use crate::cli::utils::shell_arg;
 use crate::cli::{FileSymbols, OutputError, resolve_project_file};
 use crate::constants::defaults::REFERENCE_COUNT_CONCURRENCY;
 use crate::models::lsp::FindSymbolsOptions;
@@ -86,6 +87,25 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
     };
 
     let source = SymbolSource::new(args.body, args.signature);
+    // This listing again, as the size fitter names it for a row whose nested
+    // declarations it cuts: the same depth, filters and source.
+    let rerun = [
+        Some(format!(" --depth={effective_depth}")),
+        args.kind
+            .as_deref()
+            .map(|kind| format!(" --kind={}", shell_arg(kind))),
+        args.exclude
+            .as_deref()
+            .map(|kind| format!(" --exclude={}", shell_arg(kind))),
+        args.structural.then(|| " --structural".to_string()),
+        args.refs.then(|| " --refs".to_string()),
+        args.body.then(|| " --body".to_string()),
+        args.signature.then(|| " --signature".to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<String>();
+    let file = shell_arg(&ctx.relative_path(&abs_path));
     let options = FindSymbolsOptions::default().with_depth(effective_depth);
     let options = match source {
         SymbolSource::Location => options,
@@ -156,6 +176,7 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                 );
             }
             let body_paths = SymbolOutput::body_paths(&items);
+            let relist = children_relist(&items, &rerun, &file);
             ctx.print_source(
                 FileSymbolsOutput {
                     backend: answer.backend,
@@ -165,6 +186,7 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                     ),
                 },
                 &body_paths,
+                relist.as_deref(),
             );
         }
         Err(e) => ctx.print_error(e),
@@ -262,6 +284,18 @@ fn unreferenced_hint(items: &[SymbolOutput]) -> Option<String> {
     })
 }
 
+/// How a reader lists a row's nested declarations whole where the size
+/// target cut them: this listing again, confined to the row's `name_path`,
+/// with `rerun`'s depth, filters and source. Absent where no row nests any.
+fn children_relist(items: &[SymbolOutput], rerun: &str, file: &str) -> Option<String> {
+    items.iter().any(|item| item.children.is_some()).then(|| {
+        format!(
+            "list a row's cut children whole, for its name_path, with symora symbols \
+             --symbol=\"<symbol>\"{rerun} -- {file}"
+        )
+    })
+}
+
 /// A file's symbol list beside what produced it: an AST answer is flat and
 /// carries no server-assigned kinds, so a caller reads `backend` before it
 /// reads absence as structure.
@@ -283,4 +317,63 @@ fn parse_kind_list(kinds: &Option<String>) -> Result<Option<Vec<SymbolKind>>, Ou
         .map(parse_symbol_kind)
         .collect::<Result<Vec<_>, _>>()?;
     Ok((!kinds.is_empty()).then_some(kinds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::response::LocationOutput;
+
+    fn row(name_path: Option<&str>, children: Option<Vec<SymbolOutput>>) -> SymbolOutput {
+        SymbolOutput {
+            name: name_path.unwrap_or("anonymous").to_string(),
+            name_path: name_path.map(str::to_string),
+            kind: "class".to_string(),
+            location: LocationOutput {
+                file: "src/shapes.py".to_string(),
+                line: 1,
+                column: 7,
+                end_line: None,
+                end_column: None,
+                snippet: None,
+                degraded_column: None,
+            },
+            container: None,
+            refs: None,
+            test_refs: None,
+            prod_refs: None,
+            refs_status: None,
+            signature: None,
+            documentation: None,
+            body: None,
+            body_omitted: None,
+            children: children.map(Section::new),
+        }
+    }
+
+    /// A row's cut children are listed whole by this listing confined to the
+    /// row's path; a listing whose rows nest nothing has no such list.
+    #[test]
+    fn a_rows_cut_children_are_listed_whole_by_the_listing_at_its_path() {
+        let nesting = [row(
+            Some("Shape"),
+            Some(vec![row(Some("Shape/area"), None)]),
+        )];
+        let flat = [row(Some("free"), None)];
+
+        let relist =
+            children_relist(&nesting, " --depth=2", "'src/shapes.py'").expect("a row nests");
+
+        assert!(
+            relist.ends_with(
+                "with symora symbols --symbol=\"<symbol>\" --depth=2 -- 'src/shapes.py'"
+            ),
+            "{relist}"
+        );
+        crate::cli::assert_named_commands_parse(&relist);
+        assert_eq!(
+            children_relist(&flat, " --depth=2", "'src/shapes.py'"),
+            None
+        );
+    }
 }
