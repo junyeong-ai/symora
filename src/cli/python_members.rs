@@ -22,26 +22,33 @@
 //! - `member_shadowed`: the interpreter symora hands the server — the
 //!   `python.pythonPath` setting, or the project's own environment
 //!   ([`venv_python`]) — installs it editable (PEP 610 `dir_info.editable`)
-//!   from a directory outside the project.
+//!   from a directory outside the project, or installs it as a copy: not
+//!   editable, its `RECORD` putting into site-packages a top-level package
+//!   or module the member holds (under its `src` or its own directory),
+//!   which pyright then binds every import of it to, wherever that
+//!   site-packages lies. `installed_from` is the editable source, or the
+//!   site-packages directory holding the copy.
 //! - `member_unresolved`: symora hands the server no interpreter, so the
 //!   server picks its own, which symora cannot see. Nothing then proves the
 //!   member resolves to this tree, so every member is unresolved. What symora
 //!   can see is stated beside it: whether `$VIRTUAL_ENV`, which lies outside
-//!   the project or it would have been handed over, installs the member from
-//!   outside it too, and so whether any interpreter symora can see installs
+//!   the project or it would have been handed over, shadows the member by
+//!   the same reading, and so whether any interpreter symora can see installs
 //!   the members at all. That is evidence about the server's choice, not a
 //!   reading of it.
 //!
 //! Limits, each a member read as resolving here when it may not: an
-//! environment's installs are read only as [`editable_installs`] reads them,
-//! so a member installed into it by copy rather than editable, or recorded
-//! without PEP 610, is not flagged; a selected interpreter that does not
-//! install a member at all is not flagged, since the server may still reach
-//! it through `extraPaths` or its execution root, which this does not read;
-//! a `python.pythonPath` setting that is no string is not read; and
-//! `$VIRTUAL_ENV` is read from the process running the command, while a
-//! daemon's servers run with the daemon's own, fixed when it started. A
-//! workspace declared by anything but uv is not read.
+//! environment's installs are read only as [`installs`] reads them, so one
+//! recorded without a `.dist-info` directory is not flagged, nor a copy
+//! whose `RECORD` installs only an extension module, nor one whose packages
+//! the member holds under a `module-root` other than `src` or its own
+//! directory; a selected interpreter that does not install a member at all
+//! is not flagged, since the server may still reach it through `extraPaths`
+//! or its execution root, which this does not read; a `python.pythonPath`
+//! setting that is no string is not read; and `$VIRTUAL_ENV` is read from
+//! the process running the command, while a daemon's servers run with the
+//! daemon's own, fixed when it started. A workspace declared by anything
+//! but uv is not read.
 
 use std::path::{Path, PathBuf};
 
@@ -52,7 +59,7 @@ use crate::cli::response::CoverageGap;
 use crate::cli::response::disclosure::CoverageReason;
 use crate::config::LspRuntimeConfig;
 use crate::infra::lsp::init_options::{
-    editable_installs, normalized_distribution_name, venv_python, virtual_env_python,
+    Install, InstallKind, installs, normalized_distribution_name, venv_python, virtual_env_python,
 };
 use crate::models::symbol::Language;
 
@@ -106,10 +113,51 @@ pub struct MemberGap {
     pub path: String,
     /// [`CoverageReason::MemberShadowed`] or [`CoverageReason::MemberUnresolved`].
     pub reason: CoverageReason,
-    /// The directory an environment installs it from, outside the project:
-    /// the selected interpreter's for a shadowed member, `$VIRTUAL_ENV`'s
-    /// for an unresolved one.
+    /// Where an environment resolves it other than to this tree: the
+    /// selected interpreter's for a shadowed member, `$VIRTUAL_ENV`'s for an
+    /// unresolved one. An editable install's source outside the project, or
+    /// the site-packages directory holding a copy.
     pub installed_from: Option<PathBuf>,
+    /// `installed_from` holds a copy rather than an editable source.
+    pub copied: bool,
+}
+
+/// Where an install resolves a member other than to this tree.
+struct Shadow {
+    from: PathBuf,
+    copied: bool,
+}
+
+/// Where the install of `member` among `installs` resolves it other than to
+/// this tree: an editable source outside the project, or the site-packages
+/// directory holding a copy of a top-level package or module the member
+/// holds, wherever that lies; `None` where it resolves the member here, or
+/// none installs it.
+fn shadowing(root: &Path, member: &Member, installs: &[Install]) -> Option<Shadow> {
+    let install = installs
+        .iter()
+        .find(|install| install.name == member.normalized)?;
+    match &install.kind {
+        InstallKind::Editable(source) => (!source.starts_with(root)).then(|| Shadow {
+            from: source.clone(),
+            copied: false,
+        }),
+        InstallKind::Copy {
+            site_packages,
+            top_level,
+        } => {
+            let directory = root.join(&member.directory);
+            let held = |top: &String| {
+                [directory.join("src"), directory.clone()]
+                    .iter()
+                    .any(|base| base.join(top).is_dir() || base.join(format!("{top}.py")).is_file())
+            };
+            top_level.iter().any(held).then(|| Shadow {
+                from: site_packages.clone(),
+                copied: true,
+            })
+        }
+    }
 }
 
 struct Member {
@@ -137,7 +185,7 @@ pub struct PythonMembers {
     interpreter: Interpreter,
     /// `$VIRTUAL_ENV`'s interpreter, read where symora hands the server none.
     virtual_env: Option<PathBuf>,
-    /// How many members `$VIRTUAL_ENV` installs editable from anywhere.
+    /// How many members `$VIRTUAL_ENV` installs, from anywhere and either way.
     virtual_env_installs: usize,
 }
 
@@ -160,29 +208,22 @@ impl PythonMembers {
         }
         let interpreter = Interpreter::selected(&root, config);
         let names: Vec<String> = members.iter().map(|m| m.normalized.clone()).collect();
-        let outside = |source: &PathBuf| !source.starts_with(&root);
-        let gap = |member: &Member, reason, installed_from| MemberGap {
+        let gap = |member: &Member, reason, shadow: Option<Shadow>| MemberGap {
             name: member.name.clone(),
             path: member.directory.clone(),
             reason,
-            installed_from,
+            copied: shadow.as_ref().is_some_and(|shadow| shadow.copied),
+            installed_from: shadow.map(|shadow| shadow.from),
         };
         let (mut virtual_env, mut virtual_env_installs) = (None, 0);
         let gaps = match (interpreter.path(&root), &interpreter) {
             (Some(selected), _) => {
-                let installs = editable_installs(&selected, &names);
+                let installs = installs(&selected, &names);
                 members
                     .iter()
                     .filter_map(|member| {
-                        let install = installs
-                            .iter()
-                            .find(|install| install.name == member.normalized)
-                            .filter(|install| outside(&install.source))?;
-                        Some(gap(
-                            member,
-                            CoverageReason::MemberShadowed,
-                            Some(install.source.clone()),
-                        ))
+                        let shadow = shadowing(&root, member, &installs)?;
+                        Some(gap(member, CoverageReason::MemberShadowed, Some(shadow)))
                     })
                     .collect()
             }
@@ -190,18 +231,14 @@ impl PythonMembers {
                 virtual_env = virtual_env_python();
                 let installs = virtual_env
                     .as_deref()
-                    .map(|interpreter| editable_installs(interpreter, &names))
+                    .map(|interpreter| installs(interpreter, &names))
                     .unwrap_or_default();
                 virtual_env_installs = installs.len();
                 members
                     .iter()
                     .map(|member| {
-                        let from = installs
-                            .iter()
-                            .find(|install| install.name == member.normalized)
-                            .map(|install| install.source.clone())
-                            .filter(outside);
-                        gap(member, CoverageReason::MemberUnresolved, from)
+                        let shadow = shadowing(&root, member, &installs);
+                        gap(member, CoverageReason::MemberUnresolved, shadow)
                     })
                     .collect()
             }
@@ -305,22 +342,20 @@ impl PythonMembers {
         let fact = match (gap.reason, copy) {
             (CoverageReason::MemberShadowed, false) => format!(
                 "{member}, the workspace member this declaration is in, is installed, in the \
-                 environment of the interpreter symora hands the Python server ({}), from {}, \
-                 outside this project, so the server resolves every import of it to that copy: \
-                 references and calls reaching this declaration from other files are found \
-                 there rather than here, and this answer is a lower bound that retrying does \
-                 not raise",
+                 environment of the interpreter symora hands the Python server ({}), {}, so the \
+                 server resolves every import of it to that copy: references and calls \
+                 reaching this declaration from other files are found there rather than here, \
+                 and this answer is a lower bound that retrying does not raise",
                 self.interpreter_named(),
-                display(gap.installed_from.as_deref()),
+                installed(gap),
             ),
             (CoverageReason::MemberShadowed, true) => format!(
                 "{member} is installed, in the environment of the interpreter symora hands the \
-                 Python server ({}), from {}, outside this project, so the server resolves every \
-                 import of it to that copy, which holds this declaration: this answer is about \
-                 that copy rather than this tree's own declaration, and retrying does not \
-                 change that",
+                 Python server ({}), {}, so the server resolves every import of it to that copy, \
+                 which holds this declaration: this answer is about that copy rather than this \
+                 tree's own declaration, and retrying does not change that",
                 self.interpreter_named(),
-                display(gap.installed_from.as_deref()),
+                installed(gap),
             ),
             (_, false) => format!(
                 "{member}, the workspace member this declaration is in, resolves wherever the \
@@ -328,10 +363,10 @@ impl PythonMembers {
                  none, and {}, so references and calls reaching this declaration from other \
                  files are not established, and retrying does not establish them",
                 match (&gap.installed_from, &self.virtual_env) {
-                    (Some(from), Some(venv)) => format!(
-                        "$VIRTUAL_ENV ({}), outside this project, installs it from {}",
+                    (Some(_), Some(venv)) => format!(
+                        "$VIRTUAL_ENV ({}), outside this project, installs it {}",
                         environment_of(venv).display(),
-                        from.display()
+                        installed(gap)
                     ),
                     _ => "no interpreter symora can see installs it from this tree".to_string(),
                 }
@@ -360,11 +395,18 @@ impl PythonMembers {
         let fact = match first.reason {
             CoverageReason::MemberShadowed => format!(
                 "The environment of the interpreter symora hands the Python server ({}) installs \
-                 {members} from outside this project, so the server resolves every import of \
-                 them to those copies, and cross-file answers about their declarations \
-                 (references, callers, callees, implementations, impact, rename) are lower \
-                 bounds that retrying does not raise",
-                self.interpreter_named()
+                 {members} {}, so the server resolves every import of them to those copies, and \
+                 cross-file answers about their declarations (references, callers, callees, \
+                 implementations, impact, rename) are lower bounds that retrying does not raise",
+                self.interpreter_named(),
+                match (
+                    gaps.iter().any(|gap| !gap.copied),
+                    gaps.iter().any(|gap| gap.copied),
+                ) {
+                    (true, false) => "from outside this project",
+                    (false, _) => "as copies in its site-packages, not editable from this tree",
+                    (true, true) => "from outside this project or as copies in its site-packages",
+                }
             ),
             _ => format!(
                 "symora hands the Python server no interpreter, so it picks its own, and {}: \
@@ -374,7 +416,7 @@ impl PythonMembers {
                 match &self.virtual_env {
                     Some(venv) => format!(
                         "$VIRTUAL_ENV ({}) lies outside this project, so it is not handed to the \
-                         server; it installs {} of them from outside the project{}",
+                         server; it installs {} of them other than editable from this tree{}",
                         environment_of(venv).display(),
                         gaps.iter()
                             .filter(|gap| gap.installed_from.is_some())
@@ -465,9 +507,13 @@ impl Qualifier {
     /// leaves short in a way that no retry, and no `--accept-unconfirmed`,
     /// settles.
     pub fn refusal(&self, operation: &str) -> OutputError {
-        let state = match self.gap.reason {
-            CoverageReason::MemberShadowed => {
+        let state = match (self.gap.reason, self.gap.copied) {
+            (CoverageReason::MemberShadowed, false) => {
                 "is installed into the Python server's environment from outside this project"
+            }
+            (CoverageReason::MemberShadowed, true) => {
+                "is installed into the Python server's environment as a copy, not editable from \
+                 this tree"
             }
             _ => "is not known to resolve to this tree in the Python server's environment",
         };
@@ -527,6 +573,15 @@ fn members_of(root: &Path) -> Vec<Member> {
         .filter(|member| !member.directory.is_empty())
         .map(Member::of)
         .collect()
+}
+
+/// How a gap's environment installs its member, `installed_from` named.
+fn installed(gap: &MemberGap) -> String {
+    let from = display(gap.installed_from.as_deref());
+    match gap.copied {
+        true => format!("as a copy in {from}, not editable from this tree"),
+        false => format!("from {from}, outside this project"),
+    }
 }
 
 /// The environment directory an interpreter at `<env>/bin/python` runs in.
@@ -636,6 +691,7 @@ mod tests {
                 path: "packages/core".to_string(),
                 reason: CoverageReason::MemberShadowed,
                 installed_from: Some(canonical(&other.path().join("packages/core"))),
+                copied: false,
             }]
         );
         let root = canonical(tree.path());
@@ -666,6 +722,72 @@ mod tests {
             "{}",
             refused.message
         );
+    }
+
+    /// A member installed as a copy — no `direct_url.json`, or one recording
+    /// no editable install — whose `RECORD` puts a package the member holds
+    /// into site-packages is shadowed by that copy, even in the tree's own
+    /// environment; one whose copy installs no package the member holds is
+    /// not.
+    #[test]
+    fn a_member_installed_as_a_copy_of_its_package_is_shadowed() {
+        let tree = tempfile::tempdir().unwrap();
+        workspace(
+            tree.path(),
+            &[("packages/core", "core"), ("packages/app", "app")],
+        );
+        for held in ["packages/core/src/core", "packages/app/src/app"] {
+            std::fs::create_dir_all(tree.path().join(held)).unwrap();
+        }
+        environment(&tree.path().join(".venv"), &[]);
+        let site = tree.path().join(".venv/lib/python3.12/site-packages");
+        for (name, direct_url, files) in [
+            (
+                "core",
+                None,
+                "core/__init__.py,sha256=x,1\ncore/errors.py,,\n",
+            ),
+            (
+                "app",
+                Some(r#"{"url": "file:///w", "dir_info": {}}"#),
+                "unrelated/__init__.py,,\n",
+            ),
+        ] {
+            let record = site.join(format!("{name}-0.1.0.dist-info"));
+            std::fs::create_dir_all(&record).unwrap();
+            std::fs::write(record.join("METADATA"), format!("Name: {name}\n")).unwrap();
+            std::fs::write(record.join("RECORD"), files).unwrap();
+            if let Some(direct_url) = direct_url {
+                std::fs::write(record.join("direct_url.json"), direct_url).unwrap();
+            }
+        }
+
+        let members = read(tree.path(), None);
+        assert_eq!(
+            members.gaps(),
+            [MemberGap {
+                name: "core".to_string(),
+                path: "packages/core".to_string(),
+                reason: CoverageReason::MemberShadowed,
+                installed_from: Some(canonical(&site)),
+                copied: true,
+            }]
+        );
+        let qualifier = members
+            .qualifier(&canonical(tree.path()).join("packages/core/src/core/errors.py"))
+            .unwrap();
+        assert!(
+            qualifier.hint.contains("as a copy in"),
+            "{}",
+            qualifier.hint
+        );
+        assert!(
+            qualifier.refusal("Rename").message.contains("as a copy"),
+            "{}",
+            qualifier.hint
+        );
+        let hint = summary(&members).unwrap();
+        assert!(hint.contains("as copies in its site-packages"), "{hint}");
     }
 
     /// A `.venv` that links to another checkout's environment is replaced,
@@ -731,7 +853,10 @@ mod tests {
                 .all(|gap| gap.reason == CoverageReason::MemberUnresolved)
         );
         let hint = summary(&evidence).unwrap();
-        assert!(hint.contains("installs 1 of them from outside"), "{hint}");
+        assert!(
+            hint.contains("installs 1 of them other than editable from this tree"),
+            "{hint}"
+        );
     }
 
     /// The tree's environment installing every member from the tree is the

@@ -71,7 +71,8 @@ struct LanguageStatus {
     python_interpreter: Option<PythonInterpreter>,
     /// The root's uv workspace members whose cross-file answers that
     /// interpreter does not establish here: installed from outside the
-    /// project (`member_shadowed`), or every member where symora hands the
+    /// project or as a site-packages copy (`member_shadowed`), or every
+    /// member where symora hands the
     /// server no interpreter (`member_unresolved`). Omitted where none is.
     #[serde(skip_serializing_if = "Option::is_none")]
     member_gaps: Option<Section<MemberGapOutput>>,

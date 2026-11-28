@@ -134,7 +134,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           packages stay missing, that environment is what to check, and \
                           waiting does not prepare it. member_gaps lists the uv workspace \
                           members it does not resolve to this tree: { name, path, reason \
-                          (member_shadowed: installed from outside the project; \
+                          (member_shadowed: installed from outside the project or as a copy, \
+                          installed_from then its site-packages; \
                           member_unresolved: no interpreter selected), installed_from? }, its \
                           hint naming the remedy.",
             schema_object(
@@ -320,7 +321,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "References to the symbol at file:line[:column]. Check indexing before \
              treating the count as complete; unconfirmed does not verify workspace readiness. \
              coverage_gaps member_shadowed (the server's interpreter installs the declaration's \
-             uv workspace member from another checkout, so imports of it resolve there) or \
+             uv workspace member from another checkout or as a site-packages copy, so imports \
+             of it resolve to that copy) or \
              member_unresolved (no interpreter was handed to the server, so where it resolves \
              is unknown) makes the count a lower bound no retry raises, as it does for \
              find_callers, find_callees, find_implementations, get_impact and get_context; \

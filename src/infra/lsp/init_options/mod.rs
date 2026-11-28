@@ -28,8 +28,7 @@ mod small;
 mod typescript;
 
 pub use discovery::{
-    EditableInstall, editable_installs, normalized_distribution_name, venv_python,
-    virtual_env_python,
+    Install, InstallKind, installs, normalized_distribution_name, venv_python, virtual_env_python,
 };
 
 pub fn init_options(language: Language, root_path: &Path) -> Option<Value> {

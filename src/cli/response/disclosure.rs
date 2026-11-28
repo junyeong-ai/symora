@@ -49,8 +49,8 @@ pub enum CoverageReason {
     /// queried. Narrowing the query to it is the remedy.
     NotSearched,
     /// The Python server's interpreter installs the workspace member holding
-    /// the declaration from outside the project, so every import of it
-    /// resolves to that copy and the answer's cross-file part is a lower
+    /// the declaration from outside the project, or as a copy in its
+    /// site-packages, so every import of it resolves to that copy and the answer's cross-file part is a lower
     /// bound ([`crate::cli::python_members`]). No retry clears it; building
     /// the tree's own environment does.
     MemberShadowed,

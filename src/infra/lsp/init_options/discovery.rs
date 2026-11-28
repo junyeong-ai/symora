@@ -127,15 +127,28 @@ pub fn virtual_env_python() -> Option<PathBuf> {
     is_executable_interpreter(&interpreter).then_some(interpreter)
 }
 
-/// A distribution an environment records as installed in editable mode from
-/// a local directory: PEP 610's `direct_url.json` with `dir_info.editable`.
+/// A distribution an environment records as installed, and how.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EditableInstall {
+pub struct Install {
     /// Its name as its `METADATA` declares it, PEP 503-normalized.
     pub name: String,
-    /// The directory it was installed from, as `direct_url.json`'s `url`
-    /// names it: canonical where it exists, as written where it does not.
-    pub source: PathBuf,
+    pub kind: InstallKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallKind {
+    /// Editable from a local directory, as PEP 610's `direct_url.json` with
+    /// `dir_info.editable` records it: the directory its `url` names,
+    /// canonical where it exists, as written where it does not.
+    Editable(PathBuf),
+    /// Not editable — no `direct_url.json`, or one without
+    /// `dir_info.editable` — with its files copied into `site_packages`
+    /// (canonical): the top-level modules and packages its `RECORD`
+    /// (PEP 376) installs there, never empty.
+    Copy {
+        site_packages: PathBuf,
+        top_level: Vec<String>,
+    },
 }
 
 /// A distribution name as PEP 503 compares names: lowercase, each run of
@@ -154,9 +167,10 @@ pub fn normalized_distribution_name(name: &str) -> String {
     normalized
 }
 
-/// The distributions the environment of `interpreter` installs editable whose
+/// The distributions the environment of `interpreter` installs whose
 /// normalized name is one of `names`, read from its `.dist-info` directories
-/// as installers record them (PEP 376, 566, 610).
+/// as installers record them (PEP 376, 566, 610): editable from a local
+/// directory, or copied into site-packages.
 ///
 /// A `.dist-info` directory is named `{name}-{version}`, so one whose
 /// normalized stem does not begin with a sought name and a `-` records
@@ -165,11 +179,13 @@ pub fn normalized_distribution_name(name: &str) -> String {
 /// environment is the interpreter's prefix, `<prefix>/lib/python*/site-packages`
 /// (`Lib/site-packages` on Windows), so an interpreter whose packages live
 /// elsewhere (a distribution's `dist-packages`, the user site) reads as
-/// installing nothing; an install recorded without PEP 610 (a legacy
-/// `.egg-link`, `setup.py develop`) names no source and is not read; and an
-/// install that is no editable one, a copy of the files in site-packages,
-/// is not read either.
-pub fn editable_installs(interpreter: &Path, names: &[String]) -> Vec<EditableInstall> {
+/// installing nothing; an install recorded without a `.dist-info` directory
+/// (a legacy `.egg-link` or `.egg-info`) is not read; a `direct_url.json`
+/// that does not parse, or an editable one naming no local directory, is
+/// not read; and a copy's `RECORD` is read for its packages and `.py`
+/// modules, so a copy that installs only an extension module (`.so`, `.pyd`)
+/// reads as installing none.
+pub fn installs(interpreter: &Path, names: &[String]) -> Vec<Install> {
     let Some(Ok(prefix)) = interpreter
         .parent()
         .and_then(Path::parent)
@@ -202,15 +218,83 @@ pub fn editable_installs(interpreter: &Path, names: &[String]) -> Vec<EditableIn
             else {
                 continue;
             };
-            if !names.contains(&name) || installs.iter().any(|i: &EditableInstall| i.name == name) {
+            if !names.contains(&name) || installs.iter().any(|i: &Install| i.name == name) {
                 continue;
             }
-            if let Some(source) = editable_source(&record) {
-                installs.push(EditableInstall { name, source });
-            }
+            let kind = match direct_url(&record) {
+                DirectUrl::Editable(Some(source)) => InstallKind::Editable(source),
+                DirectUrl::Editable(None) | DirectUrl::Unreadable => continue,
+                DirectUrl::NotEditable => {
+                    let top_level = record_top_level(&record);
+                    if top_level.is_empty() {
+                        continue;
+                    }
+                    InstallKind::Copy {
+                        site_packages: site.canonicalize().unwrap_or_else(|_| site.clone()),
+                        top_level,
+                    }
+                }
+            };
+            installs.push(Install { name, kind });
         }
     }
     installs
+}
+
+/// What a `.dist-info` directory's `direct_url.json` (PEP 610) says.
+enum DirectUrl {
+    /// `dir_info.editable` is true; the local directory its `url` names,
+    /// where it names one.
+    Editable(Option<PathBuf>),
+    /// There is none, or it records no editable install.
+    NotEditable,
+    /// It cannot be read or parsed, so how it was installed is unknown.
+    Unreadable,
+}
+
+/// The top-level modules and packages a `.dist-info` directory's `RECORD`
+/// (PEP 376) installs into the site-packages directory holding it: each
+/// path's first component, a package directory or a `.py` module, leaving
+/// out what installs elsewhere (a path through `..` or an absolute one),
+/// the metadata directories (`*.dist-info`, `*.data`), `__pycache__`, and
+/// every other top-level file, a `.pth` among them. `RECORD` is CSV whose
+/// first field is the path, quoted where it holds a comma.
+fn record_top_level(record: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(record.join("RECORD")) else {
+        return Vec::new();
+    };
+    let mut top_level: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            let path = match line.strip_prefix('"') {
+                Some(quoted) => quoted.split('"').next()?,
+                None => line.split(',').next()?,
+            };
+            if path.starts_with('/') {
+                return None;
+            }
+            let (first, rest) = match path.split_once('/') {
+                Some((first, rest)) => (first, Some(rest)),
+                None => (path, None),
+            };
+            match rest {
+                Some(_)
+                    if !first.is_empty()
+                        && first != ".."
+                        && first != "__pycache__"
+                        && !first.ends_with(".dist-info")
+                        && !first.ends_with(".data") =>
+                {
+                    Some(first.to_string())
+                }
+                Some(_) => None,
+                None => first.strip_suffix(".py").map(str::to_string),
+            }
+        })
+        .collect();
+    top_level.sort();
+    top_level.dedup();
+    top_level
 }
 
 /// The `Name` header of a `.dist-info` directory's `METADATA`: the headers
@@ -227,24 +311,33 @@ fn metadata_name(record: &Path) -> Option<String> {
         })
 }
 
-/// The local directory a `.dist-info` directory's `direct_url.json` records
-/// an editable install from (PEP 610: a `file://` `url` with
-/// `dir_info.editable` true); `None` for any other install.
-fn editable_source(record: &Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(record.join("direct_url.json")).ok()?;
-    let direct: serde_json::Value = serde_json::from_str(&text).ok()?;
+/// What a `.dist-info` directory's `direct_url.json` records: an editable
+/// install (PEP 610: `dir_info.editable` true) and the local directory a
+/// `file://` `url` names, or no editable install, where there is none or
+/// it says otherwise.
+fn direct_url(record: &Path) -> DirectUrl {
+    let text = match std::fs::read_to_string(record.join("direct_url.json")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DirectUrl::NotEditable,
+        Err(_) => return DirectUrl::Unreadable,
+    };
+    let Ok(direct) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return DirectUrl::Unreadable;
+    };
     if direct["dir_info"]["editable"].as_bool() != Some(true) {
-        return None;
+        return DirectUrl::NotEditable;
     }
-    let url = direct["url"].as_str()?;
-    // A `file:` URL names a local path, with an empty or `localhost` host.
-    let rest = url.strip_prefix("file://")?;
-    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-    if !rest.starts_with('/') {
-        return None;
-    }
-    let source = crate::models::lsp::uri_to_path(&format!("file://{rest}"));
-    Some(source.canonicalize().unwrap_or(source))
+    let source = direct["url"]
+        .as_str()
+        // A `file:` URL names a local path, with an empty or `localhost` host.
+        .and_then(|url| url.strip_prefix("file://"))
+        .map(|rest| rest.strip_prefix("localhost").unwrap_or(rest))
+        .filter(|rest| rest.starts_with('/'))
+        .map(|rest| {
+            let source = crate::models::lsp::uri_to_path(&format!("file://{rest}"));
+            source.canonicalize().unwrap_or(source)
+        });
+    DirectUrl::Editable(source)
 }
 
 /// The venv's site-packages directories: `lib/<python>/site-packages`, and
@@ -359,7 +452,15 @@ mod tests {
 
     /// A `.dist-info` directory recording `name`, with `direct_url` as its
     /// `direct_url.json` where one is given.
-    fn record(site: &Path, stem: &str, name: &str, direct_url: Option<&str>) {
+    /// A `.dist-info` directory recording `name`, with `direct_url` as its
+    /// `direct_url.json` and `files` as its `RECORD` where they are given.
+    fn record(
+        site: &Path,
+        stem: &str,
+        name: &str,
+        direct_url: Option<&str>,
+        files: Option<&[&str]>,
+    ) {
         let record = site.join(format!("{stem}.dist-info"));
         std::fs::create_dir_all(&record).unwrap();
         std::fs::write(
@@ -370,16 +471,25 @@ mod tests {
         if let Some(direct_url) = direct_url {
             std::fs::write(record.join("direct_url.json"), direct_url).unwrap();
         }
+        if let Some(files) = files {
+            let rows: Vec<String> = files
+                .iter()
+                .map(|file| format!("{file},sha256=x,1"))
+                .collect();
+            std::fs::write(record.join("RECORD"), rows.join("\n")).unwrap();
+        }
     }
 
-    /// Each sought distribution the environment records as installed
-    /// editable, by its METADATA name and from the directory its
-    /// `direct_url.json` names, percent-decoded: not one installed by copy,
-    /// one from an archive, one whose stem merely begins with a sought name,
-    /// or one not sought.
+    /// Each sought distribution the environment records, by its METADATA
+    /// name: editable from the directory its `direct_url.json` names,
+    /// percent-decoded, or a copy of the top-level packages and modules its
+    /// `RECORD` installs into site-packages, with no `direct_url.json` or one
+    /// recording no editable install. Not one whose `RECORD` installs no
+    /// module there, one whose stem merely begins with a sought name, or one
+    /// not sought.
     #[cfg(unix)]
     #[test]
-    fn editable_installs_are_the_pep_610_editable_records_of_sought_names() {
+    fn installs_are_the_editable_and_copied_records_of_sought_names() {
         let dir = tempfile::tempdir().unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         let source = elsewhere.path().join("core lib");
@@ -394,36 +504,85 @@ mod tests {
             "Core_Lib-0.1.0",
             "Core.Lib",
             Some(&editable(&encoded)),
+            Some(&["_core_lib.pth", "core_lib-0.1.0.dist-info/RECORD"]),
         );
         record(
             &site,
             "core_lib_extra-1.0",
             "core-lib-extra",
             Some(&editable("/x")),
+            None,
         );
         record(
             &site,
             "copied-1.0",
             "copied",
             Some(r#"{"url": "file:///y", "dir_info": {}}"#),
+            Some(&[
+                "copied/__init__.py",
+                "copied/sub/x.py",
+                "\"copied/a,b.py\"",
+                "copied-1.0.dist-info/METADATA",
+                "copied-1.0.data/scripts/run",
+                "../../../bin/copied",
+                "__pycache__/single.cpython-312.pyc",
+                "single.py",
+                "hook.pth",
+            ]),
+        );
+        record(
+            &site,
+            "plain-1.0",
+            "plain",
+            None,
+            Some(&["plain/__init__.py"]),
         );
         record(
             &site,
             "archived-1.0",
             "archived",
             Some(r#"{"url": "https://h/a.whl", "archive_info": {}}"#),
+            Some(&["archived-1.0.dist-info/METADATA", "../../../bin/archived"]),
         );
-        record(&site, "unsought-1.0", "unsought", Some(&editable("/z")));
+        record(
+            &site,
+            "unread-1.0",
+            "unread",
+            Some("{"),
+            Some(&["unread.py"]),
+        );
+        record(
+            &site,
+            "unsought-1.0",
+            "unsought",
+            None,
+            Some(&["unsought.py"]),
+        );
 
-        let names: Vec<String> = ["core-lib", "copied", "archived"]
+        let names: Vec<String> = ["core-lib", "copied", "plain", "archived", "unread"]
             .map(String::from)
             .to_vec();
+        let site = site.canonicalize().unwrap();
+        let copy = |top_level: &[&str]| InstallKind::Copy {
+            site_packages: site.clone(),
+            top_level: top_level.iter().map(|top| top.to_string()).collect(),
+        };
         assert_eq!(
-            editable_installs(&interpreter, &names),
-            vec![EditableInstall {
-                name: "core-lib".to_string(),
-                source: source.canonicalize().unwrap(),
-            }]
+            installs(&interpreter, &names),
+            vec![
+                Install {
+                    name: "core-lib".to_string(),
+                    kind: InstallKind::Editable(source.canonicalize().unwrap()),
+                },
+                Install {
+                    name: "copied".to_string(),
+                    kind: copy(&["copied", "single"]),
+                },
+                Install {
+                    name: "plain".to_string(),
+                    kind: copy(&["plain"]),
+                },
+            ]
         );
     }
 
