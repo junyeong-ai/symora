@@ -25,6 +25,10 @@ pub struct LspRuntimeConfig {
     /// memory-bound monorepos from spawning a server per language and
     /// running out of file descriptors / RAM.
     pub max_concurrent_servers: usize,
+    /// How long a stopping server has to answer `shutdown`.
+    pub shutdown_wait: Duration,
+    /// How long a server has to exit once sent `exit`.
+    pub exit_wait: Duration,
 }
 
 impl Default for LspRuntimeConfig {
@@ -39,6 +43,8 @@ impl Default for LspRuntimeConfig {
             entry_files: BTreeMap::new(),
             servers: BTreeMap::new(),
             max_concurrent_servers: crate::constants::defaults::LSP_MAX_CONCURRENT_SERVERS,
+            shutdown_wait: crate::constants::defaults::LSP_SHUTDOWN_WAIT,
+            exit_wait: crate::constants::defaults::LSP_EXIT_WAIT,
         }
     }
 }
@@ -53,6 +59,8 @@ impl From<&SymoraConfig> for LspRuntimeConfig {
             entry_files: config.project.entry_files.clone(),
             servers: config.lsp.servers.clone(),
             max_concurrent_servers: crate::constants::defaults::LSP_MAX_CONCURRENT_SERVERS,
+            shutdown_wait: crate::constants::defaults::LSP_SHUTDOWN_WAIT,
+            exit_wait: crate::constants::defaults::LSP_EXIT_WAIT,
         }
     }
 }

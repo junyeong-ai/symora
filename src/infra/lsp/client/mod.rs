@@ -1066,15 +1066,15 @@ impl LspClient {
     }
 
     /// Ask the server to shut down and exit, and wait for it to. One that
-    /// does not answer within 2 s, or does not exit within 5 s of the exit
-    /// notification (less where a deadline the caller runs under ends
-    /// sooner), is killed with its group, and what it started in a session
-    /// of its own outlives it.
+    /// does not answer within the config's `shutdown_wait`, or does not exit
+    /// within its `exit_wait` of the exit notification (less where a deadline
+    /// the caller runs under ends sooner), is killed with its group, and what
+    /// it started in a session of its own outlives it.
     pub async fn shutdown(&self) -> Result<(), LspError> {
         *self.shutdown.write().await = true;
 
-        // Stage 1: Send LSP shutdown request (2s timeout)
-        let shutdown_result = timeout(Duration::from_secs(2), async {
+        // Stage 1: Send LSP shutdown request
+        let shutdown_result = timeout(self.config.shutdown_wait, async {
             self.request::<()>("shutdown", None).await?;
             self.notify("exit", None).await
         })
@@ -1093,7 +1093,7 @@ impl LspClient {
             if !acknowledged {
                 child.start_kill();
             }
-            let remaining = crate::infra::deadline::remaining(Duration::from_secs(5));
+            let remaining = crate::infra::deadline::remaining(self.config.exit_wait);
             match timeout(remaining, child.wait()).await {
                 Ok(Ok(status)) => {
                     tracing::debug!("{} language server exited: {:?}", self.language, status);

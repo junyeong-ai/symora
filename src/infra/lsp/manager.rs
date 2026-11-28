@@ -641,7 +641,13 @@ pub(crate) mod tests {
         let release = root.path().join("release");
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/lsp/configuration_server.py");
+        // The order is read from what ran, so no shutdown bound may end before
+        // this test's own wait does, however long a loaded machine takes to
+        // schedule a server's answer or its exit.
+        let progress = Duration::from_secs(2 * server_lifetime::START_BUDGET_SECS);
         let mut config = crate::config::LspRuntimeConfig::default();
+        config.shutdown_wait = progress;
+        config.exit_wait = progress;
         for language in [Language::Python, Language::Go] {
             config.servers.insert(
                 language.lsp_id().into(),
@@ -668,7 +674,6 @@ pub(crate) mod tests {
             let manager = Arc::clone(&manager);
             async move { manager.shutdown_all().await }
         });
-        let progress = Duration::from_secs(2 * server_lifetime::START_BUDGET_SECS);
         let told = tokio::time::timeout(progress, async {
             while !root.path().join("python").exists() || !root.path().join("go").exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;

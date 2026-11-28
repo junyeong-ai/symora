@@ -59,6 +59,15 @@ pub mod defaults {
     /// Keeps memory-bound monorepos from exhausting RAM / FDs.
     pub const LSP_MAX_CONCURRENT_SERVERS: usize = 12;
 
+    /// How long a stopping language server has to answer `shutdown` before
+    /// it is killed without being sent `exit`: long enough for one that is
+    /// alive, short enough that one that hangs does not hold a command's exit.
+    pub const LSP_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// How long a language server has to exit once sent `exit` before it is
+    /// killed with its group.
+    pub const LSP_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
     /// MCP HTTP transport default port.
     pub const MCP_HTTP_DEFAULT_PORT: u16 = 7700;
 }
