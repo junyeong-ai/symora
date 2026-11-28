@@ -38,6 +38,8 @@ PATH="$PWD/tests/fixtures/python/monorepo/node_modules/.bin:$PATH" \
   cargo test --test lang_fixtures --test parity -- --include-ignored
 ```
 
+The tests point `XDG_CONFIG_HOME` at an empty directory, so a version manager's shim that reads its global configuration there, as mise's does, cannot start `node`, and pyright never answers `initialize`: put the interpreter's own directory on `PATH` ahead of the shim.
+
 A test that reaches a daemon runs its own copy of the binary. A daemon is per installation (executable path), so without a private copy a daemon that a manual run of the same build left behind, started under another environment, would answer the test.
 
 A unit test sees none of the developer's user-level state: `services::dist::paths` gives each test thread a home under `/dev/null`, where no configuration exists and nothing can be created. A unit test that writes where a run writes in the user's home holds a `test_home::TestHome` over a temporary directory.
