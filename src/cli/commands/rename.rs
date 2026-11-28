@@ -5,7 +5,8 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::commands::edit::apply_workspace_edits;
 use crate::cli::commands::edit::refresh_store_files;
-use crate::cli::response::FileChangeOutput;
+use crate::cli::python_members::{Qualifier, qualifier_among};
+use crate::cli::response::{CoverageGap, FileChangeOutput};
 use crate::cli::utils::find_named_at_position;
 use crate::cli::{OutputError, ParsedLocation};
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
@@ -39,6 +40,13 @@ struct RenameOutput {
     message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     indexing: Option<IndexingDegradation>,
+    /// A previewed edit set whose files' workspace member the Python server
+    /// resolves elsewhere (`member_shadowed`) or is not known to resolve here
+    /// (`member_unresolved`): it is short, and applying it is refused.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    coverage_gaps: Vec<CoverageGap>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    hints: Vec<String>,
     changes: Vec<FileChangeOutput>,
 }
 
@@ -63,6 +71,18 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
         }
     };
 
+    // The edit set is the server's references, so a member it resolves
+    // elsewhere leaves it short whatever its readiness: checked first, and
+    // `--accept-unconfirmed` does not accept it.
+    let edited = answer.data.iter().flat_map(|result| &result.changes);
+    let member = qualifier_among(
+        app,
+        std::iter::once(loc.file.as_path()).chain(edited.map(|change| change.file.as_path())),
+    );
+    if let Some(member) = member.as_ref().filter(|_| !args.dry_run) {
+        ctx.print_error(member.refusal("Rename"));
+        return Ok(());
+    }
     if let Some(refusal) =
         refuse_partial_rename(answer.indexing, args.dry_run, args.accept_unconfirmed)
     {
@@ -108,8 +128,21 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
                         dry_run: args.dry_run,
                         affected_files: changes.len(),
                         changes,
-                        message: rename_message(args.dry_run, answer.indexing).map(str::to_string),
+                        message: match &member {
+                            Some(_) => Some(
+                                "Preview only, and short: the edit set leaves out references \
+                                 the language server resolves to another copy of the \
+                                 declaration's workspace member, so applying it is refused \
+                                 until hints' remedy is applied."
+                                    .to_string(),
+                            ),
+                            None => {
+                                rename_message(args.dry_run, answer.indexing).map(str::to_string)
+                            }
+                        },
                         indexing: answer.indexing,
+                        coverage_gaps: member.iter().map(Qualifier::coverage_gap).collect(),
+                        hints: member.into_iter().map(|q| q.hint).collect(),
                     };
                     ctx.print_success(response);
                 }

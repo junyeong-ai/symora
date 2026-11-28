@@ -23,6 +23,15 @@ pub struct DefinitionOutput {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing: Option<IndexingDegradation>,
+    /// A definition in another checkout's copy of a workspace member the
+    /// Python server resolves elsewhere (`member_shadowed`) or is not known
+    /// to resolve here (`member_unresolved`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub coverage_gaps: Vec<super::CoverageGap>,
+    /// Which of this tree's files a definition outside the project is
+    /// another checkout's copy of, where the relative path proves it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,6 +74,8 @@ impl DefinitionOutput {
                 indexing,
             )),
             indexing,
+            coverage_gaps: Vec::new(),
+            hints: Vec::new(),
         }
     }
 }

@@ -23,8 +23,11 @@ use crate::app::App;
 use crate::cli::analysis::Anchor;
 use crate::cli::call_graph::{self, Direction, NodeKey, WalkConfig, key_of};
 use crate::cli::commands::common::{Reach, anchor_of, execute_list};
+use crate::cli::python_members::{Qualifier, qualifier};
 use crate::cli::response::disclosure::{Cap, with_cap};
-use crate::cli::response::{CallHierarchyOutput, LocationOutput, NOT_CALLABLE, Section};
+use crate::cli::response::{
+    CallHierarchyOutput, CoverageGap, LocationOutput, NOT_CALLABLE, Section,
+};
 use crate::cli::utils::shell_arg;
 use crate::cli::{LocationArg, ParsedLocation};
 use crate::constants::defaults::CALL_GRAPH_MAX_DEPTH;
@@ -146,6 +149,12 @@ struct CalleesPathOutput {
     anchor_status: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     indexing: Option<IndexingDegradation>,
+    /// An endpoint lies in a workspace member the Python server resolves
+    /// elsewhere (`member_shadowed`) or is not known to resolve here
+    /// (`member_unresolved`): calls crossing into it may reach another
+    /// checkout's copy, so the verdict is never `no_static_path`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    coverage_gaps: Vec<CoverageGap>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     hints: Vec<String>,
     /// The ordered frames from the first hop through the target — present
@@ -228,14 +237,17 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
         .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
         .collect();
 
-    let hints = anchor.anchor_hints(ctx.root(), "callees");
+    let member = qualifier(app, &anchor.file);
+    let mut hints: Vec<String> = member.iter().map(|q| q.hint.clone()).collect();
+    hints.extend(anchor.anchor_hints(ctx.root(), "callees"));
 
     ctx.print_success(CalleesReachOutput {
         section: with_cap(
             Section::with_total(items, total)
                 .with_hints(hints)
                 .with_indexing(walk.indexing)
-                .with_incomplete(walk.is_lower_bound()),
+                .with_incomplete(walk.is_lower_bound())
+                .with_coverage_gaps(member.iter().map(Qualifier::coverage_gap).collect()),
             Cap::Option("--limit"),
         ),
         depth: walk.depth_reached(),
@@ -311,6 +323,14 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
             .filter(|symbol| !symbol.kind.is_callable() && chain_keys.is_none())
     };
     let (uncallable_anchor, uncallable_target) = (uncallable(&anchor), uncallable(&target));
+    let mut members: Vec<Qualifier> = Vec::new();
+    for endpoint in [&anchor, &target] {
+        if let Some(found) = qualifier(app, &endpoint.file)
+            && !members.iter().any(|q| q.gap == found.gap)
+        {
+            members.push(found);
+        }
+    }
 
     let (reachability, chain) = match chain_keys {
         Some(keys) => {
@@ -346,7 +366,8 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
                 || !target.is_resolved()
                 || !anchor.is_resolved()
                 || uncallable_anchor.is_some()
-                || uncallable_target.is_some();
+                || uncallable_target.is_some()
+                || !members.is_empty();
             let verdict = if bounded {
                 Reachability::NotReachedWithinBound
             } else {
@@ -356,11 +377,12 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         }
     };
 
-    let mut hints = anchor.verdict_hints(
+    let mut hints: Vec<String> = members.iter().map(|q| q.hint.clone()).collect();
+    hints.extend(anchor.verdict_hints(
         "from-position",
         ctx.root(),
         "anchor at a declaration (e.g. a `symora search symbols` result)",
-    );
+    ));
     hints.extend(target.verdict_hints(
         "--to target",
         ctx.root(),
@@ -399,6 +421,7 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         target_status: endpoint_status(&target, uncallable_target.is_some()),
         anchor_status: endpoint_status(&anchor, uncallable_anchor.is_some()),
         indexing: walk.indexing,
+        coverage_gaps: members.iter().map(Qualifier::coverage_gap).collect(),
         hints,
     });
 
@@ -503,6 +526,7 @@ mod tests {
             target_status: None,
             anchor_status: None,
             indexing: None,
+            coverage_gaps: Vec::new(),
             hints: vec![],
         };
         let v = serde_json::to_value(out).unwrap();
@@ -533,6 +557,7 @@ mod tests {
             target_status: None,
             anchor_status: None,
             indexing: None,
+            coverage_gaps: Vec::new(),
             hints: vec![],
         };
         let v = serde_json::to_value(out).unwrap();
@@ -557,6 +582,7 @@ mod tests {
             target_status: None,
             anchor_status: None,
             indexing: None,
+            coverage_gaps: Vec::new(),
             hints: vec![],
         };
         let v = serde_json::to_value(out).unwrap();
@@ -588,6 +614,7 @@ mod tests {
             target_status: Some("not_a_symbol"),
             anchor_status: None,
             indexing: None,
+            coverage_gaps: Vec::new(),
             hints: vec!["did not resolve to a symbol".to_string()],
         };
         let v = serde_json::to_value(out).unwrap();

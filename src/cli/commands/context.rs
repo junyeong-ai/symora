@@ -67,6 +67,12 @@ pub struct ContextArgs {
 pub struct ContextOutput {
     /// Target symbol information
     pub target: TargetOutput,
+    /// The target's workspace member, where the Python server resolves it
+    /// elsewhere (`member_shadowed`) or is not known to resolve it here
+    /// (`member_unresolved`): references, callers and callees reaching it
+    /// from other files are then not established.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub coverage_gaps: Vec<crate::cli::response::CoverageGap>,
     /// Reference summary (pure fact)
     pub refs: RefOutput,
     /// What the reference summary does not settle. Omitted when it settles it.
@@ -114,7 +120,8 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
         }
     };
 
-    let response = fetch_context(
+    let member = crate::cli::python_members::qualifier(app, &analysis.anchor().file);
+    let mut response = fetch_context(
         app.lsp.as_ref(),
         &args,
         ctx.root(),
@@ -123,6 +130,10 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
         analysis,
     )
     .await;
+    if let Some(member) = member {
+        response.hints.insert(0, member.hint.clone());
+        response.coverage_gaps.push(member.coverage_gap());
+    }
 
     let mut body_paths = Vec::new();
     if response.target.body.is_some() {
@@ -260,6 +271,7 @@ async fn fetch_context(
 
     ContextOutput {
         target,
+        coverage_gaps: Vec::new(),
         refs: refs_summary,
         hints: analysis
             .member_reach_hint()

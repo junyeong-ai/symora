@@ -7,6 +7,7 @@ pub mod file_symbols;
 pub mod input_error;
 pub mod location;
 pub mod output;
+pub mod python_members;
 pub mod response;
 pub mod symbol_discovery;
 pub mod utils;

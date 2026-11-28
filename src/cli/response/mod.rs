@@ -118,9 +118,12 @@ pub struct Section<T> {
     /// reads as "not searched here" rather than "no such symbol", and a
     /// short one reads as partial rather than whole. Populated by every
     /// symbol-search route — index-backed, wildcard, and workspace-only
-    /// alike — at any result count; omitted everywhere else and when empty.
-    /// A new `Section<T>` field is justified only when it applies to all
-    /// list responses — this one is scoped by being inert elsewhere.
+    /// alike — at any result count, and by a Python answer about one
+    /// declaration whose workspace member the server's environment does not
+    /// resolve here (`member_shadowed`, `member_unresolved`); omitted
+    /// everywhere else and when empty. A new `Section<T>` field is justified
+    /// only when it applies to all list responses — this one is scoped by
+    /// being inert elsewhere.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub coverage_gaps: Vec<CoverageGap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,8 +211,8 @@ impl<T> Section<T> {
         self
     }
 
-    /// Attach the languages a search could not cover (see the field doc).
-    /// Search-only; other list responses leave it empty.
+    /// Attach the languages a search could not cover, or the member gap of
+    /// a declaration's answer (see the field doc).
     pub fn with_coverage_gaps(mut self, coverage_gaps: Vec<CoverageGap>) -> Self {
         self.coverage_gaps = coverage_gaps;
         self

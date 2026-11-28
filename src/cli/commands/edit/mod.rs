@@ -14,6 +14,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 
 use crate::app::App;
+use crate::cli::python_members::qualifier;
 use crate::cli::response::disclosure::{Cap, with_cap};
 use crate::cli::response::{LineRange, Section};
 use crate::cli::utils::shell_arg;
@@ -362,6 +363,15 @@ async fn symbol_edit(
         ensure_anchor_not_stale(symbol, &doc.lines)?;
         ensure_exclusive_line_ownership(&doc.lines, symbol, &span, &addressed.declared_with)?;
     }
+    // The caller files are the declaration's references, which a member the
+    // server resolves elsewhere leaves short: a check that would pass for
+    // the files it cannot see is refused before anything is written.
+    if verify_callers
+        && !dry_run
+        && let Some(member) = qualifier(app, file)
+    {
+        anyhow::bail!(member.refusal("The edit with --verify-callers"));
+    }
     // Resolve the caller files BEFORE the edit lands: editing a symbol does not
     // move which files reference it, and resolving against the pre-edit state
     // avoids any post-edit position drift. Their diagnostics are pulled after
@@ -533,6 +543,12 @@ async fn delete_symbol(
     ensure_anchor_not_stale(symbol, &doc.lines)?;
     ensure_exclusive_line_ownership(&doc.lines, symbol, &span, &addressed.declared_with)?;
 
+    // A member the server resolves elsewhere hides the references the check
+    // would find from other files, so no answer of it verifies their absence.
+    let member = qualifier(app, file);
+    if expect_no_references && let Some(member) = &member {
+        anyhow::bail!(member.refusal("Delete with --expect-no-references"));
+    }
     let check = check_dangling_references(app, addressed, &span, dry_run).await;
     if expect_no_references {
         ensure_no_dangling_references(&symbol.name, &check)?;
@@ -546,7 +562,13 @@ async fn delete_symbol(
     let target = Some((symbol.path().to_string(), symbol.kind.to_string()));
     let mut output = doc.commit(app, "delete", splice, span, target, dry_run)?;
     match check {
-        ReferenceCheck::Checked { section, .. } => output.dangling_references = Some(section),
+        ReferenceCheck::Checked { mut section, .. } => {
+            if let Some(member) = member {
+                section.hints.insert(0, member.hint.clone());
+                section.coverage_gaps.push(member.coverage_gap());
+            }
+            output.dangling_references = Some(section);
+        }
         ReferenceCheck::Unverifiable(status) => output.references_status = Some(status),
         ReferenceCheck::Unplaced => output.references_status = Some("unavailable"),
     }

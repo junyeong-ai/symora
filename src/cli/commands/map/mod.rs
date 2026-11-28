@@ -21,6 +21,7 @@ mod workspace;
 
 use tests_of::TestFileOutput;
 use workspace::{EntryPointOutput, PackageOutput};
+pub(crate) use workspace::{UvMember, uv_members};
 
 #[derive(Args, Debug)]
 #[command(

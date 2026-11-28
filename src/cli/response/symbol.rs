@@ -25,8 +25,10 @@ pub struct SymbolOutput {
     pub test_refs: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prod_refs: Option<usize>,
-    /// Present when the counts are not authoritative: `indexing_degraded`
-    /// (they are a lower bound), or why none was taken, in the
+    /// Present when the counts are not authoritative: `member_shadowed` or
+    /// `member_unresolved` (the file's Python workspace member resolves
+    /// elsewhere, or is not known to resolve here), `indexing_degraded`
+    /// (either way a lower bound), or why none was taken, in the
     /// `coverage_gaps` reasons — `timed_out`, `unsupported`,
     /// `server_not_installed`, `not_consulted`, or `unavailable` (the query
     /// failed, or was not asked because the language server reads no

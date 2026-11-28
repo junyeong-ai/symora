@@ -132,7 +132,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           interpreter a fresh server receives (its source: settings, \
                           project_environment or server_default); where references across \
                           packages stay missing, that environment is what to check, and \
-                          waiting does not prepare it.",
+                          waiting does not prepare it. member_gaps lists the uv workspace \
+                          members it does not resolve to this tree: { name, path, reason \
+                          (member_shadowed: installed from outside the project; \
+                          member_unresolved: no interpreter selected), installed_from? }, its \
+                          hint naming the remedy.",
             schema_object(
                 &[(
                     "language",
@@ -148,7 +152,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 "languages",
                 "array",
                 "Per language: server, installed, serves, symbol_extraction, ast_search, \
-                 python_interpreter for Python, and install when it does not serve. `serves` is \
+                 python_interpreter and member_gaps for Python, and install when it does not \
+                 serve. `serves` is \
                  the capability — `installed` only says a file resolves at that path, which a \
                  version-manager shim satisfies too",
             ),
@@ -314,6 +319,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "find_references",
             "References to the symbol at file:line[:column]. Check indexing before \
              treating the count as complete; unconfirmed does not verify workspace readiness. \
+             coverage_gaps member_shadowed (the server's interpreter installs the declaration's \
+             uv workspace member from another checkout, so imports of it resolve there) or \
+             member_unresolved (no interpreter was handed to the server, so where it resolves \
+             is unknown) makes the count a lower bound no retry raises, as it does for \
+             find_callers, find_callees, find_implementations, get_impact and get_context; \
+             a target declared outside the project is named as another checkout's copy of \
+             this tree's file where the relative path proves it. \
              A Python __init__ or __new__ counts only the references to the method itself, \
              since pyright reports Circle(…) as a reference to the class.",
             with_extra(
@@ -701,7 +713,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ])),
         ToolDefinition::read_only(
             "get_diff_impact",
-            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes; untracked files are in neither, and a working-tree run names them in hints. path confines the analysis to the changed files some git pathspecs match, and a rename when either of its paths does, while references and callers are still searched across the whole project: changed_files_count then counts the matched files and excluded_files_count the changed files left out, which nothing in the answer measures. When max_symbols, the lsp.timeout_secs budget or the response size cuts a large diff short, measure it a part at a time with path. Reports changed symbols, static references, and unmeasured files; total_references is absent when no row was measured. Check incomplete, unmeasured_files, excluded_files_count, and each row's refs_status and callers_status before interpreting totals: refs_status marks a lower bound (indexing_degraded) or why no count was taken (timed_out when the lsp.timeout_secs budget ran out, unsupported, unavailable), and refs_status_counts and callers_status_counts count the rows of each status, so a total is a lower bound by those rows alone; test references are not execution coverage. Documentation and configuration files (Markdown, YAML, TOML, JSON) are listed in unmeasured_files rather than read by key. changes is a list with count, showing and truncated, and with callers, a changed function's, method's or constructor's callers is one too, read off the references its count was taken from (callers_status references_derived, not verified calls): every callable whose code holds one, a use as a value counted like a call, an import outside a callable not at all; another kind's row reads not_callable, and call_hierarchy asks the server instead. callers is absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind, and its position is the first line it removed.",
+            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes; untracked files are in neither, and a working-tree run names them in hints. path confines the analysis to the changed files some git pathspecs match, and a rename when either of its paths does, while references and callers are still searched across the whole project: changed_files_count then counts the matched files and excluded_files_count the changed files left out, which nothing in the answer measures. When max_symbols, the lsp.timeout_secs budget or the response size cuts a large diff short, measure it a part at a time with path. Reports changed symbols, static references, and unmeasured files; total_references is absent when no row was measured. Check incomplete, unmeasured_files, excluded_files_count, and each row's refs_status and callers_status before interpreting totals: refs_status marks a lower bound (member_shadowed or member_unresolved where the declaration's Python workspace member resolves to another checkout or is not known to, which no retry raises and a hint names, also as callers_status; indexing_degraded) or why no count was taken (timed_out when the lsp.timeout_secs budget ran out, unsupported, unavailable), and refs_status_counts and callers_status_counts count the rows of each status, so a total is a lower bound by those rows alone; test references are not execution coverage. Documentation and configuration files (Markdown, YAML, TOML, JSON) are listed in unmeasured_files rather than read by key. changes is a list with count, showing and truncated, and with callers, a changed function's, method's or constructor's callers is one too, read off the references its count was taken from (callers_status references_derived, not verified calls): every callable whose code holds one, a use as a value counted like a call, an import outside a callable not at all; another kind's row reads not_callable, and call_hierarchy asks the server instead. callers is absent where callers_status says none was obtained. A deletion whose declarations were not identified has no name or kind, and its position is the first line it removed.",
             {
                 let mut schema = schema_object(&[
                     ("revision", "string", "One base revision, not a revision range; default HEAD"),
@@ -877,7 +889,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           edit_count in a dry_run with find_references for the target, which \
                           leaves out the declaration the rename also edits, then apply with \
                           accept_unconfirmed; the response keeps the marker, so check that no \
-                          reference kept the old name. timed_out permits previews only. Every \
+                          reference kept the old name. timed_out permits previews only. A \
+                          dry_run or find_references carrying coverage_gaps member_shadowed or \
+                          member_unresolved is short on both sides, so they agree and prove \
+                          nothing: applying is refused with precondition_failed, \
+                          accept_unconfirmed included, until its hint's remedy is run. Every \
                           file is checked before any is written, but a write that fails \
                           partway leaves earlier files modified; the error's hint names them, \
                           so inspect those before retrying. \
@@ -972,7 +988,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                             "verify_callers",
                             "boolean",
                             "Also attach diagnostics for the edited symbol's caller files, its \
-                             one-hop references, whose lists can predate the edit (default false)",
+                             one-hop references, whose lists can predate the edit; refused while \
+                             its Python workspace member is member_shadowed or member_unresolved, \
+                             which leaves those files short (default false)",
                         ),
                     ],
                 ),
@@ -1003,7 +1021,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                             "verify_callers",
                             "boolean",
                             "Also attach diagnostics for the edited symbol's caller files, its \
-                             one-hop references, whose lists can predate the edit (default false)",
+                             one-hop references, whose lists can predate the edit; refused while \
+                             its Python workspace member is member_shadowed or member_unresolved, \
+                             which leaves those files short (default false)",
                         ),
                     ],
                 ),
@@ -1034,7 +1054,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                             "verify_callers",
                             "boolean",
                             "Also attach diagnostics for the edited symbol's caller files, its \
-                             one-hop references, whose lists can predate the edit (default false)",
+                             one-hop references, whose lists can predate the edit; refused while \
+                             its Python workspace member is member_shadowed or member_unresolved, \
+                             which leaves those files short (default false)",
                         ),
                     ],
                 ),
@@ -1052,7 +1074,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           says why, and they are unknown. Set expect_no_references=true to \
                           refuse the \
                           delete unless verified reference-free (fail-closed when \
-                          unverifiable). ⚠ Mutates source files when dry_run is false.",
+                          unverifiable, and while the declaration's Python workspace member \
+                          is member_shadowed or member_unresolved, which dangling_references' \
+                          coverage_gaps names). ⚠ Mutates source files when dry_run is false.",
             with_extra(
                 edit_target_schema(),
                 &[

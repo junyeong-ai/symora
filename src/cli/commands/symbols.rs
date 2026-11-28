@@ -120,6 +120,11 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                 true => Some(count_references(app, &abs_path, &answer, listed).await),
                 false => None,
             };
+            // Every row is of this one file, so of this one member.
+            let member = counts
+                .as_ref()
+                .and_then(|_| crate::cli::python_members::qualifier(app, &abs_path));
+            let within = member.as_ref().map(|q| q.gap.reason);
             let items: Vec<SymbolOutput> = listed
                 .iter()
                 .map(|s| match source {
@@ -130,12 +135,13 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                     }
                 })
                 .map(|item| match &counts {
-                    Some(counts) => with_reference_counts(item, counts),
+                    Some(counts) => with_reference_counts(item, counts, within),
                     None => item,
                 })
                 .collect();
 
-            let mut hints = Vec::from_iter(unreferenced_hint(&items));
+            let mut hints: Vec<String> = member.into_iter().map(|q| q.hint).collect();
+            hints.extend(unreferenced_hint(&items));
             if counts
                 .iter()
                 .flat_map(HashMap::values)
@@ -207,7 +213,13 @@ async fn count_references(
         .await
 }
 
-fn with_reference_counts(mut item: SymbolOutput, counts: &ReferenceCounts) -> SymbolOutput {
+/// `within` is the reason the file's workspace member qualifies a count
+/// taken there ([`ReferenceCount::status_within`]).
+fn with_reference_counts(
+    mut item: SymbolOutput,
+    counts: &ReferenceCounts,
+    within: Option<CoverageReason>,
+) -> SymbolOutput {
     if let Some(count) = counts.get(&(item.location.line, item.location.column)) {
         if let ReferenceCount::Measured {
             total, test, prod, ..
@@ -217,12 +229,12 @@ fn with_reference_counts(mut item: SymbolOutput, counts: &ReferenceCounts) -> Sy
             item.test_refs = Some(*test);
             item.prod_refs = Some(*prod);
         }
-        item.refs_status = count.status();
+        item.refs_status = count.status_within(within);
     }
     item.children = item.children.map(|children| {
         children
             .into_iter()
-            .map(|child| with_reference_counts(child, counts))
+            .map(|child| with_reference_counts(child, counts, within))
             .collect()
     });
     item

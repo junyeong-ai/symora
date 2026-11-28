@@ -27,6 +27,11 @@ mod scala;
 mod small;
 mod typescript;
 
+pub use discovery::{
+    EditableInstall, editable_installs, normalized_distribution_name, venv_python,
+    virtual_env_python,
+};
+
 pub fn init_options(language: Language, root_path: &Path) -> Option<Value> {
     match language {
         Language::Kotlin => Some(kotlin::kotlin_init_options(root_path)),

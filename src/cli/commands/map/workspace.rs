@@ -259,17 +259,10 @@ fn packages(
                 )
             }
             "pyproject.toml" => {
-                let Some(table) = workspace
-                    .toml()
-                    .and_then(|t| toml_at(t, &["tool", "uv", "workspace"]))
-                else {
+                let Some((globs, excluded)) = workspace.toml().and_then(uv_workspace) else {
                     continue;
                 };
-                (
-                    "pyproject.toml",
-                    strings(table.get("members")),
-                    strings(table.get("exclude")),
-                )
+                ("pyproject.toml", globs, excluded)
             }
             "package.json" => {
                 let Some(listed) = workspace.json().and_then(|json| json.get("workspaces")) else {
@@ -299,13 +292,7 @@ fn packages(
             _ => continue,
         };
         declares_workspace = true;
-        let included = glob_set(&globs);
-        let excluded = glob_set(
-            &excluded
-                .iter()
-                .map(|glob| glob.trim_start_matches('!').to_string())
-                .collect::<Vec<_>>(),
-        );
+        let listing = Listing::new(&globs, &excluded);
         let base = workspace.directory();
         for manifest in manifests
             .iter()
@@ -329,9 +316,7 @@ fn packages(
             let Some(member) = member else {
                 continue;
             };
-            let listed = member.is_empty()
-                || (included.as_ref().is_some_and(|set| set.is_match(member))
-                    && !excluded.as_ref().is_some_and(|set| set.is_match(member)));
+            let listed = member.is_empty() || listing.lists(member);
             if listed {
                 members.insert((
                     directory.to_string(),
@@ -680,6 +665,166 @@ fn strings(value: Option<&toml::Value>) -> Vec<String> {
         .collect()
 }
 
+/// What a workspace table lists: a member path, relative to the workspace,
+/// that one of its globs matches and none of the globs it excludes does.
+struct Listing {
+    included: Option<globset::GlobSet>,
+    excluded: Option<globset::GlobSet>,
+}
+
+impl Listing {
+    /// `excluded` may carry the `!` the package managers write them with.
+    fn new(globs: &[String], excluded: &[String]) -> Self {
+        Self {
+            included: glob_set(globs),
+            excluded: glob_set(
+                &excluded
+                    .iter()
+                    .map(|glob| glob.trim_start_matches('!').to_string())
+                    .collect::<Vec<_>>(),
+            ),
+        }
+    }
+
+    fn lists(&self, member: &str) -> bool {
+        self.included
+            .as_ref()
+            .is_some_and(|set| set.is_match(member))
+            && !self
+                .excluded
+                .as_ref()
+                .is_some_and(|set| set.is_match(member))
+    }
+}
+
+/// The member globs and excluded globs of a `pyproject.toml`'s
+/// `[tool.uv.workspace]`, `None` where it declares no uv workspace.
+fn uv_workspace(table: &toml::Table) -> Option<(Vec<String>, Vec<String>)> {
+    let workspace = toml_at(table, &["tool", "uv", "workspace"])?;
+    Some((
+        strings(workspace.get("members")),
+        strings(workspace.get("exclude")),
+    ))
+}
+
+/// A package the project root's uv workspace lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UvMember {
+    /// Its directory relative to the root, `""` for the root's own project.
+    pub(crate) directory: String,
+    /// The `[project]` name its manifest declares, as written.
+    pub(crate) name: String,
+}
+
+/// The packages the root `pyproject.toml`'s `[tool.uv.workspace]` lists, as
+/// `map summary` lists them: each directory below the root, outside what the
+/// project ignores, whose relative path a member glob matches and no
+/// excluded glob does, and whose `pyproject.toml` names its project; and the
+/// root's own project where it names one. `None` where the root declares no
+/// uv workspace, or its manifest cannot be read or parsed.
+///
+/// The directories are found by walking from each glob's literal prefix as
+/// deep as the glob reaches, every level for a `**`, rather than by the
+/// whole walk `map summary` takes, and neither follows a symbolic link.
+pub(crate) fn uv_members(root: &Path) -> Option<Vec<UvMember>> {
+    let read = |directory: &Path| -> Option<toml::Table> {
+        std::fs::read_to_string(directory.join("pyproject.toml"))
+            .ok()?
+            .parse()
+            .ok()
+    };
+    let project_name = |table: &toml::Table| {
+        toml_at(table, &["project", "name"])
+            .and_then(|name| name.as_str())
+            .map(str::to_string)
+    };
+    let manifest = read(root)?;
+    let (globs, excluded) = uv_workspace(&manifest)?;
+    let listing = Listing::new(&globs, &excluded);
+    let filter = crate::infra::file_filter::FileFilter::new(root);
+    let mut members: Vec<UvMember> = project_name(&manifest)
+        .map(|name| UvMember {
+            directory: String::new(),
+            name,
+        })
+        .into_iter()
+        .collect();
+    let mut candidates = BTreeSet::new();
+    for glob in &globs {
+        member_candidates(root, glob, &filter, &mut candidates);
+    }
+    for directory in candidates {
+        if !listing.lists(&directory) {
+            continue;
+        }
+        if let Some(name) = read(&root.join(&directory)).as_ref().and_then(project_name) {
+            members.push(UvMember { directory, name });
+        }
+    }
+    Some(members)
+}
+
+/// The directories below `root` that `glob` can match, relative to it: below
+/// the glob's literal prefix, one level per remaining segment, or every level
+/// where one is `**`; none the project ignores, none through a link.
+fn member_candidates(
+    root: &Path,
+    glob: &str,
+    filter: &crate::infra::file_filter::FileFilter,
+    found: &mut BTreeSet<String>,
+) {
+    let glob = glob.trim_start_matches("./").trim_end_matches('/');
+    let segments: Vec<&str> = glob.split('/').filter(|s| !s.is_empty()).collect();
+    let literal = segments
+        .iter()
+        .take_while(|segment| !segment.contains(['*', '?', '[', '{']))
+        .count();
+    let prefix = segments[..literal].join("/");
+    let rest = &segments[literal..];
+    let depth = match rest.iter().any(|segment| segment.contains("**")) {
+        true => usize::MAX,
+        false => rest.len(),
+    };
+    fn descend(
+        root: &Path,
+        relative: String,
+        depth: usize,
+        filter: &crate::infra::file_filter::FileFilter,
+        found: &mut BTreeSet<String>,
+    ) {
+        let directory = root.join(&relative);
+        if !relative.is_empty() {
+            if filter.is_ignored(&directory) {
+                return;
+            }
+            found.insert(relative.clone());
+        }
+        if depth == 0 {
+            return;
+        }
+        for entry in std::fs::read_dir(&directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let child = match relative.is_empty() {
+                true => name,
+                false => format!("{relative}/{name}"),
+            };
+            descend(root, child, depth - 1, filter, found);
+        }
+    }
+    if root.join(&prefix).is_dir() {
+        descend(root, prefix, depth, filter, found);
+    }
+}
+
 /// The globs as one matcher over member paths relative to the workspace,
 /// `*` stopping at `/` as Cargo's, uv's and the package managers' globs do.
 fn glob_set(globs: &[String]) -> Option<globset::GlobSet> {
@@ -741,6 +886,58 @@ pub(super) fn yaml_error(error: &serde_saphyr::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The root's own project, and each directory a member glob reaches that
+    /// names its project, as uv lists them: not one an exclude names, one
+    /// past the glob's depth, one without a manifest, one the project
+    /// ignores, or a manifest elsewhere.
+    #[test]
+    fn uv_members_are_the_directories_the_root_workspace_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let manifest = |relative: &str, text: &str| {
+            let directory = root.join(relative);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("pyproject.toml"), text).unwrap();
+        };
+        manifest(
+            "",
+            "[project]\nname = \"ws\"\n\n[tool.uv.workspace]\nmembers = [\"packages/*\", \
+             \"tools/cli\", \"libs/**\"]\nexclude = [\"packages/skip\"]\n",
+        );
+        std::fs::write(root.join(".gitignore"), "packages/ignored/\n").unwrap();
+        for (relative, name) in [
+            ("packages/a", "pkg-a"),
+            ("packages/skip", "skip"),
+            ("packages/ignored", "ignored"),
+            ("packages/a/nested", "too-deep"),
+            ("tools/cli", "cli"),
+            ("tools/other", "other"),
+            ("libs/x/y", "deep"),
+            ("elsewhere", "elsewhere"),
+        ] {
+            manifest(relative, &format!("[project]\nname = \"{name}\"\n"));
+        }
+        std::fs::create_dir_all(root.join("packages/no-manifest")).unwrap();
+
+        let members = uv_members(root).unwrap();
+        let listed: Vec<(&str, &str)> = members
+            .iter()
+            .map(|member| (member.directory.as_str(), member.name.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("", "ws"),
+                ("libs/x/y", "deep"),
+                ("packages/a", "pkg-a"),
+                ("tools/cli", "cli"),
+            ]
+        );
+
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"ws\"\n").unwrap();
+        assert_eq!(uv_members(root), None, "no workspace is declared");
+    }
 
     #[test]
     fn pnpm_lists_its_packages_as_a_block_or_a_flow() {

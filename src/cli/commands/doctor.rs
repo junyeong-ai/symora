@@ -10,8 +10,9 @@ use futures::future::join_all;
 
 use crate::app::App;
 use crate::cli::OutputError;
+use crate::cli::python_members::{Interpreter, MemberGap, PythonMembers};
+use crate::cli::response::Section;
 use crate::config::LspRuntimeConfig;
-use crate::infra::lsp::configuration::ServerConfiguration;
 use crate::infra::lsp::health::serves_workspace;
 use crate::infra::lsp::servers::{self, Platform, ServerSource, check_all_servers};
 use crate::models::symbol::Language;
@@ -68,6 +69,41 @@ struct LanguageStatus {
     install: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     python_interpreter: Option<PythonInterpreter>,
+    /// The root's uv workspace members whose cross-file answers that
+    /// interpreter does not establish here: installed from outside the
+    /// project (`member_shadowed`), or every member where symora hands the
+    /// server no interpreter (`member_unresolved`). Omitted where none is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    member_gaps: Option<Section<MemberGapOutput>>,
+}
+
+#[derive(Serialize)]
+struct MemberGapOutput {
+    name: String,
+    path: String,
+    reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    installed_from: Option<String>,
+}
+
+/// The Python row's member gaps, with the hint naming the cause and the
+/// remedy.
+fn member_gaps(members: &PythonMembers) -> Option<Section<MemberGapOutput>> {
+    let gaps: Vec<&MemberGap> = members.gaps().iter().collect();
+    let hint = members.summary_hint(&gaps)?;
+    let items = gaps
+        .into_iter()
+        .map(|gap| MemberGapOutput {
+            name: gap.name.clone(),
+            path: gap.path.clone(),
+            reason: gap.reason.as_str(),
+            installed_from: gap
+                .installed_from
+                .as_ref()
+                .map(|from| from.display().to_string()),
+        })
+        .collect();
+    Some(Section::new(items).with_hints(vec![hint]))
 }
 
 #[derive(Serialize)]
@@ -79,23 +115,12 @@ enum PythonInterpreter {
 }
 
 fn python_interpreter(root: &Path, config: &LspRuntimeConfig) -> PythonInterpreter {
-    if let Some(path) = config
-        .servers
-        .get("python")
-        .and_then(|server| server.settings.as_ref())
-        .and_then(|settings| settings.get("python"))
-        .and_then(|python| python.get("pythonPath"))
-    {
-        return PythonInterpreter::Settings {
-            python_path: path.clone(),
-        };
-    }
-    let configuration = ServerConfiguration::resolve(Language::Python, root, config);
-    match configuration.settings["python"]["pythonPath"].as_str() {
-        Some(path) => PythonInterpreter::ProjectEnvironment {
-            python_path: path.to_string(),
+    match Interpreter::selected(root, config) {
+        Interpreter::Settings(python_path) => PythonInterpreter::Settings { python_path },
+        Interpreter::ProjectEnvironment(path) => PythonInterpreter::ProjectEnvironment {
+            python_path: path.to_string_lossy().into_owned(),
         },
-        None => PythonInterpreter::ServerDefault,
+        Interpreter::ServerDefault => PythonInterpreter::ServerDefault,
     }
 }
 
@@ -228,6 +253,9 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
                 install,
                 python_interpreter: (s.language == Language::Python)
                     .then(|| python_interpreter(app.root(), &runtime)),
+                member_gaps: (s.language == Language::Python)
+                    .then(|| member_gaps(&PythonMembers::read(app.root(), &runtime)))
+                    .flatten(),
             }
         })
         .collect();
@@ -289,6 +317,7 @@ mod tests {
             command: None,
             install: None,
             python_interpreter: None,
+            member_gaps: None,
         };
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["symbol_extraction"], false);
@@ -314,6 +343,7 @@ mod tests {
             command: None,
             install: Some("`rust-analyzer` resolves but does not serve".to_string()),
             python_interpreter: None,
+            member_gaps: None,
         };
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["installed"], true);

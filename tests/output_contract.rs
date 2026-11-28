@@ -386,6 +386,8 @@ fn definition_output_with_location_only() {
         definition: Some(sample_location(20, 8)),
         message: None,
         indexing: None,
+        coverage_gaps: Vec::new(),
+        hints: Vec::new(),
     };
     assert_json_snapshot!(out);
 }
@@ -396,6 +398,8 @@ fn definition_output_with_message_only() {
         definition: None,
         message: Some("no definition found".to_string()),
         indexing: None,
+        coverage_gaps: Vec::new(),
+        hints: Vec::new(),
     };
     assert_json_snapshot!(out);
 }
@@ -694,6 +698,7 @@ fn impact_output_full() {
     );
     let out = ImpactOutput {
         hints: Vec::new(),
+        coverage_gaps: Vec::new(),
         target,
         refs: RefOutput {
             count: 10,
@@ -826,6 +831,7 @@ fn diff_impact_output_with_status_counts_and_derived_callers() {
 fn impact_output_without_blast_radius() {
     let out = ImpactOutput {
         hints: Vec::new(),
+        coverage_gaps: Vec::new(),
         target: TargetOutput::new(
             "process".to_string(),
             "function".to_string(),

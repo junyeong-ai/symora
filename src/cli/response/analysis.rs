@@ -198,6 +198,19 @@ impl ReferenceCount {
             Self::Missing(reason) => Some(reason.as_str()),
         }
     }
+
+    /// The row's `refs_status` where the declaration's workspace member is
+    /// one the Python server resolves elsewhere or is not known to resolve
+    /// here (`member`, see [`crate::cli::python_members`]): a count taken is
+    /// then a lower bound for that reason, which outranks degraded indexing,
+    /// since retrying clears neither and only the member's names a remedy;
+    /// a count not taken keeps why it was not.
+    pub fn status_within(&self, member: Option<CoverageReason>) -> Option<&'static str> {
+        match (self, member) {
+            (Self::Measured { .. }, Some(member)) => Some(member.as_str()),
+            _ => self.status(),
+        }
+    }
 }
 
 /// Reference statistics (counts, no judgements).
@@ -252,6 +265,12 @@ pub struct AffectedFileOutput {
 #[derive(Debug, Serialize)]
 pub struct ImpactOutput {
     pub target: TargetOutput,
+    /// The target's workspace member, where the Python server resolves it
+    /// elsewhere (`member_shadowed`) or is not known to resolve it here
+    /// (`member_unresolved`): the counts below are then lower bounds that
+    /// retrying does not raise, and `hints` names the remedy.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub coverage_gaps: Vec<super::CoverageGap>,
     pub refs: RefOutput,
     pub coverage: TestCoverageOutput,
     /// Direct and transitive caller counts by depth. Absent only when the
@@ -326,6 +345,33 @@ mod tests {
             declaring_type: None,
             constructions: None,
         }
+    }
+
+    /// A count taken in a member the server resolves elsewhere carries the
+    /// member's reason over degraded indexing; a count not taken keeps why.
+    #[test]
+    fn a_member_reason_qualifies_a_taken_count_only() {
+        let measured = |degraded| ReferenceCount::Measured {
+            total: 1,
+            test: 0,
+            prod: 1,
+            degraded,
+        };
+        let shadowed = Some(CoverageReason::MemberShadowed);
+        assert_eq!(
+            measured(true).status_within(shadowed),
+            Some("member_shadowed")
+        );
+        assert_eq!(
+            measured(false).status_within(Some(CoverageReason::MemberUnresolved)),
+            Some("member_unresolved")
+        );
+        assert_eq!(measured(true).status_within(None), Some(INDEXING_DEGRADED));
+        assert_eq!(measured(false).status_within(None), None);
+        assert_eq!(
+            ReferenceCount::Missing(CoverageReason::TimedOut).status_within(shadowed),
+            Some("timed_out")
+        );
     }
 
     #[test]

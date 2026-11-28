@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::analysis::{Constructions, callers_from_references};
 use crate::cli::errors::OutputError;
+use crate::cli::python_members::{MemberGap, PythonMembers};
 use crate::cli::response::disclosure::{
     Cap, CoverageReason, DIFF_IN_PARTS, LowerBound, name_some, with_cap,
 };
@@ -165,8 +166,11 @@ pub struct ChangedSymbolImpact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prod_refs: Option<usize>,
     /// Present only when an Added/Modified symbol's reference counts are not
-    /// authoritative: "indexing_degraded" (the query ran under degraded
-    /// workspace analysis, so the counts are a lower bound), or why none was
+    /// authoritative: "member_shadowed" or "member_unresolved" (its Python
+    /// workspace member resolves elsewhere, or is not known to resolve here,
+    /// so the counts are a lower bound no retry raises), "indexing_degraded"
+    /// (the query ran under degraded workspace analysis, so the counts are a
+    /// lower bound), or why none was
     /// taken, in the `coverage_gaps` reasons — "timed_out", "unsupported",
     /// "server_not_installed", "not_consulted", or "unavailable" (the query
     /// failed, or was not asked where the server reads no position as the
@@ -358,7 +362,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     }
 
     let HunkAnalysis {
-        changes,
+        mut changes,
         unmeasured: unreadable,
         unfinished,
         hints: row_hints,
@@ -390,6 +394,9 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     }
     let mut listed = HashSet::new();
     unmeasured.retain(|file| listed.insert(file.clone()));
+    if let Some(hint) = qualify_member_rows(app, &mut changes) {
+        hints.insert(usize::from(capped), hint);
+    }
     hints.extend(row_hints);
     let timed_out = Some(CoverageReason::TimedOut.as_str());
     if changes
@@ -450,6 +457,31 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
 fn documents_or_configures(file: &Path) -> bool {
     let language = Language::from_path(file);
     language != Language::Unknown && !language.is_code()
+}
+
+/// Mark each counted row whose declaration lies in a workspace member the
+/// Python server resolves elsewhere, or is not known to resolve here, with
+/// that member's reason: its `refs_status`, and its `callers_status` where a
+/// caller list was read, since both are then lower bounds no retry raises
+/// ([`ReferenceCount::status_within`]). A row whose count was not taken keeps
+/// why. The hint names the members and the remedy, once for the diff.
+fn qualify_member_rows(app: &App, changes: &mut [ChangedSymbolImpact]) -> Option<String> {
+    let root = app.output.root();
+    let members = PythonMembers::read(root, &crate::config::LspRuntimeConfig::from(app.config()));
+    let mut qualified: Vec<&MemberGap> = Vec::new();
+    for change in changes.iter_mut().filter(|change| change.refs.is_some()) {
+        let Some(gap) = members.gap_for(&root.join(&change.location.file)) else {
+            continue;
+        };
+        change.refs_status = Some(gap.reason.as_str());
+        if change.callers.is_some() {
+            change.callers_status = Some(gap.reason.as_str());
+        }
+        if !qualified.contains(&gap) {
+            qualified.push(gap);
+        }
+    }
+    members.summary_hint(&qualified)
 }
 
 /// How many rows carry each status, the rows without one left out.

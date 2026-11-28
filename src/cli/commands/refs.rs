@@ -4,6 +4,7 @@ use clap::Args;
 use crate::app::App;
 use crate::cli::LocationArg;
 use crate::cli::analysis::LocationAnalysis;
+use crate::cli::python_members::{Qualifier, qualifier};
 use crate::cli::response::disclosure::{Cap, with_cap};
 use crate::cli::response::{LocationOutput, RefsOutput, Section, TargetOutput};
 use crate::cli::symbol_discovery::is_single_file_concentration;
@@ -95,7 +96,10 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
             // The lower-bound cause leads, ahead of the anchor's own hints:
             // what the position resolved to matters less than the count being
             // short, and the contract has this cause lead on every surface.
-            let mut hints = Vec::new();
+            // A member the server resolves elsewhere is a cause no retry
+            // clears, so it leads.
+            let member = qualifier(app, &analysis.anchor().file);
+            let mut hints: Vec<String> = member.iter().map(|q| q.hint.clone()).collect();
             if incomplete {
                 hints.push(format!(
                     "The language server's reference set for this declaration does not include \
@@ -115,7 +119,8 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                         .with_hints(hints)
                         .with_next_commands(next_commands)
                         .with_indexing(indexing)
-                        .with_incomplete(incomplete),
+                        .with_incomplete(incomplete)
+                        .with_coverage_gaps(member.iter().map(Qualifier::coverage_gap).collect()),
                     Cap::Option("--limit"),
                 ),
             });

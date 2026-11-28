@@ -91,6 +91,22 @@ impl Anchor {
         )
     }
 
+    /// [`Self::declared_at`], adding which of this tree's own files a
+    /// declaration outside the project is another checkout's copy of, where
+    /// the relative path proves it ([`crate::cli::python_members::tree_copy_of`]):
+    /// a usage here resolving there is the language server reading that copy
+    /// in place of this tree's.
+    fn declared_at_described(&self, root: &Path) -> String {
+        let at = self.declared_at(root);
+        match crate::cli::python_members::tree_copy_of(root, &self.file) {
+            Some(own) => format!(
+                "{at}, another checkout's copy of this tree's {}",
+                own.display()
+            ),
+            None => at,
+        }
+    }
+
     /// Whether the input position is the anchor itself, so there is no
     /// resolved-to declaration to point at.
     fn input_is_anchor(&self) -> bool {
@@ -115,7 +131,7 @@ impl Anchor {
                     .as_ref()
                     .map(|s| s.name.as_str())
                     .unwrap_or_default(),
-                self.declared_at(root),
+                self.declared_at_described(root),
             )),
             AnchorResolution::Resolved => None,
             AnchorResolution::Binding if self.input_is_anchor() => Some(format!(
@@ -127,7 +143,7 @@ impl Anchor {
                 "{at} denotes a binding declared at {} that the symbol tree does not list (a \
                  local, a parameter, a module, a generated item, or a declaration the server's \
                  outline omits); the {subject} shown are that binding's",
-                self.declared_at(root),
+                self.declared_at_described(root),
             )),
             AnchorResolution::NotASymbol if input.column_explicit => Some(format!(
                 "{at} is not on a symbol: nothing is declared there and the language server \
@@ -200,7 +216,7 @@ impl Anchor {
                 "{role} {at} is a usage of `{}`, declared at {}; the verdict is about that \
                  declaration",
                 self.symbol.as_ref().map(|s| s.name.as_str()).unwrap_or_default(),
-                self.declared_at(root),
+                self.declared_at_described(root),
             )),
             AnchorResolution::Resolved => {}
             AnchorResolution::Binding if self.input_is_anchor() => hints.push(format!(
@@ -212,7 +228,7 @@ impl Anchor {
                 "{role} {at} denotes a binding the symbol tree does not list (a local, a \
                  parameter, a module, a generated item, or a declaration the server's outline \
                  omits); the verdict is about that binding, anchored at its declaration {}",
-                self.declared_at(root),
+                self.declared_at_described(root),
             )),
             AnchorResolution::NotASymbol => hints.push(format!(
                 "{role} {at} is not a symbol; the reachability verdict is not authoritative — \
@@ -356,14 +372,17 @@ where
                 .take(limit)
                 .map(|item| mapper(item, ctx.root()))
                 .collect();
-            let hints = match reach {
+            let member = crate::cli::python_members::qualifier(app, &anchor.file);
+            let mut hints: Vec<String> = member.iter().map(|q| q.hint.clone()).collect();
+            hints.extend(match reach {
                 Reach::Inbound => anchor.inbound_hints(ctx.root(), subject),
                 Reach::Outbound => anchor.anchor_hints(ctx.root(), subject),
-            };
+            });
             ctx.print_success(with_cap(
                 Section::with_total(output, total)
                     .with_hints(hints)
-                    .with_indexing(result.indexing),
+                    .with_indexing(result.indexing)
+                    .with_coverage_gaps(member.iter().map(|q| q.coverage_gap()).collect()),
                 Cap::Option("--limit"),
             ));
         }

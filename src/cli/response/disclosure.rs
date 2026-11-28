@@ -48,6 +48,17 @@ pub enum CoverageReason {
     /// Enough candidates came from other languages, so this one was never
     /// queried. Narrowing the query to it is the remedy.
     NotSearched,
+    /// The Python server's interpreter installs the workspace member holding
+    /// the declaration from outside the project, so every import of it
+    /// resolves to that copy and the answer's cross-file part is a lower
+    /// bound ([`crate::cli::python_members`]). No retry clears it; building
+    /// the tree's own environment does.
+    MemberShadowed,
+    /// The Python server was handed no interpreter and picked its own, and
+    /// nothing symora can read shows it resolving the workspace member
+    /// holding the declaration to this tree, so the answer's cross-file part
+    /// is not established. The same remedy as [`Self::MemberShadowed`].
+    MemberUnresolved,
 }
 
 impl CoverageReason {
@@ -71,6 +82,8 @@ impl CoverageReason {
             Self::Unsupported => "unsupported",
             Self::Unavailable => "unavailable",
             Self::NotSearched => "not_searched",
+            Self::MemberShadowed => "member_shadowed",
+            Self::MemberUnresolved => "member_unresolved",
         }
     }
 }

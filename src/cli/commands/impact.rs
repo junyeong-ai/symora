@@ -6,6 +6,7 @@ use crate::cli::LocationArg;
 use crate::cli::analysis::LocationAnalysis;
 use crate::cli::blast_radius::{self, BlastRadius, DispatchStatus};
 use crate::cli::call_graph::WalkConfig;
+use crate::cli::python_members::{Qualifier, qualifier};
 use crate::cli::response::{
     AffectedFileOutput, ImpactOutput, RefOutput, TargetOutput, TestCoverageOutput,
 };
@@ -106,12 +107,15 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                 blast_radius.as_ref(),
             );
 
+            let member = qualifier(app, &analysis.anchor.file);
             let response = ImpactOutput {
-                hints: analysis
-                    .member_reach_hint()
-                    .into_iter()
+                hints: member
+                    .iter()
+                    .map(|q| q.hint.clone())
+                    .chain(analysis.member_reach_hint())
                     .chain(analysis.anchor().outside_project_hint(root, "references"))
                     .collect(),
+                coverage_gaps: member.iter().map(Qualifier::coverage_gap).collect(),
                 target,
                 refs: RefOutput {
                     count: classified.total,
