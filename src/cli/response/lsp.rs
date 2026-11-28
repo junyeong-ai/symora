@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::LocationOutput;
+use super::{LocationOutput, PositionOutput};
 use crate::models::lsp::IndexingDegradation;
 
 /// An answer whose completeness depends on workspace indexing. A scalar
@@ -129,6 +129,17 @@ impl From<&crate::models::diagnostic::Diagnostic> for DiagnosticOutput {
     }
 }
 
+/// Where a call is made. A caller holds the call, so the caller's own
+/// position names the file and the site states its line and column; a
+/// callee is called from code its own position does not name, so the site
+/// states the file too.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum CallSite {
+    Within(PositionOutput),
+    At(LocationOutput),
+}
+
 #[derive(Debug, Serialize)]
 pub struct CallHierarchyOutput {
     pub name: String,
@@ -136,7 +147,7 @@ pub struct CallHierarchyOutput {
     #[serde(flatten)]
     pub location: LocationOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub call_site: Option<LocationOutput>,
+    pub call_site: Option<CallSite>,
     /// Complete verbatim source body, set only by `context --with-bodies`
     /// callee attachment — absent everywhere else.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,15 +157,31 @@ pub struct CallHierarchyOutput {
 }
 
 impl CallHierarchyOutput {
-    pub fn from_item(item: &crate::models::lsp::CallHierarchyItem, root: &Path) -> Self {
+    /// A caller, at its own declaration, with the call it makes there.
+    pub fn caller(item: &crate::models::lsp::CallHierarchyItem, root: &Path) -> Self {
+        Self::with_site(item, root, |site| {
+            CallSite::Within(PositionOutput::from_location(site))
+        })
+    }
+
+    /// A callee, at its own declaration, with the call made to it in the
+    /// code that calls it.
+    pub fn callee(item: &crate::models::lsp::CallHierarchyItem, root: &Path) -> Self {
+        Self::with_site(item, root, |site| {
+            CallSite::At(LocationOutput::from_location(site, root))
+        })
+    }
+
+    fn with_site(
+        item: &crate::models::lsp::CallHierarchyItem,
+        root: &Path,
+        site: impl FnOnce(&crate::models::symbol::Location) -> CallSite,
+    ) -> Self {
         Self {
             name: item.name.clone(),
             kind: item.kind.to_string(),
             location: LocationOutput::from_location(&item.location, root),
-            call_site: item
-                .call_site
-                .as_ref()
-                .map(|cs| LocationOutput::from_location(cs, root)),
+            call_site: item.call_site.as_ref().map(site),
             body: None,
             body_omitted: None,
         }

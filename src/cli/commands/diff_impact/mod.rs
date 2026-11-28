@@ -1012,7 +1012,7 @@ async fn analyze_hunks(
                         callers
                             .iter()
                             .take(limit)
-                            .map(|caller| CallHierarchyOutput::from_item(caller, root))
+                            .map(|caller| CallHierarchyOutput::caller(caller, root))
                             .collect(),
                         callers.len(),
                     )
@@ -1319,7 +1319,7 @@ async fn analyze_symbol_impact(
                                 .data
                                 .iter()
                                 .take(app.config().lsp.calls_limit)
-                                .map(|c| CallHierarchyOutput::from_item(c, root))
+                                .map(|c| CallHierarchyOutput::caller(c, root))
                                 .collect(),
                             calls.data.len(),
                         ),
@@ -1594,6 +1594,7 @@ fn unresolved_deletion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::response::{CallSite, PositionOutput};
     use std::path::PathBuf;
 
     /// A line a hunk adds between a type's members goes with the member the
@@ -1814,7 +1815,11 @@ mod tests {
             name: "use".to_string(),
             kind: "function".to_string(),
             location: loc(),
-            call_site: Some(loc()),
+            call_site: Some(CallSite::Within(PositionOutput {
+                line: 10,
+                column: 1,
+                degraded_column: None,
+            })),
             body: None,
             body_omitted: None,
         };

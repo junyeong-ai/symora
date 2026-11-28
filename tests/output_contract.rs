@@ -26,8 +26,9 @@ use symora::cli::response::disclosure::{Cap, with_cap};
 use symora::cli::response::{
     ActionOutput, AffectedFileOutput, ApplyActionOutput, CallHierarchyOutput, CoverageGap,
     DefinitionOutput, DiagnosticOutput, EditOutput, FileChangeOutput, HoverOutput, ImpactOutput,
-    LineRange, LocationOutput, NARROW_THE_QUERY, RefOutput, Section, ServerStatusOutput,
-    SymbolOutput, TargetOutput, TestCoverageOutput, TestOutput, TypeInfoOutput, fit_to_char_budget,
+    LineRange, LocationOutput, NARROW_THE_QUERY, PositionOutput, RefOutput, Section,
+    ServerStatusOutput, SymbolOutput, TargetOutput, TestCoverageOutput, TestOutput, TypeInfoOutput,
+    fit_to_char_budget,
 };
 use symora::models::diagnostic::DiagnosticsStatus;
 use symora::models::lsp::{CallHierarchyItem, IndexingDegradation};
@@ -506,6 +507,8 @@ fn diagnostics_output_flattened_section_with_status() {
     assert_json_snapshot!(out);
 }
 
+/// A callee is called from code its own position does not name, so its
+/// call site names the file.
 #[test]
 fn call_hierarchy_output_with_call_site() {
     let item = CallHierarchyItem {
@@ -514,8 +517,34 @@ fn call_hierarchy_output_with_call_site() {
         location: Location::point(root().join("src/main.rs"), 12, 4),
         call_site: Some(Location::point(root().join("src/api.rs"), 50, 12)),
     };
-    let out = CallHierarchyOutput::from_item(&item, &root());
+    let out = CallHierarchyOutput::callee(&item, &root());
     assert_json_snapshot!(out);
+}
+
+/// A caller holds its call, so its call site is a line and column in the
+/// file its own position names.
+#[test]
+fn a_callers_call_site_lies_within_its_own_file() {
+    let item = CallHierarchyItem {
+        name: "handle".to_string(),
+        kind: SymbolKind::Function,
+        location: Location::point(root().join("src/api.rs"), 30, 8),
+        call_site: Some(Location::point(root().join("src/api.rs"), 31, 9)),
+    };
+    let out = CallHierarchyOutput::caller(&item, &root());
+    assert_json_snapshot!(out, @r###"
+    {
+      "name": "handle",
+      "kind": "function",
+      "file": "src/api.rs",
+      "line": 30,
+      "column": 8,
+      "call_site": {
+        "line": 31,
+        "column": 9
+      }
+    }
+    "###);
 }
 
 /// `body` appears on a callee item only when `context --with-bodies`
@@ -661,7 +690,11 @@ fn test_output_basic() {
     let out = TestOutput {
         name: "test_process".to_string(),
         location: sample_location(78, 4),
-        call_site: sample_location(80, 9),
+        call_site: PositionOutput {
+            line: 80,
+            column: 9,
+            degraded_column: None,
+        },
     };
     assert_json_snapshot!(out);
 }
@@ -806,7 +839,7 @@ fn diff_impact_output_with_status_counts_and_derived_callers() {
                 prod_refs: Some(2),
                 callers_status: Some("references_derived"),
                 callers: Some(with_cap(
-                    Section::with_total(vec![CallHierarchyOutput::from_item(&caller, &root())], 2),
+                    Section::with_total(vec![CallHierarchyOutput::caller(&caller, &root())], 2),
                     Cap::Config("lsp.calls_limit"),
                 )),
                 ..row("process", "function", 12)

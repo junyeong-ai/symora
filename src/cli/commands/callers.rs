@@ -169,7 +169,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
     let items: Vec<CallHierarchyOutput> = callers
         .iter()
         .take(limit)
-        .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
+        .map(|c| CallHierarchyOutput::caller(c, ctx.root()))
         .collect();
     ctx.print_success(CallersOutput {
         target: TargetOutput::from_anchor(&anchor, None, ctx.root()),

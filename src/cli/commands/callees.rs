@@ -187,7 +187,7 @@ pub async fn execute(args: CalleesArgs, app: &App) -> Result<()> {
                 "callees",
                 Reach::Outbound,
                 |file, line, col| async move { app.lsp.outgoing_calls(&file, line, col).await },
-                |c, root| CallHierarchyOutput::from_item(&c, root),
+                |c, root| CallHierarchyOutput::callee(&c, root),
             )
             .await
         }
@@ -240,7 +240,7 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
     let items: Vec<CallHierarchyOutput> = reachable
         .iter()
         .take(limit)
-        .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
+        .map(|c| CallHierarchyOutput::callee(c, ctx.root()))
         .collect();
 
     let member = qualifier(app, &anchor.file);
@@ -365,7 +365,7 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
                     let it = item_by_key
                         .get(k)
                         .expect("path key must resolve to a discovered call-graph item");
-                    CallHierarchyOutput::from_item(it, ctx.root())
+                    CallHierarchyOutput::callee(it, ctx.root())
                 })
                 .collect();
             (Reachability::Found, Some(frames))

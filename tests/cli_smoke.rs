@@ -3546,7 +3546,7 @@ fn context_names_each_test_holding_a_reference_once() {
         .iter()
         .map(|test| {
             assert_eq!(test["file"], "test_shapes.py", "{page}");
-            assert_eq!(test["call_site"]["file"], "test_shapes.py", "{page}");
+            assert!(test["call_site"].get("file").is_none(), "{page}");
             let at = |position: &serde_json::Value| {
                 (
                     position["line"].as_u64().unwrap(),

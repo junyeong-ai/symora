@@ -28,7 +28,7 @@ symora diff-impact
 
 ## Address the intended symbol
 
-Lines and Unicode-scalar columns are 1-indexed; a position past its file's end is refused as `invalid_argument` stating how many lines, or characters on the line, the file has. Every result states its own position flat as `file`, `line`, `column`, the name start to pass back; a span adds `end_line` (inclusive) and `end_column` (exclusive) where the source states them, and a related position (`call_site`, `definition`, `target`) is a nested object of the same shape.
+Lines and Unicode-scalar columns are 1-indexed; a position past its file's end is refused as `invalid_argument` stating how many lines, or characters on the line, the file has. Every result states its own position flat as `file`, `line`, `column`, the name start to pass back; a span adds `end_line` (inclusive) and `end_column` (exclusive) where the source states them, and a related position (`call_site`, `definition`, `target`) is a nested object of the same shape, without `file` where it lies in the item's own file, as a caller's or a test's `call_site` does.
 
 - For `refs`, callers/callees, implementations, context, and impact: `file:line` addresses the declaration on that line or its enclosing symbol. An explicit column addresses the exact token and resolves usages through their definitions. Header keywords/whitespace may address that declaration; empty body positions address nothing.
 - `def`, hover, typedef, and rename are position-exact; an omitted column means 1. Take name positions from actual results. `typedef` lists every type the server names there, in its order: `Vec<Order>` names both `Vec` and `Order`, so read past the first item.

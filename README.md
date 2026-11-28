@@ -214,30 +214,30 @@ symora callers src/services/checkout.ts:48
       "name": "handleCheckout",
       "kind": "function",
       "file": "src/routes/checkout.ts", "line": 23, "column": 23,
-      "call_site": { "file": "src/routes/checkout.ts", "line": 31, "column": 31 }
+      "call_site": { "line": 31, "column": 31 }
     },
     {
       "name": "runOrderQueue",
       "kind": "function",
       "file": "src/jobs/orderWorker.ts", "line": 67, "column": 23,
-      "call_site": { "file": "src/jobs/orderWorker.ts", "line": 72, "column": 19 }
+      "call_site": { "line": 72, "column": 19 }
     },
     {
       "name": "processesAnOrder",
       "kind": "function",
       "file": "tests/checkout.test.ts", "line": 8, "column": 23,
-      "call_site": { "file": "tests/checkout.test.ts", "line": 9, "column": 17 }
+      "call_site": { "line": 9, "column": 17 }
     },
     {
       "name": "processesTwice",
       "kind": "function",
       "file": "tests/checkout.test.ts", "line": 13, "column": 23,
-      "call_site": { "file": "tests/checkout.test.ts", "line": 14, "column": 17 }
+      "call_site": { "line": 14, "column": 17 }
     }
   ]
 }
 ```
-> 운영 코드의 진입점 두 곳(HTTP 라우트와 백그라운드 잡)과 테스트 함수 두 개입니다. 항목 자신의 `file`·`line`·`column`은 호출자가 선언된 위치, `call_site`는 내 심볼을 호출하는 정확한 위치입니다.
+> 운영 코드의 진입점 두 곳(HTTP 라우트와 백그라운드 잡)과 테스트 함수 두 개입니다. 항목 자신의 `file`·`line`·`column`은 호출자가 선언된 위치, `call_site`는 그 파일 안에서 내 심볼을 호출하는 정확한 위치입니다.
 
 ### ⑤ 변경에 영향을 받을 수 있는 정적 의존성은?
 
@@ -374,7 +374,7 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code`와 `message`는 항상 있고, `hint`는 취할 수 있는 다음 조치가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`, `cancelled`. 잘못된 CLI 인자도 같은 형식의 `invalid_argument` 오류로 나옵니다. clap이 출력하는 일반 텍스트 대신 JSON으로 나오므로, 어떤 실패든 stdout 하나만 파싱하면 됩니다. 이 형식을 따르지 않는 경우는 하나입니다. 아무것도 찾지 못한 정상 결과(예: 정의가 없는 위치에서 실행한 `def`)는 exit 0과 함께 `{ "message": … }`로 나옵니다. 부재는 오류가 아니기 때문입니다.
-- **위치는 1부터 셉니다** — 입력과 출력 모두 그렇고, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `context`, `impact`)은 컬럼을 생략한 `file:line`(그 줄에 선언된 심볼을 지정하며, 본문 줄이면 그 줄을 감싸는 심볼을 지정) 또는 `file:line:column`을 받습니다. 컬럼을 주면 위치가 정확해집니다. 컬럼이 심볼 이름 위에 있으면 그 심볼을, 그 밖이면 그 자리의 토큰을 가리킵니다. 호출 지점의 토큰은 정의를 따라가 호출된 심볼을 가리키며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 대상과 정확히 같습니다. `def`·`hover`·`typedef`·`rename`은 컬럼을 생략하면 1열로 읽습니다. `edit replace-body`·`insert-before`·`insert-after`·`delete`는 선언만 지정하므로 컬럼이 선언 위에 있어야 합니다. 모든 항목은 자기 위치를 `file`·`line`·`column`으로 평평하게 담습니다(이름이 시작하는 자리로, 다음 질의에 그대로 넘기면 됩니다). 범위는 원본이 밝힌 경우에만 `end_line`(포함)과 `end_column`(제외)을 더하고, 항목과 관련된 두 번째 위치(`call_site`, `definition`)는 같은 형태의 중첩 객체입니다. `map file`의 테스트 영역(`test_region`)은 `line`과 `end_line`만 줍니다. `refs`·`context`·`impact`가 돌려주는 `target`도 같은 방식으로 `file`·`line`·`column`을 담습니다.
+- **위치는 1부터 셉니다** — 입력과 출력 모두 그렇고, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `context`, `impact`)은 컬럼을 생략한 `file:line`(그 줄에 선언된 심볼을 지정하며, 본문 줄이면 그 줄을 감싸는 심볼을 지정) 또는 `file:line:column`을 받습니다. 컬럼을 주면 위치가 정확해집니다. 컬럼이 심볼 이름 위에 있으면 그 심볼을, 그 밖이면 그 자리의 토큰을 가리킵니다. 호출 지점의 토큰은 정의를 따라가 호출된 심볼을 가리키며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 대상과 정확히 같습니다. `def`·`hover`·`typedef`·`rename`은 컬럼을 생략하면 1열로 읽습니다. `edit replace-body`·`insert-before`·`insert-after`·`delete`는 선언만 지정하므로 컬럼이 선언 위에 있어야 합니다. 모든 항목은 자기 위치를 `file`·`line`·`column`으로 평평하게 담습니다(이름이 시작하는 자리로, 다음 질의에 그대로 넘기면 됩니다). 범위는 원본이 밝힌 경우에만 `end_line`(포함)과 `end_column`(제외)을 더하고, 항목과 관련된 두 번째 위치(`call_site`, `definition`)는 같은 형태의 중첩 객체이고, 호출자나 테스트의 `call_site`처럼 항목 자신의 파일 안에 있는 위치는 `file` 없이 `line`과 `column`만 줍니다. `map file`의 테스트 영역(`test_region`)은 `line`과 `end_line`만 줍니다. `refs`·`context`·`impact`가 돌려주는 `target`도 같은 방식으로 `file`·`line`·`column`을 담습니다.
 - **결과가 불완전하면 숨기지 않고 밝힙니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다. 답이 조회한 소스에 있던 것을 전부 담지 못했다는 뜻이며, 맨 앞의 `hints`가 원인을 밝히고 고칠 방법이 있으면 `next_commands`가 그 명령을 담습니다. 명령 자체의 상한에 잘린 목록은 `truncated`를 붙이고, hint가 그 상한(`--limit`, 또는 `lsp.calls_limit` 같은 설정 키)과 나머지를 모두 보는 방법을 알려 줍니다. 원인이 읽지 못한 경로이면 `map`·`search index status`가 `unread_paths`로 그 경로를 직접 지목합니다. 읽을 수 없는 경로는 재빌드해도 읽히지 않으므로 권한부터 확인하세요. `stale`은 인덱스의 최신 여부, `indexing`은 language server의 준비 상태, `incomplete`는 조회한 소스 안에서 열거를 마쳤는지를 나타냅니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 오류는 빠진 기능(서버의 기능이든, Symora가 적용하지 않는 편집 형태든)을 지목하고 대안을 알려 줍니다.
 - **출력 형식**은 stdout이 터미널이면 들여쓴 JSON, 파이프나 파일이면 한 줄 JSON입니다. `--format pretty|compact`로 고정할 수 있습니다. 응답은 `output.max_response_chars`(기본 20,000자, 0은 제한 해제)를 목표로 합니다. 소스 본문은 먼저 통째로 생략하고 `body_omitted: "response_size"`로 표시하며, 선언 정보는 남깁니다. 그래도 넘치면 목록 항목을 줄이되 `count`는 그대로 두고, `truncated`와 `output.max_response_chars`를 지목하는 hint를 붙입니다. 다른 목록의 항목 안에 든 목록(`diff-impact` 행의 `callers` 등)을 그 항목보다 먼저 줄입니다. 고정 메타데이터는 목표를 초과할 수 있습니다. compact 직렬화로 측정하므로 출력 형식이 결과 항목을 바꾸지 않습니다.
 

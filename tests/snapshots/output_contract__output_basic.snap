@@ -8,7 +8,6 @@ expression: out
   "line": 78,
   "column": 4,
   "call_site": {
-    "file": "src/main.rs",
     "line": 80,
     "column": 9
   }

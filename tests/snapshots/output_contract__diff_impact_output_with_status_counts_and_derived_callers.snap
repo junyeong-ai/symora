@@ -56,7 +56,6 @@ expression: out
               "line": 30,
               "column": 8,
               "call_site": {
-                "file": "src/api.rs",
                 "line": 31,
                 "column": 9
               }

@@ -27,8 +27,8 @@ pub use editing::{
     EditOutput, FileChangeOutput, LineRange,
 };
 pub use lsp::{
-    CallHierarchyOutput, DefinitionOutput, DiagnosticOutput, DisclosesIndexing, HoverOutput,
-    TypeInfoOutput,
+    CallHierarchyOutput, CallSite, DefinitionOutput, DiagnosticOutput, DisclosesIndexing,
+    HoverOutput, TypeInfoOutput,
 };
 pub use symbol::{ServerStatusOutput, SymbolOutput, SymbolSource};
 
@@ -1323,7 +1323,8 @@ mod tests {
 /// ready to pass to the next query — with an optional source snippet. A span
 /// adds `end_line` (inclusive) and `end_column` (exclusive), each present only
 /// where the source states it. An item embeds it with `#[serde(flatten)]`; a
-/// second, related position (`call_site`, `definition`, `target`) nests it.
+/// second, related position (`call_site`, `definition`, `target`) nests it,
+/// or nests a [`PositionOutput`] where the item already names its file.
 #[derive(Debug, Clone, Serialize)]
 pub struct LocationOutput {
     pub file: String,
@@ -1382,6 +1383,29 @@ impl LocationOutput {
             end_line: location.end_line,
             end_column: location.end_column,
             ..Self::from_location(location, root)
+        }
+    }
+}
+
+/// A position in the file the item it nests in names: a [`LocationOutput`]
+/// without `file`. A caller's or a test's `call_site` lies in its own code,
+/// so the item's own position already states where.
+#[derive(Debug, Clone, Serialize)]
+pub struct PositionOutput {
+    pub line: u32,
+    pub column: u32,
+    /// As on [`LocationOutput`]: present (and `true`) only for a degraded
+    /// wire-offset guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_column: Option<bool>,
+}
+
+impl PositionOutput {
+    pub fn from_location(location: &crate::models::symbol::Location) -> Self {
+        Self {
+            line: location.line,
+            column: location.column,
+            degraded_column: location.degraded_column,
         }
     }
 }

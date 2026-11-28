@@ -394,7 +394,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(with_extra(
             section_output_schema(
                 "Incoming calls: name, kind, file, line, column (the caller's declaration), \
-                 call_site { file, line, column }",
+                 call_site { line, column } in the caller's own file",
             ),
             &[
                 (
@@ -437,7 +437,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(with_extra(
             section_output_schema(
                 "Outgoing calls: name, kind, file, line, column (the callee's declaration), \
-                 call_site?",
+                 call_site? { file, line, column } in the code that calls it",
             ),
             &[
                 (
@@ -656,13 +656,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 "callers",
                 "object",
                 "Incoming calls as a list (count, showing, items of name, kind, file, line, \
-                 column, call_site)",
+                 column, call_site { line, column } in the caller's own file)",
             ),
             (
                 "callees",
                 "object",
                 "Outgoing calls as a list (count, showing, items of name, kind, file, line, \
-                 column, call_site?, body?)",
+                 column, call_site? { file, line, column }, body?)",
             ),
             (
                 "types",
@@ -674,7 +674,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 "tests",
                 "object",
                 "Related tests as a list (items of name, file, line, column at the test's own \
-                 declaration, and call_site { file, line, column }, the reference it makes)",
+                 declaration, and call_site { line, column } in that file, the reference it makes)",
             ),
         ])),
         ToolDefinition::read_only(
@@ -830,7 +830,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 "Changed symbols as a list (count, showing, truncated?, items) of { name?, \
                  kind?, file, line, column, change_type, refs?, test_refs?, prod_refs?, \
                  refs_status?, callers_status?, deletion?, callers? }; callers is a list of the \
-                 same shape of { name, kind, file, line, column, call_site }",
+                 same shape of { name, kind, file, line, column, call_site { line, column } }",
             ),
         ])),
         ToolDefinition::read_only(

@@ -9,8 +9,8 @@ use crate::app::App;
 use crate::cli::analysis::{LocationAnalysis, callables_holding};
 use crate::cli::response::disclosure::{Cap, with_cap};
 use crate::cli::response::{
-    BodyOmission, CallHierarchyOutput, LocationOutput, RefOutput, Section, TargetOutput,
-    TestOutput, TypeInfoOutput,
+    BodyOmission, CallHierarchyOutput, LocationOutput, PositionOutput, RefOutput, Section,
+    TargetOutput, TestOutput, TypeInfoOutput,
 };
 use crate::cli::utils::{find_named_at_position, find_symbol_at_position, shell_arg};
 use crate::cli::{LocationArg, OutputError};
@@ -450,7 +450,10 @@ async fn fetch_calls(
                 .data
                 .iter()
                 .take(limit)
-                .map(|c| CallHierarchyOutput::from_item(c, root))
+                .map(|c| match incoming {
+                    true => CallHierarchyOutput::caller(c, root),
+                    false => CallHierarchyOutput::callee(c, root),
+                })
                 .collect();
             let file_rel = file
                 .strip_prefix(root)
@@ -605,7 +608,7 @@ async fn fetch_tests(
     .map(|(test, reference)| TestOutput {
         name: test.name_path.clone().unwrap_or_else(|| test.name.clone()),
         location: LocationOutput::from_location(&test.location, root),
-        call_site: LocationOutput::from_location(reference, root),
+        call_site: PositionOutput::from_location(reference),
     })
     .collect();
 

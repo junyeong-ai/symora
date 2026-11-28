@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::disclosure::CoverageReason;
-use super::{LocationOutput, Section};
+use super::{LocationOutput, PositionOutput, Section};
 use crate::cli::LocationAnalysis;
 use crate::cli::analysis::Anchor;
 use crate::error::LspError;
@@ -253,7 +253,7 @@ pub struct TestOutput {
     pub name: String,
     #[serde(flatten)]
     pub location: LocationOutput,
-    pub call_site: LocationOutput,
+    pub call_site: PositionOutput,
 }
 
 #[derive(Debug, Serialize)]
