@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::OptionalExtension;
@@ -414,6 +415,9 @@ pub struct Store {
     /// error, or a caller that stopped awaiting it — perhaps leaving work on
     /// the connection.
     unfinished: AtomicBool,
+    /// The upkeep queued after builds that ran under their caller's budget
+    /// and that has not run yet ([`Store::settle_storage`]).
+    deferrable_upkeep: Arc<AtomicUsize>,
 }
 
 /// A build window this handle opened: from the transaction that takes the
@@ -422,7 +426,7 @@ pub struct Store {
 /// owns the index. A build that stops with its window open — an error, or a
 /// caller that stopped awaiting it — may leave work on the connection, so the
 /// lock is let go only once that work has run, and the build counts as
-/// unfinished ([`Store::abandon_unfinished_build`]). Releasing it with the
+/// unfinished ([`Store::abandon_unfinished_work`]). Releasing it with the
 /// caller instead would leave a build writing the index that no process
 /// could see, and another could take the index from under it.
 struct BuildWindow<'a> {
@@ -451,7 +455,10 @@ impl Drop for BuildWindow<'_> {
             return;
         };
         self.store.unfinished.store(true, Ordering::Release);
-        self.store.db.after_queued(move || drop(lock));
+        self.store.db.submit(move |_conn| {
+            drop(lock);
+            Ok(())
+        });
     }
 }
 
@@ -508,18 +515,22 @@ impl Store {
             project_root: project_root.to_path_buf(),
             config,
             unfinished: AtomicBool::new(false),
+            deferrable_upkeep: Arc::new(AtomicUsize::new(0)),
         })
     }
 
-    /// Roll back the work a build of this handle left when it stopped short
-    /// of publishing, rather than finish it, as the store closes. For a
-    /// process about to exit after its search's budget cut the build off:
-    /// the build's last transaction would otherwise hold the exit past that
-    /// budget, and a one-shot run has no later search to serve with it. A
-    /// long-lived process never calls it, so the work completes there and
-    /// its later searches find it.
-    pub fn abandon_unfinished_build(&self) {
-        if self.unfinished.load(Ordering::Acquire) {
+    /// Give up, rather than finish, the work a budgeted build of this handle
+    /// left on the connection, as the store closes: the build it stopped
+    /// short of publishing rolls back, and the upkeep after one that
+    /// published is dropped, as is the checkpoint SQLite runs as the last
+    /// connection closes ([`SqliteDb::abandon`]). For a process about to exit
+    /// after its search: either would hold the exit past the budget the
+    /// answer kept to, and a one-shot run has no later search to serve with
+    /// it. A long-lived process never calls it, so the work completes there.
+    pub fn abandon_unfinished_work(&self) {
+        if self.unfinished.load(Ordering::Acquire)
+            || self.deferrable_upkeep.load(Ordering::Acquire) > 0
+        {
             self.db.abandon();
         }
     }
@@ -1100,10 +1111,17 @@ impl Store {
                 // publication is visible and before the commit returns, which
                 // holds the lock — a build in progress to every reader —
                 // past the publication. The upkeep after the build
-                // checkpoints instead, with the index released.
+                // checkpoints instead, with the index released — or, where a
+                // one-shot exit drops that upkeep, whoever uses the store
+                // next — so the commit syncs the log itself (`FULL`), which
+                // the checkpoint would otherwise have done, and the
+                // publication is durable once it is visible.
                 let threshold: i64 =
                     conn.pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))?;
+                let synchronous: i64 =
+                    conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
                 conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+                conn.pragma_update(None, "synchronous", "FULL")?;
                 let published = (|| -> Result<bool, rusqlite::Error> {
                     let tx =
                         conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1132,7 +1150,9 @@ impl Store {
                     tx.commit()?;
                     Ok(owned)
                 })();
-                let restored = conn.pragma_update(None, "wal_autocheckpoint", threshold);
+                let restored = conn
+                    .pragma_update(None, "wal_autocheckpoint", threshold)
+                    .and(conn.pragma_update(None, "synchronous", synchronous));
                 let owned = published?;
                 restored?;
                 Ok(owned)
@@ -1185,30 +1205,43 @@ impl Store {
     }
 
     pub async fn checkpoint(&self) -> Result<(), StoreError> {
-        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE);").await
+        self.db.execute(CHECKPOINT).await
     }
 
-    /// Hand the pages a build freed back to the filesystem. A build rewrites
-    /// the rows it deleted, and the pages in between are the store's to
-    /// return: kept, they would leave the index's size a record of how often
-    /// it was rebuilt rather than of what it holds, and the disk a rebuild
-    /// borrowed would never come back. The operation that rewrites the index
-    /// is the one that settles its storage — a per-file refresh leaves its
-    /// pages for the next build, which pays the relocation once instead of on
-    /// every edit.
-    ///
-    /// Stepped to exhaustion, because the pragma yields a row per page it
-    /// moves: run as a plain statement it gives back one page and leaves the
-    /// rest, which is the shape of a build that reclaims nothing at all.
-    async fn reclaim_free_pages(&self) -> Result<(), StoreError> {
-        self.db
-            .call(|conn| {
-                let mut reclaim = conn.prepare("PRAGMA incremental_vacuum")?;
-                let mut pages = reclaim.query([])?;
-                while pages.next()?.is_some() {}
-                Ok(())
-            })
-            .await
+    /// Queue the upkeep after a build that published: hand back the pages it
+    /// freed and checkpoint the log it left. Nothing awaits it: it changes no
+    /// row and no answer needs it, so a build answers at publication, and a
+    /// search whose own build publishes within its budget answers from the
+    /// index. The upkeep after a build that ran under its caller's budget is
+    /// deferrable — a one-shot exit drops it ([`Self::abandon_unfinished_work`])
+    /// — and waits on no other connection, since a wait for a lock is the one
+    /// part of it an interrupt cannot cut short: what it cannot do at once is
+    /// left as a dropped upkeep leaves it. One after a build with no budget
+    /// waits as any write does and runs before the store closes. What a
+    /// dropped upkeep leaves is done later: SQLite checkpoints the log in the
+    /// next commit that leaves it past its threshold, or as the next
+    /// connection to close the store closes it last, and the next build's
+    /// upkeep hands back the pages.
+    fn settle_storage(&self) {
+        let deferrable = crate::infra::deadline::current().is_some();
+        let pending = Arc::clone(&self.deferrable_upkeep);
+        if deferrable {
+            pending.fetch_add(1, Ordering::AcqRel);
+        }
+        self.db.submit(move |conn| {
+            let settle = |conn: &mut rusqlite::Connection| {
+                reclaim_free_pages(conn).and_then(|()| conn.execute_batch(CHECKPOINT))
+            };
+            if !deferrable {
+                return settle(conn);
+            }
+            let settled = conn
+                .busy_timeout(std::time::Duration::ZERO)
+                .and_then(|()| settle(conn));
+            pending.fetch_sub(1, Ordering::AcqRel);
+            let restored = conn.busy_timeout(super::db::BUSY_TIMEOUT);
+            settled.and(restored)
+        });
     }
 
     /// The index's scope, row counts, and size, read in one transaction so
@@ -1281,8 +1314,7 @@ impl Store {
         // a lock held through them reads as a build in progress to every
         // search that waited for this one — which would then qualify the
         // answer just published as the snapshot before it.
-        let _ = self.reclaim_free_pages().await;
-        let _ = self.checkpoint().await;
+        self.settle_storage();
         self.stats().await
     }
 
@@ -1704,6 +1736,27 @@ fn now_unix() -> u64 {
 /// ([`Store::build_in_progress`]).
 fn index_owned(lock_path: &Path) -> bool {
     FileLock::shared(lock_path).is_ok_and(|holder| holder.is_none())
+}
+
+/// Copy the log into the database file and empty it.
+const CHECKPOINT: &str = "PRAGMA wal_checkpoint(TRUNCATE);";
+
+/// Hand the pages a build freed back to the filesystem. A build rewrites the
+/// rows it deleted, and the pages in between are the store's to return: kept,
+/// they would leave the index's size a record of how often it was rebuilt
+/// rather than of what it holds, and the disk a rebuild borrowed would never
+/// come back. The operation that rewrites the index is the one that settles
+/// its storage — a per-file refresh leaves its pages for the next build,
+/// which pays the relocation once instead of on every edit.
+///
+/// Stepped to exhaustion, because the pragma yields a row per page it moves:
+/// run as a plain statement it gives back one page and leaves the rest, which
+/// is the shape of a build that reclaims nothing at all.
+fn reclaim_free_pages(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    let mut reclaim = conn.prepare("PRAGMA incremental_vacuum")?;
+    let mut pages = reclaim.query([])?;
+    while pages.next()?.is_some() {}
+    Ok(())
 }
 
 /// Snapshot the indexed `content_hash` of each distinct file backing a
@@ -3075,7 +3128,7 @@ mod tests {
         pin.query_row("SELECT COUNT(*) FROM meta", [], |row| row.get::<_, i64>(0))
             .unwrap();
 
-        let building = tokio::spawn({
+        let mut building = tokio::spawn({
             let store = std::sync::Arc::clone(&store);
             async move { store.index(IndexOptions::default()).await }
         });
@@ -3092,9 +3145,15 @@ mod tests {
             owned_after_publishing |= reader.build_in_progress();
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        let still_in_upkeep = !building.is_finished();
+        // Work queued on the writer now waits behind the upkeep.
+        let still_in_upkeep = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            store.db.call(|_conn| Ok(())),
+        )
+        .await
+        .is_err();
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(2), &mut building).await;
         pin.execute_batch("COMMIT").unwrap();
-        building.await.unwrap().unwrap();
 
         assert!(
             still_in_upkeep,
@@ -3104,6 +3163,106 @@ mod tests {
             !owned_after_publishing,
             "a published build still read as one in progress"
         );
+        answered
+            .expect("the build's answer waited for its upkeep")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// The upkeep after a build that ran under its caller's budget is the
+    /// caller's to drop, and a one-shot exit drops it rather than wait: the
+    /// upkeep is queued behind other work here, stands abandoned with the
+    /// store, and never runs, and the store closes leaving the log as it was
+    /// rather than checkpointing it on the way out. What the log held is
+    /// committed and the next connection reads it. The upkeep after a build
+    /// with no budget is left to run.
+    #[tokio::test]
+    async fn a_one_shot_exit_leaves_a_budgeted_builds_upkeep_to_the_next_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn upkeep_budget_probe() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        store
+            .db
+            .call(|conn| write_meta(conn, "upkeep_probe", "committed"))
+            .await
+            .unwrap();
+
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        store.db.submit(move |_conn| {
+            let _ = released.recv_timeout(std::time::Duration::from_secs(10));
+            Ok(())
+        });
+        crate::infra::deadline::scope(std::time::Duration::from_secs(60), async {
+            store.settle_storage();
+        })
+        .await;
+        store.abandon_unfinished_work();
+        release.send(()).unwrap();
+        let (closed, close) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(store);
+            let _ = closed.send(());
+        });
+        close
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the abandoned store did not close");
+
+        let log = Store::db_path(root).with_extension("db-wal");
+        assert!(
+            std::fs::metadata(&log).is_ok_and(|meta| meta.len() > 0),
+            "the upkeep, or the close, checkpointed the log it was to leave"
+        );
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        let kept = store
+            .db
+            .call(|conn| read_meta(conn, "upkeep_probe"))
+            .await
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some("committed"));
+        assert!(store.build_scope().await.unwrap().is_some());
+
+        store.settle_storage();
+        store.abandon_unfinished_work();
+        assert!(
+            store.db.call(|_conn| Ok(())).await.is_ok(),
+            "the upkeep after a build with no budget was dropped"
+        );
+    }
+
+    /// A deferrable upkeep waits on no other connection's lock — a wait SQLite
+    /// sleeps through, which no interrupt cuts short, so an exit abandoning
+    /// the upkeep would wait it out — and leaves what it cannot take at once
+    /// for later. Another connection holds the write lock here throughout.
+    #[tokio::test]
+    async fn a_deferrable_upkeep_waits_on_no_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn upkeep_lock_probe() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        let writer = rusqlite::Connection::open(Store::db_path(root)).unwrap();
+        writer
+            .execute_batch("BEGIN IMMEDIATE; DELETE FROM unread_paths;")
+            .unwrap();
+
+        crate::infra::deadline::scope(std::time::Duration::from_secs(60), async {
+            store.settle_storage();
+        })
+        .await;
+        let behind = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.db.call(|_conn| Ok(())),
+        )
+        .await;
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(behind.is_ok(), "the upkeep waited for another write");
+        assert_eq!(store.deferrable_upkeep.load(Ordering::Acquire), 0);
     }
 
     /// The commit that publishes a build leaves the log to the upkeep after
@@ -3150,6 +3309,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(threshold, 1, "the connection's own threshold is restored");
+        let synchronous: i64 = store
+            .db
+            .call(|conn| conn.pragma_query_value(None, "synchronous", |r| r.get(0)))
+            .await
+            .unwrap();
+        assert_eq!(
+            synchronous, 1,
+            "the commits after the publication sync as before (NORMAL)"
+        );
 
         store.checkpoint().await.unwrap();
         assert!(

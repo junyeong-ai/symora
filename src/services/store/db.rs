@@ -11,7 +11,8 @@
 //! - dropping `SqliteDb` drains already-submitted work, closes the
 //!   connection, and joins the thread, so the on-disk file is finalized
 //!   before shutdown completes — unless the store was abandoned first, which
-//!   rolls that work back instead (`SqliteDb::abandon`).
+//!   rolls that work back instead and leaves the log uncheckpointed for the
+//!   next connection (`SqliteDb::abandon`).
 
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
@@ -26,7 +27,7 @@ use crate::error::StoreError;
 /// How long a statement waits for another process's write to finish before
 /// reporting contention. The store is shared by a daemon and direct runs,
 /// so contention is ordinary and waiting is the answer.
-const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(super) const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 type Job = Box<dyn FnOnce(&mut rusqlite::Connection) + Send>;
 
@@ -94,7 +95,18 @@ impl SqliteDb {
                 }
 
                 // Channel closed: all submitted work is done. Close the
-                // connection so the file (and its WAL) is finalized.
+                // connection so the file (and its WAL) is finalized — except
+                // on an abandoned store, which leaves the log as it is. The
+                // checkpoint SQLite runs as the last connection closes copies
+                // the log into the file, the work the store was abandoned to
+                // spare; what the log holds is committed, and the next
+                // connection reads it there.
+                if skip.load(Ordering::Acquire) {
+                    let _ = conn.set_db_config(
+                        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                        true,
+                    );
+                }
                 let _ = conn.close();
             })
             .map_err(|e| StoreError::Database(format!("Failed to spawn SQLite thread: {e}")))?;
@@ -121,11 +133,19 @@ impl SqliteDb {
     }
 
     /// Run `f` once the connection has run every job given to it so far,
-    /// without waiting for it. On a store abandoned first it is dropped
-    /// unrun, so whatever it owns is released either way.
-    pub fn after_queued(&self, f: impl FnOnce() + Send + 'static) {
+    /// without waiting for it, and log what it fails with. On a store
+    /// abandoned first it is dropped unrun, so whatever it owns is released
+    /// either way.
+    pub fn submit<F>(&self, f: F)
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> Result<(), rusqlite::Error> + Send + 'static,
+    {
         if let Some(sender) = &self.sender {
-            let _ = sender.send(Box::new(move |_conn: &mut rusqlite::Connection| f()));
+            let _ = sender.send(Box::new(move |conn| {
+                if let Err(e) = guarded(conn, f) {
+                    tracing::debug!("Queued store work failed: {e}");
+                }
+            }));
         }
     }
 
@@ -137,23 +157,7 @@ impl SqliteDb {
         let (tx, rx) = oneshot::channel::<Result<R, StoreError>>();
 
         let job: Job = Box::new(move |conn| {
-            // AssertUnwindSafe: the closure runs exactly once and on panic
-            // any open transaction is rolled back below, so the connection
-            // observes no torn state.
-            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| f(conn)));
-            let result = match outcome {
-                Ok(r) => r.map_err(classify),
-                Err(panic) => {
-                    if !conn.is_autocommit() {
-                        let _ = conn.execute_batch("ROLLBACK");
-                    }
-                    Err(StoreError::Database(format!(
-                        "SQLite closure panicked: {}",
-                        panic_message(&*panic)
-                    )))
-                }
-            };
-            let _ = tx.send(result);
+            let _ = tx.send(guarded(conn, f));
         });
 
         self.sender
@@ -173,6 +177,27 @@ impl SqliteDb {
             Ok(())
         })
         .await
+    }
+}
+
+/// Run one job on the connection. A panicking closure is caught and its open
+/// transaction rolled back, so the connection observes no torn state
+/// (`AssertUnwindSafe`: the closure runs exactly once).
+fn guarded<F, R>(conn: &mut rusqlite::Connection, f: F) -> Result<R, StoreError>
+where
+    F: FnOnce(&mut rusqlite::Connection) -> Result<R, rusqlite::Error>,
+{
+    match std::panic::catch_unwind(AssertUnwindSafe(|| f(conn))) {
+        Ok(r) => r.map_err(classify),
+        Err(panic) => {
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+            Err(StoreError::Database(format!(
+                "SQLite closure panicked: {}",
+                panic_message(&*panic)
+            )))
+        }
     }
 }
 

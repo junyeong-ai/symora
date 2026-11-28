@@ -247,11 +247,12 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<bool> {
         app.report_error(e);
     }
     // One command exits once it has answered, so a build its search's budget
-    // cut off is rolled back rather than finished: finishing it would hold
-    // the exit past the budget the answer kept to. A process that serves
-    // lets the build's work complete for the searches after it.
+    // cut off is rolled back rather than finished, and the upkeep after one
+    // that published is left for later: either would hold the exit past the
+    // budget the answer kept to. A process that serves lets the build's work
+    // complete for the searches after it.
     if !serves {
-        app.abandon_unfinished_build();
+        app.abandon_unfinished_work();
     }
     app.shutdown().await;
 

@@ -126,7 +126,7 @@ impl StoreService for DaemonStoreService {
 
     /// A daemon's build is the daemon's, and runs on past a caller that
     /// leaves.
-    fn abandon_unfinished_build(&self) {}
+    fn abandon_unfinished_work(&self) {}
 
     async fn refresh_files(&self, paths: &[std::path::PathBuf]) -> Result<(), StoreError> {
         self.client

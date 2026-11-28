@@ -81,10 +81,11 @@ pub trait StoreService: Send + Sync {
     /// existence.
     async fn refresh_files(&self, paths: &[PathBuf]) -> Result<(), StoreError>;
 
-    /// Roll back, rather than finish, the work a build stopped short of
-    /// publishing left behind, as a one-shot process exits
-    /// ([`Store::abandon_unfinished_build`]).
-    fn abandon_unfinished_build(&self);
+    /// Give up, rather than finish, the work a budgeted build left behind —
+    /// a build stopped short of publishing, or the upkeep after one that
+    /// published — as a one-shot process exits
+    /// ([`Store::abandon_unfinished_work`]).
+    fn abandon_unfinished_work(&self);
 }
 
 /// In-process store. The SQLite connection is opened on first use so
@@ -215,9 +216,9 @@ impl StoreService for DefaultStoreService {
         self.store().await?.clear().await
     }
 
-    fn abandon_unfinished_build(&self) {
+    fn abandon_unfinished_work(&self) {
         if let Some(store) = self.store.get() {
-            store.abandon_unfinished_build();
+            store.abandon_unfinished_work();
         }
     }
 

@@ -193,10 +193,11 @@ impl App {
         self.lsp.shutdown().await;
     }
 
-    /// For a one-shot command about to exit: roll back the work of a build
-    /// its search's budget cut off, rather than wait past that budget for it.
-    pub fn abandon_unfinished_build(&self) {
-        self.store.abandon_unfinished_build();
+    /// For a one-shot command about to exit: give up the work its search's
+    /// build left — the build the budget cut off, or the upkeep after one
+    /// that published — rather than wait past that budget for it.
+    pub fn abandon_unfinished_work(&self) {
+        self.store.abandon_unfinished_work();
     }
 
     /// Return a clone of `self` with the output sink replaced.
