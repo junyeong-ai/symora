@@ -149,6 +149,11 @@ pub struct UnreadInput {
 }
 
 impl LspError {
+    /// How many variants there are. It lives here, beside the variants,
+    /// because the round-trip test that samples them cannot count them for
+    /// itself: a list it keeps would only ever agree with itself.
+    pub const VARIANTS: usize = 19;
+
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::Timeout(TimedOut {
             message: message.into(),

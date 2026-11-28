@@ -8,8 +8,11 @@ use crate::models::symbol::Language;
 /// of parsing the prose message back out.
 ///
 /// Variants tagged in `kind` so the JSON stays self-describing on the wire.
-/// `Io` and `Json` collapse to `Other` because their inner types aren't
-/// portable across the socket.
+/// Every variant crosses as itself, so a failure maps to the same output
+/// error whichever mode ran it. `Io` and `Json` carry their rendered message,
+/// since the errors they wrap cannot cross the socket: the client rebuilds
+/// each from it, rendering the same and of the same variant, though an
+/// `Io` no longer has its `io::ErrorKind` — nothing past the wire reads it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireLspError {
@@ -70,7 +73,10 @@ pub enum WireLspError {
         path: String,
     },
     ServerNotConsulted,
-    Other {
+    Io {
+        message: String,
+    },
+    Json {
         message: String,
     },
 }
@@ -157,10 +163,10 @@ impl From<&LspError> for WireLspError {
             },
             LspError::FileNotText { path } => Self::FileNotText { path: path.clone() },
             LspError::ServerNotConsulted => Self::ServerNotConsulted,
-            LspError::Io(e) => Self::Other {
+            LspError::Io(e) => Self::Io {
                 message: e.to_string(),
             },
-            LspError::Json(e) => Self::Other {
+            LspError::Json(e) => Self::Json {
                 message: e.to_string(),
             },
         }
@@ -227,7 +233,10 @@ impl From<WireLspError> for LspError {
             },
             WireLspError::FileNotText { path } => LspError::FileNotText { path },
             WireLspError::ServerNotConsulted => LspError::ServerNotConsulted,
-            WireLspError::Other { message } => LspError::Protocol(message),
+            WireLspError::Io { message } => LspError::Io(std::io::Error::other(message)),
+            WireLspError::Json { message } => {
+                LspError::Json(<serde_json::Error as serde::de::Error>::custom(message))
+            }
         }
     }
 }
@@ -376,32 +385,133 @@ mod tests {
         }
     }
 
+    /// Every failure a daemon sends reaches the command as the error a direct
+    /// run meets — the same variant, so whatever reads it by its type reads it
+    /// the same, and the same output error. Carried as a prose `Protocol`, an
+    /// unreadable file reads as an `internal` error and a failed read of the
+    /// file an anchor needs, where a direct run reads an `io` error.
     #[test]
-    fn io_collapses_to_protocol_with_message_preserved() {
-        let recovered = round_trip(LspError::Io(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "child stdin closed",
-        )));
-        match recovered {
-            LspError::Protocol(msg) => assert!(msg.contains("child stdin closed")),
-            other => panic!("expected Protocol, got {other:?}"),
+    fn every_failure_reads_the_same_across_the_wire() {
+        use crate::cli::OutputError;
+        use crate::daemon::DaemonClient;
+        use crate::daemon::protocol::{RequestId, Response, RpcError};
+
+        let variants: Vec<fn() -> LspError> = vec![
+            || LspError::ServerStart("boom".to_string()),
+            || LspError::NotConnected,
+            || LspError::ConnectionLost("find_references".to_string()),
+            || LspError::DaemonReplaced("find_references".to_string()),
+            || LspError::ServerNotInstalled {
+                name: "rust-analyzer".to_string(),
+                searched: vec!["/usr/bin".to_string()],
+                install_hint: "rustup component add rust-analyzer".to_string(),
+            },
+            || LspError::UnsupportedLanguage("Klingon".to_string()),
+            || LspError::FeatureNotSupported {
+                language: Language::Python,
+                server: "pyright".to_string(),
+                feature: "callHierarchy".to_string(),
+                suggestion: "Use refs".to_string(),
+            },
+            || LspError::ServerTerminated {
+                language: Language::Rust,
+                established: true,
+            },
+            || LspError::Indexing {
+                language: Language::Rust,
+            },
+            || {
+                LspError::Timeout(TimedOut {
+                    message: "ran out".to_string(),
+                    unread: Some(UnreadInput {
+                        language: Language::Python,
+                        secs: 61,
+                    }),
+                })
+            },
+            || LspError::RequestCancelled,
+            || LspError::ServerError {
+                code: -32601,
+                message: "Unhandled method textDocument/hover".to_string(),
+            },
+            || LspError::Protocol("Empty response".to_string()),
+            || LspError::UnsupportedEdit("Rename requires a file rename operation".to_string()),
+            || LspError::FileTooLarge {
+                path: "/tmp/big.rs".to_string(),
+                size_mb: 12,
+                limit_mb: 10,
+            },
+            || LspError::FileNotText {
+                path: "/tmp/a.png".to_string(),
+            },
+            || LspError::ServerNotConsulted,
+            || LspError::Io(std::io::Error::from_raw_os_error(13)),
+            || LspError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+        ];
+
+        // The match is exhaustive, so a new variant fails to compile here,
+        // and the count comes from `LspError` rather than from this list.
+        let name = |error: &LspError| match error {
+            LspError::ServerStart(_) => "ServerStart",
+            LspError::NotConnected => "NotConnected",
+            LspError::ConnectionLost(_) => "ConnectionLost",
+            LspError::DaemonReplaced(_) => "DaemonReplaced",
+            LspError::ServerNotInstalled { .. } => "ServerNotInstalled",
+            LspError::UnsupportedLanguage(_) => "UnsupportedLanguage",
+            LspError::FeatureNotSupported { .. } => "FeatureNotSupported",
+            LspError::ServerTerminated { .. } => "ServerTerminated",
+            LspError::Indexing { .. } => "Indexing",
+            LspError::Timeout(_) => "Timeout",
+            LspError::RequestCancelled => "RequestCancelled",
+            LspError::ServerError { .. } => "ServerError",
+            LspError::Protocol(_) => "Protocol",
+            LspError::UnsupportedEdit(_) => "UnsupportedEdit",
+            LspError::FileTooLarge { .. } => "FileTooLarge",
+            LspError::FileNotText { .. } => "FileNotText",
+            LspError::ServerNotConsulted => "ServerNotConsulted",
+            LspError::Io(_) => "Io",
+            LspError::Json(_) => "Json",
+        };
+        let mut sampled = std::collections::HashSet::new();
+        for make in &variants {
+            let sample = name(&make());
+            assert!(sampled.insert(sample), "{sample} is sampled twice");
+        }
+        assert_eq!(
+            sampled.len(),
+            LspError::VARIANTS,
+            "every variant must be sampled: {sampled:?}"
+        );
+
+        for make in variants {
+            let sent = make();
+            let line = serde_json::to_string(&Response::error(
+                RequestId::Number(1),
+                RpcError::from(&sent),
+            ))
+            .unwrap();
+            let received = DaemonClient::extract_result(serde_json::from_str(&line).unwrap())
+                .expect_err("an error response must not read as a result");
+            assert_eq!(
+                name(&received),
+                name(&sent),
+                "{sent:?} arrived as {received:?}"
+            );
+            let (direct, through_daemon) = (OutputError::from(sent), OutputError::from(received));
+            assert_eq!(
+                (direct.code, &direct.message, &direct.hint),
+                (
+                    through_daemon.code,
+                    &through_daemon.message,
+                    &through_daemon.hint
+                ),
+                "the same failure reads differently through the daemon"
+            );
         }
     }
 
-    #[test]
-    fn json_collapses_to_protocol_with_message_preserved() {
-        let json_err: serde_json::Error =
-            serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
-        let recovered = round_trip(LspError::Json(json_err));
-        match recovered {
-            LspError::Protocol(msg) => assert!(!msg.is_empty()),
-            other => panic!("expected Protocol, got {other:?}"),
-        }
-    }
-
-    /// A non-text file reaches the caller as itself rather than collapsing to
-    /// `Other` — which the wire maps back to `Protocol`, and the CLI to an
-    /// internal error — so the daemon and a direct run classify it the same.
+    /// A non-text file reaches the caller as itself, so the daemon and a
+    /// direct run classify it the same.
     #[test]
     fn file_not_text_round_trips_as_itself() {
         let wire = WireLspError::from(&LspError::FileNotText {
@@ -413,9 +523,8 @@ mod tests {
         }
     }
 
-    /// A confined run's refusal must arrive as itself: collapsed to `Other` it
-    /// maps back to a protocol failure, and the daemon would answer a question
-    /// the direct run refused.
+    /// A confined run's refusal must arrive as itself, or the daemon would
+    /// fail where the direct run refused.
     #[test]
     fn server_not_consulted_round_trips_as_itself() {
         let wire = WireLspError::from(&LspError::ServerNotConsulted);
