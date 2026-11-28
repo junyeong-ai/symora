@@ -28,13 +28,18 @@ pub struct CallersArgs {
     pub limit: Option<usize>,
 
     /// Disable fallback to references when call hierarchy unsupported
-    #[arg(long)]
+    #[arg(long, conflicts_with = "from_references")]
     pub no_fallback: bool,
+
+    /// Read callers off the symbol's references, as diff-impact --callers
+    /// does, instead of asking the server's call hierarchy
+    #[arg(long)]
+    pub from_references: bool,
 }
 
 /// Callers output. `callers_status` is present only when callers were
-/// derived from plain references — because the language server lacks call
-/// hierarchy, or because a constructor's constructions, which its server
+/// derived from plain references — because they were asked for
+/// (`--from-references`), because the language server lacks call hierarchy, or because a constructor's constructions, which its server
 /// reports as references to its type, joined the server's list — those are
 /// reference-based callers, a broader approximation rather than verified
 /// call edges, and an agent should read them as such — and `not_callable`
@@ -87,48 +92,52 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
 
     // The references callers were read off that named none.
     let mut outside = OutsideCallables::default();
-    let (mut callers, indexing, mut derived) =
-        match app.lsp.incoming_calls(&anchor.file, line, column).await {
-            Ok(calls) => (calls.data, calls.indexing, false),
-            // A capability gap — declared statically or answered as a runtime
-            // JSON-RPC MethodNotFound — falls back to references-derived
-            // callers; transient errors surface as errors, never as a
-            // silently weaker answer.
-            Err(ref e) if !args.no_fallback && e.is_unsupported() => {
-                // A type's or a value's references are annotations, imports
-                // and reads rather than calls, so none is read as a caller.
-                if let Some(symbol) = anchor.symbol.as_ref().filter(|s| !s.kind.is_callable()) {
-                    let at = format!(
-                        "{}:{}:{}",
-                        ctx.relative_path(&anchor.file),
-                        anchor.line,
-                        anchor.column
-                    );
-                    let mut hints = vec![not_callable_hint(symbol, &at)];
-                    hints.extend(anchor.inbound_hints(ctx.root(), "callers"));
-                    ctx.print_success(CallersOutput {
-                        target: TargetOutput::from_anchor(&anchor, None, ctx.root()),
-                        section: Section::with_total(Vec::new(), 0).with_hints(hints),
-                        callers_status: Some(NOT_CALLABLE),
-                    });
-                    return Ok(());
-                }
-                match fallback_from_refs(app, &anchor.file, line, column).await {
-                    Ok((read, indexing)) => {
-                        outside = read.outside;
-                        (read.callers, indexing, true)
-                    }
-                    Err(e) => {
-                        ctx.print_error(e);
-                        return Ok(());
-                    }
-                }
-            }
-            Err(e) => {
-                ctx.print_error(e);
+    let hierarchy = match args.from_references {
+        true => None,
+        false => Some(app.lsp.incoming_calls(&anchor.file, line, column).await),
+    };
+    let (mut callers, indexing, mut derived) = match hierarchy {
+        Some(Ok(calls)) => (calls.data, calls.indexing, false),
+        // A transient error surfaces as an error, never as a silently
+        // weaker answer.
+        Some(Err(e)) if args.no_fallback || !e.is_unsupported() => {
+            ctx.print_error(e);
+            return Ok(());
+        }
+        // Asked for, or a capability gap — declared statically or
+        // answered as a runtime JSON-RPC MethodNotFound: callers read off
+        // the references.
+        None | Some(Err(_)) => {
+            // A type's or a value's references are annotations, imports
+            // and reads rather than calls, so none is read as a caller.
+            if let Some(symbol) = anchor.symbol.as_ref().filter(|s| !s.kind.is_callable()) {
+                let at = format!(
+                    "{}:{}:{}",
+                    ctx.relative_path(&anchor.file),
+                    anchor.line,
+                    anchor.column
+                );
+                let mut hints = vec![not_callable_hint(symbol, &at)];
+                hints.extend(anchor.inbound_hints(ctx.root(), "callers"));
+                ctx.print_success(CallersOutput {
+                    target: TargetOutput::from_anchor(&anchor, None, ctx.root()),
+                    section: Section::with_total(Vec::new(), 0).with_hints(hints),
+                    callers_status: Some(NOT_CALLABLE),
+                });
                 return Ok(());
             }
-        };
+            match fallback_from_refs(app, &anchor.file, line, column).await {
+                Ok((read, indexing)) => {
+                    outside = read.outside;
+                    (read.callers, indexing, true)
+                }
+                Err(e) => {
+                    ctx.print_error(e);
+                    return Ok(());
+                }
+            }
+        }
+    };
 
     let member = qualifier(app, &anchor.file);
     let mut hints: Vec<String> = member.iter().map(|q| q.hint.clone()).collect();

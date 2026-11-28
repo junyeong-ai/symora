@@ -388,6 +388,12 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "Refuse the references-derived approximation when the server lacks call \
                          hierarchy, returning unsupported instead (default false)",
                     ),
+                    (
+                        "from_references",
+                        "boolean",
+                        "Read callers off the references, as get_diff_impact reads its rows' \
+                         callers, instead of the call hierarchy (default false)",
+                    ),
                 ],
             ),
         )

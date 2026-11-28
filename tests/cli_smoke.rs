@@ -3912,6 +3912,40 @@ fn a_python_constructors_callers_are_its_classs_calls() {
     assert!(lower_bound(&refs["hints"]), "{refs}");
 }
 
+/// Asked to, `callers` reads its callers off the references, as diff-impact
+/// reads its rows' callers, where the server's call hierarchy would answer:
+/// every callable holding one, a use as a value too, marked derived. This
+/// fake's call hierarchy names only calls, so the two answers differ.
+#[cfg(unix)]
+#[test]
+fn callers_read_off_references_on_request_name_every_callable_holding_one() {
+    let uses = "from lib import area\n\n\ndef total():\n    return area(1.0)\n\n\n\
+                def register(table):\n    table.append(area)\n";
+    let lib = "def area(r):\n    return r\n";
+    let Some(dir) = reference_served_repo(&[("lib.py", lib, lib), ("use.py", uses, uses)]) else {
+        return;
+    };
+    let callers = |args: &[&str]| {
+        let page = json_ok(dir.path(), args);
+        let names: Vec<String> = page["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{page}"))
+            .iter()
+            .map(|caller| caller["name"].as_str().unwrap().to_string())
+            .collect();
+        (page, names)
+    };
+
+    let (hierarchy, names) = callers(&["callers", "lib.py:1"]);
+    assert_eq!(names, ["total"], "{hierarchy}");
+    assert!(hierarchy.get("callers_status").is_none(), "{hierarchy}");
+
+    let (derived, mut names) = callers(&["callers", "--from-references", "lib.py:1"]);
+    names.sort();
+    assert_eq!(names, ["register", "total"], "{derived}");
+    assert_eq!(derived["callers_status"], "references_derived", "{derived}");
+}
+
 /// A diff's changed symbols are read through the same reader every other
 /// surface uses, so a language with no server still reports WHAT changed.
 /// Reference counts stay absent and say so — a count no server can supply is

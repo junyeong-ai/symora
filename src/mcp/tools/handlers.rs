@@ -465,7 +465,7 @@ struct CallHierarchyInput {
     limit: Option<usize>,
 }
 
-/// `find_callers` carries `no_fallback`, so — like `find_callees` with its
+/// `find_callers` carries `no_fallback` and `from_references`, so — like `find_callees` with its
 /// `depth` — it has its own input rather than the shared `CallHierarchyInput`,
 /// which would leak the flag to `find_implementations` (a tool with no
 /// references fallback to opt out of).
@@ -479,6 +479,10 @@ struct FindCallersInput {
     /// CLI default.
     #[serde(default)]
     no_fallback: bool,
+    /// Read callers off the references instead of the call hierarchy, as
+    /// `get_diff_impact` reads its rows' callers. Omitted defaults to false.
+    #[serde(default)]
+    from_references: bool,
 }
 
 async fn run_find_callers(args: Value, app: &App) -> Result<CapturedOutput> {
@@ -489,6 +493,7 @@ async fn run_find_callers(args: Value, app: &App) -> Result<CapturedOutput> {
                 loc: input.loc.into_arg(),
                 limit: input.limit,
                 no_fallback: input.no_fallback,
+                from_references: input.from_references,
             },
             &a,
         )
@@ -922,7 +927,14 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
         "list_file_symbols" => &["file", "depth", "body", "signature", "refs"],
         "find_definition" | "get_hover" => &["file", "line", "column"],
         "find_references" => &["file", "line", "column", "snippet", "limit"],
-        "find_callers" => &["file", "line", "column", "limit", "no_fallback"],
+        "find_callers" => &[
+            "file",
+            "line",
+            "column",
+            "limit",
+            "no_fallback",
+            "from_references",
+        ],
         "find_implementations" => &["file", "line", "column", "limit"],
         "find_callees" => &["file", "line", "column", "limit", "depth"],
         "find_call_path" => &["file", "line", "column", "to", "depth"],
