@@ -109,9 +109,8 @@ pub struct DiffImpactOutput {
     /// ones, so the lines the diff names are not the lines on disk, or
     /// `--max-symbols` refused one of their rows or stopped before reading
     /// them. What was not measured is absent from `changes`, so the result is
-    /// a lower bound for these files. `hints` names the documentation,
-    /// binary, staged and cap causes; a file listed without one is a link or
-    /// one whose symbols could not be read. Omitted when empty.
+    /// a lower bound for these files. A hint names each file's cause.
+    /// Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unmeasured_files: Vec<String>,
     /// `--max-symbols` stopped the analysis: the added and modified symbols,
@@ -309,7 +308,14 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         ));
         unmeasured.extend(binary);
     }
-    unmeasured.extend(links);
+    let links: BTreeSet<PathBuf> = links.into_iter().collect();
+    if !links.is_empty() {
+        hints.push(format!(
+            "Symbolic links hold the path they point to rather than source: {}.",
+            displayed(&links, root)
+        ));
+        unmeasured.extend(links);
+    }
 
     let documents: BTreeSet<PathBuf> = hunks
         .iter()
@@ -381,7 +387,8 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         args.max_symbols,
     )
     .await;
-    unmeasured.extend(unreadable);
+    hints.extend(unread_hints(&unreadable, root));
+    unmeasured.extend(unreadable.into_iter().map(|(file, _)| file));
     let capped = !unfinished.is_empty();
     if capped {
         // The cause of `incomplete` leads the hints.
@@ -489,6 +496,76 @@ fn qualify_member_rows(app: &App, changes: &mut [ChangedSymbolImpact]) -> Option
         }
     }
     members.summary_hint(&qualified)
+}
+
+/// Why the analysis could not read the declarations of a changed file's
+/// lines, each the cause of a hint that names the file.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Unread {
+    /// symora recognizes no language in the file's name, so nothing reads
+    /// its lines as declarations.
+    NoLanguage,
+    /// No grammar compiled into symora reads the file's language, which is
+    /// what removed lines are read by.
+    NoGrammar,
+    /// A version of the file the grammar reads is not text.
+    NotText,
+    /// No reader answered for the lines the diff wrote: no grammar reads
+    /// the file and its language server failed, in these words.
+    Failed(String),
+}
+
+impl Unread {
+    /// Why a version of `file` the grammar was to read could not be: its
+    /// name, or else its content.
+    fn of_version(file: &Path) -> Self {
+        match Language::from_path(file) {
+            Language::Unknown => Self::NoLanguage,
+            language if !SymbolExtractor::is_supported(language) => Self::NoGrammar,
+            _ => Self::NotText,
+        }
+    }
+
+    /// Why nothing read the declarations of the lines the diff wrote in
+    /// `file`, where its language server answered `error`.
+    fn of_lines(file: &Path, error: &crate::error::LspError) -> Self {
+        match Language::from_path(file) {
+            Language::Unknown => Self::NoLanguage,
+            _ => Self::Failed(error.to_string()),
+        }
+    }
+
+    fn hint(&self, files: &str) -> String {
+        match self {
+            Self::NoLanguage => format!(
+                "symora reads no language in {files}, so none of their lines was read as a \
+                 declaration; read their diff for what changed."
+            ),
+            Self::NoGrammar => format!(
+                "No grammar compiled into symora reads {files}, so which declarations the diff \
+                 removed there is unknown; read their diff for what changed."
+            ),
+            Self::NotText => format!(
+                "A version of {files} is not text, so the grammar read no declarations from it."
+            ),
+            Self::Failed(error) => format!("Nothing read the declarations of {files}: {error}"),
+        }
+    }
+}
+
+/// A hint per cause, naming the files it left unmeasured.
+fn unread_hints(unread: &[(PathBuf, Unread)], root: &Path) -> Vec<String> {
+    let mut by_cause: BTreeMap<&Unread, Vec<String>> = BTreeMap::new();
+    for (file, cause) in unread {
+        by_cause
+            .entry(cause)
+            .or_default()
+            .push(relative_display(file, root));
+    }
+    by_cause
+        .into_iter()
+        .map(|(cause, files)| cause.hint(&name_some(&files)))
+        .collect()
 }
 
 /// How many rows carry each status, the rows without one left out.
@@ -688,7 +765,9 @@ fn surplus(
 /// lines could not be assigned.
 struct HunkAnalysis {
     changes: Vec<ChangedSymbolImpact>,
-    unmeasured: Vec<PathBuf>,
+    /// The files whose lines' declarations could not be read, each once,
+    /// with why.
+    unmeasured: Vec<(PathBuf, Unread)>,
     /// The files the cap left work undone in, in path order: those it
     /// refused a row of and those it stopped before reading.
     unfinished: Vec<PathBuf>,
@@ -715,7 +794,7 @@ enum Row {
 struct Plan {
     rows: Vec<Row>,
     answers: Vec<FileSymbols>,
-    unmeasured: Vec<PathBuf>,
+    unmeasured: Vec<(PathBuf, Unread)>,
     max_symbols: usize,
     /// The rows whose references are to be asked.
     live: usize,
@@ -731,6 +810,14 @@ struct Plan {
 }
 
 impl Plan {
+    /// Records a file whose lines' declarations could not be read, under
+    /// the first cause found for it.
+    fn unmeasure(&mut self, file: &Path, cause: Unread) {
+        if !self.unmeasured.iter().any(|(listed, _)| listed == file) {
+            self.unmeasured.push((file.to_path_buf(), cause));
+        }
+    }
+
     /// Whether the cap leaves no room for another symbol whose references
     /// are counted.
     fn full(&self) -> bool {
@@ -978,18 +1065,19 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
         } else {
             None
         };
-        let served = if file_exists {
-            declared_in(app, file, FindSymbolsOptions::default())
-                .await
-                .ok()
-                .map(|read| {
-                    answers.push(read);
-                    answers.len() - 1
-                })
-        } else {
-            None
+        let served = match file_exists {
+            true => Some(
+                declared_in(app, file, FindSymbolsOptions::default())
+                    .await
+                    .map(|read| {
+                        answers.push(read);
+                        answers.len() - 1
+                    }),
+            ),
+            false => None,
         };
-        let declarations: Option<(usize, &[Symbol])> = served.and_then(|answer| {
+        let declarations: Option<(usize, &[Symbol])> = served.as_ref().and_then(|served| {
+            let answer = *served.as_ref().ok()?;
             let read = &answers[answer];
             if read.backend == SymbolBackend::Ast {
                 on_disk.as_ref().map(|now| (answer, now.members.as_slice()))
@@ -1025,7 +1113,7 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
         let sides = match &preimage {
             None => Sides::NoneRemoved,
             Some(Preimage::Unparsed) => {
-                analysis.unmeasured.push(file.clone());
+                analysis.unmeasure(file, Unread::of_version(&removing[0].old_file));
                 Sides::Unread
             }
             Some(Preimage::Unavailable) => {
@@ -1042,7 +1130,7 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                 // Neither a removed declaration nor a written one can be
                 // checked against a version nothing read.
                 None => {
-                    analysis.unmeasured.push(file.clone());
+                    analysis.unmeasure(file, Unread::of_version(file));
                     Sides::Unread
                 }
                 Some(after) => {
@@ -1082,7 +1170,11 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
             // unmeasured file (a lower bound) instead of silently dropping
             // its changes.
             if file_exists && !writing.is_empty() {
-                analysis.unmeasured.push(file.clone());
+                let cause = match &served {
+                    Some(Err(error)) => Unread::of_lines(file, error),
+                    _ => Unread::of_version(file),
+                };
+                analysis.unmeasure(file, cause);
             }
             continue;
         };

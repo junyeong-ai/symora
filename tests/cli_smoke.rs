@@ -4163,6 +4163,91 @@ fn two_files_whose_names_render_alike_are_each_unmeasured() {
     );
 }
 
+/// A changed file is a row or an unmeasured file whose cause a hint names,
+/// never neither, whatever kept it from being measured: documentation, a
+/// binary file, a symbolic link, a file in no language symora reads, removed
+/// lines no grammar reads, added lines nothing read, a base that is not
+/// text, and with `--staged` unstaged edits over the staged lines.
+#[cfg(unix)]
+#[test]
+fn every_unmeasured_file_has_a_hint_naming_its_cause() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let write = |name: &str, content: &[u8]| std::fs::write(repo.join(name), content).unwrap();
+    write("code.py", b"def keep():\n    return 1\n");
+    write("later.py", b"def other():\n    return 1\n");
+    write("README.md", b"# one\n");
+    write("blob.dat", b"\0one");
+    write("Justfile", b"build:\n\tcargo build\n");
+    write("lib.ex", b"defmodule M do\n  def gone, do: 2\nend\n");
+    write("latin.py", b"NAME = \"caf\xe9\"\n");
+    std::os::unix::fs::symlink("code.py", repo.join("link.py")).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    write("code.py", b"def keep():\n    return 2\n");
+    write("later.py", b"def other():\n    return 2\n");
+    write("README.md", b"# two\n");
+    write("blob.dat", b"\0two");
+    write("Justfile", b"build:\n\tcargo build --release\n");
+    write("lib.ex", b"defmodule M do\n  def kept, do: 3\nend\n");
+    write("added.ex", b"defmodule N do\nend\n");
+    write("latin.py", b"def name():\n    return 1\n");
+    std::fs::remove_file(repo.join("link.py")).unwrap();
+    std::os::unix::fs::symlink("later.py", repo.join("link.py")).unwrap();
+    git(repo, &["add", "-A"]);
+
+    let disclosed = |page: &serde_json::Value, staged: bool| {
+        let mut args = vec!["diff", "--name-only", "--no-renames", "HEAD"];
+        if staged {
+            args.insert(2, "--cached");
+        }
+        let out = Command::new("git")
+            .args(&args)
+            .current_dir(repo)
+            .output()
+            .expect("git");
+        let changed = String::from_utf8(out.stdout).unwrap();
+        let rows: Vec<&str> = page["changes"]["items"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .filter_map(|row| row["file"].as_str())
+            .collect();
+        let unmeasured: Vec<&str> = page["unmeasured_files"]
+            .as_array()
+            .map(|files| files.iter().filter_map(|file| file.as_str()).collect())
+            .unwrap_or_default();
+        let hints: Vec<&str> = page["hints"]
+            .as_array()
+            .map(|hints| hints.iter().filter_map(|hint| hint.as_str()).collect())
+            .unwrap_or_default();
+        for file in changed.lines() {
+            if rows.contains(&file) {
+                continue;
+            }
+            assert!(
+                unmeasured.contains(&file),
+                "{file} is neither a row nor unmeasured: {page}"
+            );
+            assert!(
+                hints.iter().any(|hint| hint.contains(file)),
+                "no hint names {file}'s cause: {page}"
+            );
+        }
+        unmeasured.len()
+    };
+
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
+    assert_eq!(disclosed(&page, false), 7, "{page}");
+
+    write("later.py", b"def other():\n    return 3\n");
+    let page = json_ok(repo, &["--deterministic", "diff-impact", "--staged"]);
+    assert_eq!(disclosed(&page, true), 8, "{page}");
+}
+
 /// Removed lines are read by the grammar compiled into symora. In a language
 /// without one, what they declared is unknown, so the file is listed as
 /// unmeasured rather than reported as having lost no declaration.
