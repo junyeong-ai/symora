@@ -4264,7 +4264,10 @@ fn two_files_whose_names_render_alike_are_each_unmeasured() {
 /// never neither, whatever kept it from being measured: documentation, a
 /// binary file, a symbolic link, a file in no language symora reads, removed
 /// lines no grammar reads, added lines nothing read, a base that is not
-/// text, and with `--staged` unstaged edits over the staged lines.
+/// text, changes outside every declaration (a comment, blank lines, a
+/// module docstring) that give no row, and with `--staged` unstaged edits
+/// over the staged lines. An import only removed is a deletion row instead,
+/// and a file with a row of its own is not also unmeasured for a comment.
 #[cfg(unix)]
 #[test]
 fn every_unmeasured_file_has_a_hint_naming_its_cause() {
@@ -4281,9 +4284,37 @@ fn every_unmeasured_file_has_a_hint_naming_its_cause() {
     write("Justfile", b"build:\n\tcargo build\n");
     write("lib.ex", b"defmodule M do\n  def gone, do: 2\nend\n");
     write("latin.py", b"NAME = \"caf\xe9\"\n");
+    let module =
+        "\"\"\"Module.\"\"\"\nimport os\n\n\ndef a():\n    return 1\n\n\ndef b():\n    return 2\n";
+    let outside = [
+        ("commented.py", module.replace("def b", "# note\ndef b")),
+        ("spaced.py", module.replace("def b", "\n\ndef b")),
+        ("documented.py", module.replace("Module.", "The module.")),
+    ];
+    for (name, _) in &outside {
+        write(name, module.as_bytes());
+    }
+    write("unimported.py", module.as_bytes());
+    write("beside.py", module.as_bytes());
     std::os::unix::fs::symlink("code.py", repo.join("link.py")).unwrap();
     git(repo, &["add", "-A"]);
     git(repo, &["commit", "-qm", "one"]);
+    for (name, changed) in &outside {
+        write(name, changed.as_bytes());
+    }
+    write(
+        "unimported.py",
+        module.replace("import os\n", "").as_bytes(),
+    );
+    // A row of its own makes a file disclosed: the comment beside it does
+    // not list it as unmeasured too.
+    write(
+        "beside.py",
+        module
+            .replace("def b", "# note\ndef b")
+            .replace("return 1", "return 10")
+            .as_bytes(),
+    );
     write("code.py", b"def keep():\n    return 2\n");
     write("later.py", b"def other():\n    return 2\n");
     write("README.md", b"# two\n");
@@ -4338,11 +4369,29 @@ fn every_unmeasured_file_has_a_hint_naming_its_cause() {
     };
 
     let page = json_ok(repo, &["--deterministic", "diff-impact"]);
-    assert_eq!(disclosed(&page, false), 7, "{page}");
+    assert_eq!(disclosed(&page, false), 10, "{page}");
+    let outside_hint = page["hints"]
+        .as_array()
+        .expect("hints")
+        .iter()
+        .filter_map(|hint| hint.as_str())
+        .find(|hint| hint.starts_with("The changes to "))
+        .unwrap_or_else(|| panic!("no hint for changes outside declarations: {page}"));
+    for (name, _) in &outside {
+        assert!(outside_hint.contains(name), "{name}: {page}");
+    }
+    assert!(
+        page["changes"]["items"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .any(|row| row["file"] == "unimported.py" && row["deletion"] == "no_symbol_in_range"),
+        "{page}"
+    );
 
     write("later.py", b"def other():\n    return 3\n");
     let page = json_ok(repo, &["--deterministic", "diff-impact", "--staged"]);
-    assert_eq!(disclosed(&page, true), 8, "{page}");
+    assert_eq!(disclosed(&page, true), 11, "{page}");
 }
 
 /// Removed lines are read by the grammar compiled into symora. In a language

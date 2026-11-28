@@ -106,9 +106,11 @@ pub struct DiffImpactOutput {
     /// headings are not read as symbols, they are symbolic links, whose
     /// lines are a path rather than source, git reports them as binary and
     /// names no lines, with `--staged` unstaged edits sit over the staged
-    /// ones, so the lines the diff names are not the lines on disk, or
-    /// `--max-symbols` refused one of their rows or stopped before reading
-    /// them. What was not measured is absent from `changes`, so the result is
+    /// ones, so the lines the diff names are not the lines on disk, their
+    /// changes lie outside every declaration (a comment, a docstring, an
+    /// import, a module-level statement) and gave no row, or `--max-symbols`
+    /// refused one of their rows or stopped before reading them. What was
+    /// not measured is absent from `changes`, so the result is
     /// a lower bound for these files. A hint names each file's cause.
     /// Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -387,7 +389,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         args.max_symbols,
     )
     .await;
-    hints.extend(unread_hints(&unreadable, root));
+    hints.extend(unmeasured_hints(&unreadable, root));
     unmeasured.extend(unreadable.into_iter().map(|(file, _)| file));
     let capped = !unfinished.is_empty();
     if capped {
@@ -498,10 +500,10 @@ fn qualify_member_rows(app: &App, changes: &mut [ChangedSymbolImpact]) -> Option
     members.summary_hint(&qualified)
 }
 
-/// Why the analysis could not read the declarations of a changed file's
-/// lines, each the cause of a hint that names the file.
+/// Why the analysis did not measure a changed file's lines, each the cause
+/// of a hint that names the file.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Unread {
+enum Unmeasured {
     /// symora recognizes no language in the file's name, so nothing reads
     /// its lines as declarations.
     NoLanguage,
@@ -513,9 +515,16 @@ enum Unread {
     /// No reader answered for the lines the diff wrote: no grammar reads
     /// the file and its language server failed, in these words.
     Failed(String),
+    /// The file's changes gave no row: the lines its hunks wrote lie outside
+    /// every declaration its symbols list, and the lines they replaced held
+    /// none either (a comment, a blank line, a docstring, an import or a
+    /// statement at module level). A row stands for a declaration and its
+    /// references, so there is none to give them; lines only removed are a
+    /// `no_symbol_in_range` deletion instead, read from the base.
+    OutsideDeclarations,
 }
 
-impl Unread {
+impl Unmeasured {
     /// Why a version of `file` the grammar was to read could not be: its
     /// name, or else its content.
     fn of_version(file: &Path) -> Self {
@@ -549,13 +558,18 @@ impl Unread {
                 "A version of {files} is not text, so the grammar read no declarations from it."
             ),
             Self::Failed(error) => format!("Nothing read the declarations of {files}: {error}"),
+            Self::OutsideDeclarations => format!(
+                "The changes to {files} lie outside every declaration listed there (a comment, \
+                 a docstring, an import or a statement at module level, for instance), so no \
+                 row stands for them; read their diff for what changed."
+            ),
         }
     }
 }
 
 /// A hint per cause, naming the files it left unmeasured.
-fn unread_hints(unread: &[(PathBuf, Unread)], root: &Path) -> Vec<String> {
-    let mut by_cause: BTreeMap<&Unread, Vec<String>> = BTreeMap::new();
+fn unmeasured_hints(unread: &[(PathBuf, Unmeasured)], root: &Path) -> Vec<String> {
+    let mut by_cause: BTreeMap<&Unmeasured, Vec<String>> = BTreeMap::new();
     for (file, cause) in unread {
         by_cause
             .entry(cause)
@@ -767,7 +781,7 @@ struct HunkAnalysis {
     changes: Vec<ChangedSymbolImpact>,
     /// The files whose lines' declarations could not be read, each once,
     /// with why.
-    unmeasured: Vec<(PathBuf, Unread)>,
+    unmeasured: Vec<(PathBuf, Unmeasured)>,
     /// The files the cap left work undone in, in path order: those it
     /// refused a row of and those it stopped before reading.
     unfinished: Vec<PathBuf>,
@@ -794,7 +808,7 @@ enum Row {
 struct Plan {
     rows: Vec<Row>,
     answers: Vec<FileSymbols>,
-    unmeasured: Vec<(PathBuf, Unread)>,
+    unmeasured: Vec<(PathBuf, Unmeasured)>,
     max_symbols: usize,
     /// The rows whose references are to be asked.
     live: usize,
@@ -812,7 +826,7 @@ struct Plan {
 impl Plan {
     /// Records a file whose lines' declarations could not be read, under
     /// the first cause found for it.
-    fn unmeasure(&mut self, file: &Path, cause: Unread) {
+    fn unmeasure(&mut self, file: &Path, cause: Unmeasured) {
         if !self.unmeasured.iter().any(|(listed, _)| listed == file) {
             self.unmeasured.push((file.to_path_buf(), cause));
         }
@@ -1056,6 +1070,7 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
             break;
         }
         analysis.planning = Some(file.clone());
+        let rows_before = analysis.rows.len();
 
         // Current-tree symbols, loaded once when the file survives — needed both
         // for live (Added/Modified) hunks and to recognise a deletion that only
@@ -1114,10 +1129,13 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
             None => None,
         };
         let mut modified_by_removal: Vec<&Symbol> = Vec::new();
+        // The hunks whose removed lines a row speaks for: a declaration they
+        // held, one holding them, or a deletion no declaration was read in.
+        let mut answered: Vec<&DiffHunk> = Vec::new();
         let sides = match &preimage {
             None => Sides::NoneRemoved,
             Some(Preimage::Unparsed) => {
-                analysis.unmeasure(file, Unread::of_version(&removing[0].old_file));
+                analysis.unmeasure(file, Unmeasured::of_version(&removing[0].old_file));
                 Sides::Unread
             }
             Some(Preimage::Unavailable) => {
@@ -1128,13 +1146,14 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                         root,
                     ));
                 }
+                answered.extend(&removing);
                 Sides::Unread
             }
             Some(Preimage::Parsed(before)) => match after {
                 // Neither a removed declaration nor a written one can be
                 // checked against a version nothing read.
                 None => {
-                    analysis.unmeasure(file, Unread::of_version(file));
+                    analysis.unmeasure(file, Unmeasured::of_version(file));
                     Sides::Unread
                 }
                 Some(after) => {
@@ -1161,6 +1180,9 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                                 root,
                             ));
                         }
+                        if !declared.is_empty() || !enclosing.is_empty() {
+                            answered.push(hunk);
+                        }
                         modified_by_removal.extend(enclosing);
                     }
                     Sides::Compared { after, added }
@@ -1175,24 +1197,37 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
             // its changes.
             if file_exists && !writing.is_empty() {
                 let cause = match &served {
-                    Some(Err(error)) => Unread::of_lines(file, error),
-                    _ => Unread::of_version(file),
+                    Some(Err(error)) => Unmeasured::of_lines(file, error),
+                    _ => Unmeasured::of_version(file),
                 };
                 analysis.unmeasure(file, cause);
             }
             continue;
         };
-        let owners = modified_by_removal
-            .into_iter()
-            .chain(writing.iter().flat_map(|&hunk| {
+        let written: Vec<(&DiffHunk, Vec<&Symbol>)> = writing
+            .iter()
+            .map(|&hunk| {
                 let removed_a_declaration = match &preimage {
                     Some(Preimage::Parsed(before)) => {
                         declared_in_removed(before, hunk).next().is_some()
                     }
                     _ => false,
                 };
-                added_lines_owners(symbols, headers_now, hunk, removed_a_declaration)
-            }));
+                let owners = added_lines_owners(symbols, headers_now, hunk, removed_a_declaration);
+                (hunk, owners)
+            })
+            .collect();
+        // A hunk that wrote lines no declaration holds, and removed none a
+        // row speaks for, changed nothing a row can stand for: no module
+        // symbol owns a module's own lines.
+        let outside = written.iter().any(|(hunk, owners)| {
+            owners.is_empty() && !answered.iter().any(|row| std::ptr::eq(*row, *hunk))
+        });
+        let owners = modified_by_removal.into_iter().chain(
+            written
+                .iter()
+                .flat_map(|(_, owners)| owners.iter().copied()),
+        );
         for sym in owners {
             if !seen.insert((sym.location.line, sym.location.column)) {
                 continue;
@@ -1214,6 +1249,12 @@ async fn plan_hunks(app: &App, hunks: &[DiffHunk], preimage_ref: &str, max_symbo
                     sym.location.line
                 ));
             }
+        }
+        // A file is a row or an unmeasured file: one whose changes all lie
+        // there gave no row, so it is listed with why. Beside a row, such a
+        // hunk (an import, blank lines) goes unlisted, as most diffs hold one.
+        if outside && analysis.rows.len() == rows_before && !analysis.unfinished.contains(file) {
+            analysis.unmeasure(file, Unmeasured::OutsideDeclarations);
         }
     }
 
