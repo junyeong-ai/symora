@@ -1242,21 +1242,23 @@ impl Store {
                     .unwrap_or_default();
                 let last_indexed = build.as_ref().map(|build| build.completed_at).unwrap_or(0);
                 let unread_paths = build.map(|build| build.unread_paths).unwrap_or_default();
+                // A count the store would not give is a failed status, never a
+                // zero: a zero reads as an index holding nothing.
                 let count_of = |table: &str| {
                     tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
                         r.get::<_, i64>(0)
                     })
-                    .unwrap_or(0) as usize
+                    .map(|count| count as usize)
                 };
                 let pragma = |name: &str| {
                     tx.query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
-                        .unwrap_or(0) as u64
+                        .map(|value| value as u64)
                 };
                 let mut stats = IndexStats {
-                    file_count: count_of("files"),
-                    symbol_count: count_of("symbols"),
-                    content_line_count: count_of("content_lines"),
-                    index_size_bytes: pragma("page_count") * pragma("page_size"),
+                    file_count: count_of("files")?,
+                    symbol_count: count_of("symbols")?,
+                    content_line_count: count_of("content_lines")?,
+                    index_size_bytes: pragma("page_count")? * pragma("page_size")?,
                     last_indexed,
                     is_indexing: false,
                     languages,
@@ -3275,6 +3277,30 @@ mod tests {
             "a build that ended before the counts were read was reported beside them: {status:?}"
         );
         assert!(status.last_indexed > 0);
+    }
+
+    /// A count the store cannot give fails the status rather than reading as
+    /// an index that holds nothing.
+    #[tokio::test]
+    async fn a_count_the_store_cannot_give_fails_the_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn count_probe() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        store
+            .db
+            .execute("ALTER TABLE symbols RENAME TO symbols_elsewhere;")
+            .await
+            .unwrap();
+
+        let status = store.stats().await;
+        assert!(
+            matches!(status, Err(StoreError::Database(_))),
+            "a count that failed was reported: {status:?}"
+        );
     }
 
     /// A build only marks the index whole while it still owns the epoch it
